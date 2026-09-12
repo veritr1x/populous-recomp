@@ -55,7 +55,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld libx11-dev libxext-dev libxrandr-dev \
-            libxcursor-dev libxi-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev libwayland-dev \
             libegl1-mesa-dev libgl1-mesa-dev libasound2-dev libpulse-dev
       - name: Enter the Visual Studio developer environment (Windows)
         if: runner.os == 'Windows'
