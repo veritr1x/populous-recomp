@@ -1540,7 +1540,7 @@ static void test_audio_negative_player_time() {
     play.bits = 16;
     for (uint32_t start : {0u, 2048u}) {
         play.start_offset = start;
-        for (int64_t sample : {-472LL, -1LL, INT64_MIN}) {
+        for (int64_t sample : {int64_t(-472), int64_t(-1), int64_t(INT64_MIN)}) {
             g_fake_sample_time = sample;
             host_audio_play(&play);
             const int plays = g_fake_plays, stops = g_fake_stops;

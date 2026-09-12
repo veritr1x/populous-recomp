@@ -17,6 +17,7 @@
 #else
 #include "ui_frame_contract.h"
 #endif
+#include <string.h>
 #include <algorithm>
 #include <array>
 #include <atomic>

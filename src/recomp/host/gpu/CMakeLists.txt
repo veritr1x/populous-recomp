@@ -57,7 +57,7 @@ endif()
 pop_optimize(gpu_backend 1)
 
 # The contract suite, once per backend. `gpu` is the platform's default
-# backend; `gpu-vulkan` is Vulkan on Apple, which needs MoltenVK installed.
+# backend; `moltenvk` is Vulkan on Apple, which needs MoltenVK installed.
 function(pop_gpu_contract_test target backend label)
   add_executable(${target} tests/gpu_contract_tests.cpp)
   target_link_libraries(${target} PRIVATE gpu_backend)
@@ -70,7 +70,7 @@ function(pop_gpu_contract_test target backend label)
 endfunction()
 if(APPLE)
   pop_gpu_contract_test(gpu_metal_tests metal gpu)
-  pop_gpu_contract_test(gpu_vulkan_tests vulkan gpu-vulkan)
+  pop_gpu_contract_test(gpu_vulkan_tests vulkan moltenvk)
 else()
   pop_gpu_contract_test(gpu_vulkan_tests vulkan gpu)
 endif()

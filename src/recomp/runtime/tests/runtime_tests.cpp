@@ -1734,8 +1734,7 @@ static void test_scheduling(X86 *c) {
         check(g_hostsig_running == 1, "the waiter thread reached its wait");
         check(g_hostsig_result == 0xdeadbeef, "and is still in it");
 
-        pthread_t sig;
-        pthread_create(&sig, nullptr, host_signal_thread, (void *)(uintptr_t)g_hostsig_event);
+        OsThread *sig = os_thread_create(host_signal_thread, (void *)(uintptr_t)g_hostsig_event, 0);
 
         // Poll on wall-clock time, not on a count: 4000 counted polls run out
         // in under a millisecond, long before the host thread has signalled.
@@ -1750,7 +1749,7 @@ static void test_scheduling(X86 *c) {
         }
         double took = wall_seconds() - t0;
         check(code == 0x1234, "the thread finished");
-        pthread_join(sig, nullptr);
+        os_thread_join(sig);
         check(g_hostsig_result == 0,
               "its wait returned WAIT_OBJECT_0, released by the host signal");
         check(took < 2.0,
@@ -1794,13 +1793,12 @@ static void test_scheduling(X86 *c) {
             host_set_idle_waiter(test_idle_waiter);
 
         uint32_t ev = call_import(c, "KERNEL32.dll", "CreateEventA", {0, 0, 0, 0});
-        pthread_t sig;
-        pthread_create(&sig, nullptr, host_signal_thread, (void *)(uintptr_t)ev);
+        OsThread *sig = os_thread_create(host_signal_thread, (void *)(uintptr_t)ev, 0);
 
         double t0 = wall_seconds();
         uint32_t r = call_import(c, "KERNEL32.dll", "WaitForSingleObject", {ev, 5000});
         double took = wall_seconds() - t0;
-        pthread_join(sig, nullptr);
+        os_thread_join(sig);
 
         check(r == 0, "%s: the run thread's wait was satisfied by the host signal",
               with_host ? "with a host waiter" : "with no host waiter");
