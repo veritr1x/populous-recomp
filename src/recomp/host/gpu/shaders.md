@@ -55,3 +55,12 @@ these inputs.
   covers a 32x32 native tile and reduces per SIMD group, lane 0 writing `sums[offset + ...]`.
   A backend without subgroup operations may reduce through shared memory; the output layout is
   what matters.
+
+## Vulkan bindings
+
+The GLSL under `gpu/vulkan/shaders/` maps the slots above onto descriptor set 0: vertex-stage buffer
+slot s → binding s, fragment-stage buffer slot s → binding 4+s, texture slot t → combined image
+sampler binding 8+t; compute kernels use bindings 0..3 for buffers and 8+t for textures. Every
+buffer is a std430 storage buffer; compute local sizes are fixed at 8x8 (readback) and 16x16
+(brightness), the sizes the renderer dispatches with. `tools/recomp/shaders.py compile` regenerates
+`gpu/vulkan/shaders_spv.h`; `shader_drift_check` fails when the header and the sources disagree.
