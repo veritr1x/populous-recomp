@@ -225,8 +225,9 @@ paths resolve against the guest current directory, which starts at
 ## Tests
 
 ```
-src/recomp/runtime/build_tests.sh          # build and run
-src/recomp/runtime/build_tests.sh --no-run # build only
+.venv/bin/python tools/test.py --native          # build and run
+.venv/bin/python tools/test.py --compile-only    # build only
+.venv/bin/ctest --preset macos -R runtime_tests  # one suite
 ```
 
 Run from the repository root. The tests load the real EXE, cross-check the

@@ -1,7 +1,7 @@
 // runtime_tests.cpp - runtime, loader, allocator and Win32 shim tests.
 //
 // Run from the repository root:
-//   src/recomp/runtime/build_tests.sh && build/recomp/runtime_tests
+//   .venv/bin/python tools/test.py --compile-only && build/recomp/runtime_tests
 #include "../imports.h"
 #include "../mods_seam.h"
 #include "../intrinsics.h"

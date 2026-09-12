@@ -16,7 +16,7 @@ buildlock_acquire "$ROOT" "host integration tests" "$ROOT/src/recomp/host/tests/
 PY=${PY:-$ROOT/.venv/bin/python}
 unset POPM_CORE_MODS_DIR POPM_NO_MODS
 "$ROOT/mods/core/tests/roots_tests.sh"
-"$ROOT/mods/core/tests/packaging_tests.sh"
+"$PY" -m unittest "$ROOT/tools/recomp/tests/test_build_core.py"
 
 OUT=build/recomp/integration
 rm -rf "$OUT"

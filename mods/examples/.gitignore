@@ -1,4 +1,4 @@
-# Built in place by build_examples.sh: a mod directory is what the loader
+# Built in place by the example_mods CMake target: a mod directory is what the loader
 # discovers, and these are products of it, not sources.
 *.dylib
 *.dylib.dSYM/

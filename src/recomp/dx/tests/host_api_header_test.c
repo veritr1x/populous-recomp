@@ -3,7 +3,7 @@
  * It is a C header as well as a C++ one: the display interfaces cross into
  * tools and consumers that are not C++, and a bare `extern "C"` or a struct
  * without a typedef is a syntax error there rather than a warning. Compiled as
- * C11 by src/recomp/dx/build_tests.sh, which is the only way to know.
+ * C11 by the host_api_header_test CMake object, which is the only way to know.
  *
  * It names every display type, so a type that stops being C-usable fails here
  * and not in whatever picks it up next. */

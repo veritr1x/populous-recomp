@@ -290,8 +290,9 @@ POPM_AUDIO_TRACE=200 POP_RECOMP_MAX_SECONDS=25 build/recomp/pop_headless
 ## Tests
 
 ```
-src/recomp/dx/build_tests.sh            # build and run
-src/recomp/dx/build_tests.sh --no-run   # build only
+.venv/bin/python tools/test.py --native          # build and run
+.venv/bin/python tools/test.py --compile-only    # build only
+.venv/bin/ctest --preset macos -R dx_tests       # one suite
 ```
 
 Run from the repository root. 4540 checks: vtable integrity, the

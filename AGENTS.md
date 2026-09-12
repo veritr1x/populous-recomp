@@ -11,7 +11,10 @@ translations are private local inputs under ignored original/, analysis/ and bui
 - Edit translation rules, not build/recomp/gen/. Regenerate after changing the translator.
 - Format first-party native source with `.venv/bin/python tools/format.py --write`.
   Preserve vendored code and its notices.
-- Run relevant suites from docs/testing.md. Report exactly which checks ran;
+- Run relevant suites from docs/testing.md; native code builds only through
+  tools/build.py and tools/test.py, never by invoking compilers directly.
+  Platform calls go through src/recomp/platform/os.h; no `#ifdef` on the platform
+  outside os_posix.cpp and os_win32.cpp. Report exactly which checks ran;
   compilation and offscreen counters do not establish playable performance.
 - Do not commit game assets, generated code, binaries, credentials, personal saves
   or run logs. Run `.venv/bin/python tools/check_repo.py` on staged source changes.

@@ -4,7 +4,7 @@
 
 // The CPU state, memory accessors and instruction helpers are owned by the
 // translator. Compile the runtime with -I<repo root> (the first form) or with
-// -I on the directory holding a copy of x86.h, as tools/recomp/build.sh does
+// -I on the directory holding a copy of x86.h, as the recomp_gen target does
 // for the generated sources.
 #if __has_include("tools/recomp/runtime/x86.h")
 #include "tools/recomp/runtime/x86.h"

@@ -41,5 +41,5 @@ invisible to anyone reading upstream's 5.4.6 and would be lost the moment the
 version is bumped. If something genuinely cannot be done from outside, the
 change belongs upstream or in a patch file recorded here with its reason.
 
-Build with `src/recomp/mods/lua/build_lua.sh`, which compiles these into
-`build/recomp/liblua.a` with `-DLUA_USE_MACOSX`.
+Build with the `lua` CMake target (`tools/build.py` does), which compiles these into
+`build/recomp/liblua.a` with `-DLUA_USE_MACOSX` on macOS and `-DLUA_USE_LINUX` on Linux.

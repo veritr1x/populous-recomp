@@ -4,9 +4,9 @@ Three programs run the same recompiled guest:
 
 | program | built by | what it does with a frame |
 | --- | --- | --- |
-| `build/recomp/pop_headless` | `tools/recomp/headless_build.sh` | writes `build/recomp/frames/frame_NNNN.ppm` |
-| `build/PopRecomp.app` | `tools/recomp/app_build.sh`, `make recomp` | draws it in an AppKit window |
-| `build/recomp/pop_smoke` | `tools/recomp/smoke_build.sh`, `make recomp-smoke` | presses buttons from a script and measures what came out |
+| `build/recomp/pop_headless` | `tools/build.py --target headless` | writes `build/recomp/frames/frame_NNNN.ppm` |
+| `build/PopRecomp.app` | `tools/build.py`, `make all` | draws it in an AppKit window |
+| `build/recomp/pop_smoke` | `tools/build.py --target smoke`, `make recomp-smoke` | presses buttons from a script and measures what came out |
 
 All three boot the game from the real PE entry point (`0055d6c0`): CRT startup,
 `WinMain`, registry and configuration, DirectDraw and Direct3D initialisation,
@@ -28,7 +28,7 @@ startup and never runs `WinMain`.
 | `audio.{h,mm}` | `host_audio_play` on AVAudioEngine, and the lock order that keeps it out of a deadlock |
 | `Info.plist` | the app bundle's |
 | `tests/host_tests.mm` | the headless tests |
-| `build_tests.sh` | builds and runs them |
+| CMake targets `host_tests`, `compositor_tests`, `ui_layer_tests` | built by `tools/test.py --compile-only`, run by `--native` |
 
 ## The shared boot
 
@@ -311,9 +311,9 @@ way the framework does.
 ## Tests
 
 ```
-src/recomp/host/build_tests.sh            # build and run
-src/recomp/host/build_tests.sh --no-run   # build only
-make recomp-tests                         # the same thing
+.venv/bin/python tools/test.py --native          # build and run
+.venv/bin/python tools/test.py --compile-only    # build only
+.venv/bin/ctest --preset macos -R host_tests     # one suite
 ```
 
 746 checks: palette and 5-6-5 expansion against a padded pitch, the letterbox

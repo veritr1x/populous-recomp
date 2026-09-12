@@ -1,12 +1,10 @@
 // capture_seam.cpp - the capture harness as the host exposes it to a mod.
 //
 // WHY THIS FILE IS HERE. Page tracking and shim capture are written in
-// src/recomp/native. Every host build script (smoke_build.sh, parity_build.sh,
-// headless_build.sh) globs src/recomp/mods/*.cpp and none of them globs
-// src/recomp/native, and those scripts belong to other tasks and may not be
-// edited from here. Including the two implementations from this one globbed
-// file puts them in every host without touching a build script, which is the
-// arrangement the glob was introduced for. Each is included exactly once in
+// src/recomp/native. The mods CMake target globs src/recomp/mods/*.cpp and
+// nothing globs src/recomp/native. Including the two implementations from this
+// one globbed file puts them in every host, which is the arrangement the glob
+// was introduced for. Each is included exactly once in
 // the process: the mods test binary compiles this file through the same glob,
 // so its test bridge includes only the test files.
 #include "../native/page_track.cpp"

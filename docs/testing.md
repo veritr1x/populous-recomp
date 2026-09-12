@@ -7,10 +7,15 @@ Run checks appropriate to your change. Every suite's output belongs under ignore
 | --- | --- | --- |
 | `tools/test.py` | Setup failures, synthetic texture processing and display-mode tooling | No |
 | `tools/format.py` | Consistent formatting of handwritten native code | No |
-| `tools/test.py --compile-only` | macOS host, runtime and graphics test binaries compile | No |
-| `tools/test.py --native` | Runtime, graphics/audio adapters, offscreen Metal and UI tests | Yes |
+| `tools/test.py --compile-only` | Every native test binary this platform has compiles (macOS, Linux, Windows) | No |
+| `tools/test.py --native` | Portable suites everywhere; runtime, adapters, offscreen Metal and UI tests on macOS | Partly: `game`-labeled suites need the image |
 | `tools/test.py --mods` | Real loader/hooks/settings/native Options and replay contracts | Yes, plus translated archive |
 | `tools/test.py --gameplay` | Menu navigation, mode cycling, selection, movement and clean exit | Yes, plus translated archive |
+
+Native suites are CTest entries with labels: `nogame` runs everywhere and in CI,
+`game` needs your installation, `gpu` needs a Metal device, `mods` needs the
+translated archive and the entity snapshot `tools/test.py --mods` captures. Run
+one directly with `.venv/bin/ctest --preset macos -L nogame` or `-R dx_tests`.
 
 Invoke these with `.venv/bin/python`. The native tests need a macOS Metal device;
 CI compiles them but does not claim GPU or original-game execution. The mod suite
@@ -48,5 +53,6 @@ smoke clock is deterministic test timing and cannot substantiate real-time perfo
 The source snapshot includes fixes exercised through native Options, live
 640×480 → 800×600 → 4K → 640×480 transitions, unit movement and clean exit.
 The initial publication additionally runs the source-only CI checks and local
-native suites from the standalone checkout. Long campaign completion, multiplayer
+native suites built through CMake from the standalone checkout, and the Linux and
+Windows portable-layer suites in CI. Long campaign completion, multiplayer
 and sustained 4K120 remain unverified; publish measurements with their conditions.

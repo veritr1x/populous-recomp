@@ -1,7 +1,7 @@
 // loader_tests.cpp - discovery, resolution and the transactional lifecycle,
 // against real dylibs the loader really dlopens. A loader tested against fakes
 // has never called dlopen, so the fixtures are built by
-// tests/fixtures/build_fixtures.sh and loaded from a tree this suite builds.
+// the mod_fixtures CMake target and loaded from a tree this suite builds.
 #include "mods_tests.h"
 #include "../mods_internal.h"
 #include "../manifest_types.h"

@@ -7,7 +7,13 @@ portable tests and mod examples. Open an issue before a large architecture chang
 ## Prerequisites
 
 - Python 3.9 or later; create `.venv` and install `requirements-dev.txt`.
-- Native builds: Apple Silicon macOS, Xcode Command Line Tools and Git.
+- Native builds on macOS: Apple Silicon, Xcode Command Line Tools and Git. CMake
+  and Ninja come from `requirements-dev.txt`.
+- Portable-layer builds on Linux: clang and lld (`apt-get install clang lld`).
+- Portable-layer builds on Windows: LLVM's clang, a Visual Studio developer
+  command prompt for the Windows SDK, and `tools/build.py --target fixture`
+  or `tools/test.py --compile-only`. Linux and Windows build and test the
+  runtime, adapters and mod foundation only; no game host exists for them yet.
 - First translation: [Ghidra 12.1.3](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.1.3_build).
 - A Java runtime compatible with that Ghidra distribution. The documented setup
   was tested with OpenJDK 26.0.1; set `JAVA_HOME` to the JDK directory.
@@ -58,8 +64,11 @@ translation or its C helpers, regenerate explicitly:
 .venv/bin/python tools/build.py --regenerate --jobs 8
 ```
 
-Use `--target smoke` for the offscreen scripted host or `--target headless` for
-the minimal boot host. Build outputs and your default writable profile stay in
+`--target smoke` builds the offscreen scripted host, `--target headless` the
+minimal boot host, `--target fixture` the parity fixture and `--target plugins`
+every mod plugin. `--preset` and `--config Debug` pick the CMake preset; the
+CMake tree lives in `build/cmake/<preset>` and every artifact keeps its documented
+path under `build/`. Build outputs and your default writable profile stay in
 `build/`. `POPM_PROFILE_DIR` selects a separate profile for an interactive run.
 Keep the app in the checkout; moving it requires explicitly configuring its game path.
 
@@ -68,7 +77,7 @@ Keep the app in the checkout; moving it requires explicitly configuring its game
 ```sh
 .venv/bin/python tools/test.py           # No game files required
 .venv/bin/python tools/format.py         # Check handwritten C/C++/Objective-C
-.venv/bin/python tools/test.py --native  # Runtime, DirectX and Metal tests on macOS
+.venv/bin/python tools/test.py --native  # Runtime, DirectX and Metal tests on macOS; portable suites everywhere
 .venv/bin/python tools/test.py --mods    # Build the app first; real game-backed mod tests
 .venv/bin/python tools/test.py --gameplay # Build the app first; isolated native Options/gameplay run
 ```

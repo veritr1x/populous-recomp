@@ -15,7 +15,8 @@ not included. See [NOTICE](NOTICE) for ownership and dependency credits.
 ## Play on macOS
 
 The current port targets Apple Silicon Macs. Intel macOS, Windows, Linux and iOS
-are not validated game ports. The Python tooling tests also run on Linux.
+are not validated game ports. The runtime, adapter and mod layers compile and
+test on Linux and Windows; a playable host for them is future work.
 
 ```sh
 git clone https://github.com/veritr1x/populous-recomp.git
@@ -63,6 +64,7 @@ the checked-in `.clang-format`; generated code remains a local build product.
 | `mods/examples/` | Small C, Lua and asset-overlay examples |
 | `assets/terrain/` | Project-created material-detail artwork and its provenance |
 | `third_party/lua/` | Unmodified Lua source and upstream license |
+| `CMakeLists.txt`, `cmake/` | The build: targets per directory, presets for macOS, Linux and Windows |
 | `build/recomp/gen/` | Locally generated game functions; edit the translator, not these files |
 
 ## Status
@@ -72,8 +74,8 @@ cycling through 4K, settings persistence, audio playback and clean exit have bee
 exercised locally. A frame limit of 120 FPS is available; sustained **4K at 120 FPS**
 is an optimization target, not a guaranteed performance result.
 
-Long campaign completion, multiplayer and additional operating systems still need
-validation. The HD path supports full-color replacements and material detail;
+Long campaign completion and multiplayer still need validation. Linux and Windows
+hosts do not exist yet; their portable layers are compiled and tested in CI. The HD path supports full-color replacements and material detail;
 enlarging original art does not create a complete newly painted remaster.
 
 GitHub Actions checks contributor tooling, formatting and native host compilation

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Build with CMake presets for macOS, Linux and Windows through the unchanged
+  `tools/build.py` and `tools/test.py`; the xcrun shell scripts are gone.
+- Add a platform layer (`src/recomp/platform/os.h`) so the runtime, adapters
+  and mod foundation compile and pass their portable tests on Linux and Windows.
+- Mod plugins resolve their file extension per platform; a manifest written on
+  macOS loads its `.so` or `.dll` counterpart unchanged.
+- CI compiles and tests the portable layers on macOS, Ubuntu and Windows.
+
 ## 2026-09-12 — Initial native source release
 
 - Publish the macOS native runtime, static translator, Metal renderer and C/Lua

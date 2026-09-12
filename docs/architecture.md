@@ -78,3 +78,7 @@ provenance; change the translator or a reviewed replacement, then regenerate.
 The native app currently targets macOS. `src/core/` contains only shared type
 headers used by the retained tests; it is not a second game engine. Capture/replay
 under `src/recomp/native/` validates prospective native replacements locally.
+
+Platform services (threads, virtual memory, plugins, files, clocks) go through
+`src/recomp/platform/os.h`, with POSIX and Win32 implementations; the build is
+CMake with presets per platform (`CMakePresets.json`).
