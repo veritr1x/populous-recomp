@@ -43,7 +43,10 @@ def compile_flags(cc, name, scratch, env, system=None):
     """Flags for one plugin: reproducible, stripped, position independent, undefined symbols
     left for load time because the API arrives as a pointer rather than by linking."""
     system = system or platform.system()
-    flags = ["-std=c11", "-O1", "-g0", "-Wall", "-Wextra", "-Wno-unused-parameter"]
+    # The staging directory has a random name; nothing about it may reach the
+    # output, so any path the compiler records is rewritten to a fixed one.
+    flags = ["-std=c11", "-O1", "-g0", "-Wall", "-Wextra", "-Wno-unused-parameter",
+             "-ffile-prefix-map=%s=core" % scratch]
     if system != "Windows":
         flags.append("-fPIC") # COFF has no PIC flag; clang rejects it for the MSVC target
     if system == "Darwin":

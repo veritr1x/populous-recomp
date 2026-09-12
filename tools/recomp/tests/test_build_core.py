@@ -73,11 +73,29 @@ class BuildCoreTests(unittest.TestCase):
     def test_two_builds_are_byte_identical(self):
         self.install()
         first = tree_digest(self.dest)
+        kept = self.tmp / "first"
+        shutil.copytree(self.dest, kept)
         for path in self.source.rglob("*.c"):
             st = path.stat()
             os.utime(path, (st.st_atime, st.st_mtime + 10))
         self.install()
-        self.assertEqual(tree_digest(self.dest), first)
+        second = tree_digest(self.dest)
+        if second != first:
+            # Say where the bytes differ, so a platform that cannot be
+            # inspected by hand still explains itself in a log.
+            for name in sorted(set(first) | set(second)):
+                a = (kept / name).read_bytes() if (kept / name).is_file() else b""
+                b = (self.dest / name).read_bytes() if (self.dest / name).is_file() else b""
+                if a == b:
+                    continue
+                offsets = [i for i in range(min(len(a), len(b))) if a[i] != b[i]]
+                print("%s: sizes %d vs %d, %d differing bytes, first at %s" % (
+                    name, len(a), len(b), len(offsets), offsets[:12]))
+                for off in offsets[:3]:
+                    lo = max(0, off - 24)
+                    print("  @%#x first : %r" % (lo, a[lo:off + 24]))
+                    print("  @%#x second: %r" % (lo, b[lo:off + 24]))
+        self.assertEqual(second, first)
 
     def test_cli_refuses_an_install_root_outside_build(self):
         result = subprocess.run([sys.executable, str(ROOT / "tools/recomp/build_core.py"),
