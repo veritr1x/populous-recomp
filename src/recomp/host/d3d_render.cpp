@@ -551,6 +551,32 @@ void mask_shape(uint32_t mask, int *shift, uint32_t *max) {
 
 D3DRenderer *g_shared = nullptr;
 
+// A tile whose rows are uniform and whose colour changes down the rows is a
+// gradient - the sky dome's 16x16 gradient, not a terrain material - and the
+// terrain detail must not be laid over it. Measured on the game's own tiles:
+// the sky's mean horizontal neighbour difference is 2.6 levels against 7.4 or
+// more for every terrain tile, and its vertical difference is nearly three
+// times its horizontal one, where terrain is isotropic. A flat tile (no
+// variation at all) is not a gradient.
+bool gradient_tile(const uint8_t *rgba, int w, int h) {
+    if (!rgba || w < 2 || h < 2)
+        return false;
+    double horizontal = 0, vertical = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x + 1 < w; ++x)
+            for (int k = 0; k < 3; ++k)
+                horizontal +=
+                    std::abs(int(rgba[(y * w + x) * 4 + k]) - int(rgba[(y * w + x + 1) * 4 + k]));
+    for (int y = 0; y + 1 < h; ++y)
+        for (int x = 0; x < w; ++x)
+            for (int k = 0; k < 3; ++k)
+                vertical +=
+                    std::abs(int(rgba[(y * w + x) * 4 + k]) - int(rgba[((y + 1) * w + x) * 4 + k]));
+    horizontal /= double(h) * (w - 1) * 3;
+    vertical /= double(h - 1) * w * 3;
+    return horizontal < 5.0 && vertical > 2.0 * horizontal;
+}
+
 // A texture the renderer allocated, destroyed with its last reference. The
 // backend keeps the storage alive for commands already encoded against it,
 // so dropping the reference while a frame is in flight is safe.
@@ -2934,9 +2960,12 @@ void D3DRenderer::Impl::uploadTexture(const HostD3DTexture *t) {
     // RGB565 tiles. The draw gate additionally requires depth-writing world
     // triangles with full 0..1 UVs: skies, atlases and sprites are excluded.
     // A provider owns its artwork; do not add host detail on top of it.
+    // upload_scratch_ still holds the base texture's decode from makeTexture.
     e.smallOpaqueTile = !t->original && !e.alpha && source.width == source.height &&
                         (source.width == 16 || source.width == 32) && source.bpp == 16 &&
-                        source.rmask == 0xf800 && source.gmask == 0x07e0 && source.bmask == 0x001f;
+                        source.rmask == 0xf800 && source.gmask == 0x07e0 &&
+                        source.bmask == 0x001f &&
+                        !gradient_tile(upload_scratch_.data(), source.width, source.height);
     if (t->original) {
         const uint64_t bytes =
             pop_hd::mip_bytes(t->width, t->height, pop_hd::mip_levels(t->width, t->height));

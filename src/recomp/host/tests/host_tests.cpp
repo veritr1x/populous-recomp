@@ -5709,7 +5709,7 @@ static void test_terrain_material_detail(D3DRenderer *original) {
     auto renderer = make_renderer();
     CHECK(renderer != nullptr);
     D3DRenderer::setShared(renderer);
-    for (int variant = 0; renderer && variant < 8; ++variant) {
+    for (int variant = 0; renderer && variant < 9; ++variant) {
         renderer->discard();
         host_d3d_reset_coherence();
         test_hd = variant != 1;
@@ -5720,6 +5720,13 @@ static void test_terrain_material_detail(D3DRenderer *original) {
         host_d3d_bind_generation(&surface.desc, 1, 9988);
         const uint16_t color = variant == 4 ? 0x19b0 : 0x6c23; // blue water / olive land
         std::vector<uint16_t> pixels(16 * 16, color);
+        // The sky dome is a 16x16 vertical gradient, opaque 5-6-5 like a
+        // terrain tile. Its rows are uniform; only the red rises down the
+        // tile, so the sampled green is the flat tile's and must stay so.
+        if (variant == 8)
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    pixels[y * 16 + x] = uint16_t((color & 0x07ff) | ((y * 2) << 11));
         HostD3DTexture t{};
         t.handle = 992;
         t.revision = variant + 1;
@@ -5761,7 +5768,7 @@ static void test_terrain_material_detail(D3DRenderer *original) {
         renderer->discard();
     }
     CHECK_EQ(renderer->hdTextureStats().detail_draws,
-             2); // land and water; water's shader mask is zero
+             2); // land and water; water's shader mask is zero, the gradient is not a tile
     CHECK(renderer->hdTextureStats().resident_bytes <= renderer->hdTextureStats().budget_bytes);
     test_hd = test_classic = 0;
     g_t5_legacy_frame = 0;
