@@ -37,3 +37,4 @@ __pycache__/
 *.mp4
 *.smk
 *.bik
+/dist/
