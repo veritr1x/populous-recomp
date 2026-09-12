@@ -3799,3 +3799,29 @@ Deviations found while executing, all landed in the task commits:
   four jobs at commit 643fc45.
 - A `gh workflow run --ref <branch>` issued right after a push can resolve
   the previous commit; check the run's `headSha` against `HEAD`.
+
+## Game-backed verification (2026-09-12, after the merge)
+
+The user pointed at a GOG installation (`../pop-metal/original/gog`, hash matches)
+and Ghidra listings (`../populous-recomp/analysis`); both were linked in.
+`tools/build.py --regenerate --jobs 8` translated 5,972 functions and built the
+archive, core mods, texture pack and signed bundle in 28 s wall clock.
+
+Run-only scripts were compared against the parent commit (51b945f) built with
+its own shell scripts in a temporary worktree, on the same machine:
+
+- `integration_tests.sh`: the parity-fixture block fails identically on the
+  parent commit because it calls `tools/recomp/parity.py`, which does not exist
+  in the repository; "F10 did not open the settings page" with an empty mods
+  directory fails identically there too. The app-root check was repointed at
+  the installed plugin because Ninja skips the post-build step when the app is
+  up to date.
+- The pinned-clock repeatability check is nondeterministic on this machine on
+  BOTH builds: parent commit pairs differed by 446, 427 and 0 QMixer calls;
+  this branch by 456, 337, 341, 503 and 0. Building the libraries at -O1 did
+  not change it. Not a regression of this branch; the divergence is at a music
+  stream refill relative to the guest's position updates.
+- `mods_test.sh`: "the record still names five mods" (six load, including
+  `core.display`), "the run record names every loaded mod" and "every api call
+  the documentation names exists" fail identically on the parent commit.
+- `test_translate.py -n 50`: 11/11 passed through `tools/build.py --target gen`.
