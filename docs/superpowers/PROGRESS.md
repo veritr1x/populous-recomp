@@ -10,7 +10,7 @@ the "Now" section at every milestone and commit it with the work.
 | --- | --- | --- | --- | --- |
 | 1 | Portable build system + `os.h` platform layer | `specs/2026-09-12-portable-build-system-design.md` | `plans/2026-09-12-portable-build-system.md` | **Done.** Merged to `main` (commits 3fa44f4..920de70), CI green on macOS, Ubuntu, Windows. |
 | 2 | Host abstraction: GPU device interface (Metal first), SDL3 window/input on macOS, portable audio mixer + TinySoundFont MIDI | `specs/2026-09-12-host-abstraction-design.md` | `plans/2026-09-12-host-abstraction.md` | **Done.** Merged to `main` (commits 1b35ca9..0e862a5), CI green on macOS, Ubuntu, Windows. The manual window checklist is still for a person to run. |
-| 3 | Vulkan backend + Windows/Linux hosts (presets, CI labels) | `specs/2026-09-12-vulkan-and-platform-hosts-design.md` | `plans/2026-09-12-vulkan-and-platform-hosts.md` | **Done on branch `vulkan-hosts`** (pending merge). CI green on macOS (Metal), Ubuntu (lavapipe runs the GPU suites) and Windows (ported suites) at 4a73426 (run 34701915809). Game-backed suites pass over Vulkan on this Mac (MoltenVK). Manual runs on real Windows/Linux hardware still to do; not a merge gate. |
+| 3 | Vulkan backend + Windows/Linux hosts (presets, CI labels) | `specs/2026-09-12-vulkan-and-platform-hosts-design.md` | `plans/2026-09-12-vulkan-and-platform-hosts.md` | **Done.** Merged to `main` (commits a8ff5e9..44cee8d). CI green on macOS (Metal), Ubuntu (lavapipe runs the GPU suites) and Windows (ported suites) at 4a73426 (run 34701915809). Game-backed suites pass over Vulkan on this Mac (MoltenVK). Manual runs on real Windows/Linux hardware still to do; not a merge gate. |
 | 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | not yet | not yet | Not started. |
 
 Decisions that must not be reopened without the user: clang only (no MSVC); SDL3 on
@@ -21,8 +21,7 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 ## Now
 
-- Sub-project 3 implemented on `vulkan-hosts` (all nine plan tasks); waiting for
-  the merge decision. Execution notes at the end of the plan record every
+- Sub-project 3 merged to `main` at 44cee8d; branch deleted locally and on origin. Execution notes at the end of the plan record every
   deviation and the bugs the game runs found (command-pool threading, a
   deadlock between uploads and presenter callbacks, MoltenVK's slow free).
 - Verified over Vulkan on this Mac (`POP_GPU_BACKEND=vulkan`): `gpu_vulkan_tests`,
@@ -55,12 +54,12 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 ## How to resume
 
-1. `git checkout vulkan-hosts && git log --oneline main..HEAD`.
+1. `git log --oneline` on `main`; sub-project 4 starts with brainstorming.
 2. Read the spec, then the plan; the plan has checkboxes per step. Find the first
    unchecked step. Each task ends with a commit, so `git log` shows how far it got.
 3. Build and test: `.venv/bin/python tools/build.py` (needs the game, see below),
    `.venv/bin/python tools/test.py --compile-only`, `.venv/bin/ctest --preset macos -L "nogame|gpu|device"`.
-4. Push the branch and run CI with `gh workflow run checks.yml --ref vulkan-hosts`;
+4. Push the branch and run CI with `gh workflow run checks.yml --ref <branch>`;
    confirm the run's `headSha` matches `HEAD` before trusting it.
 
 ## Environment notes
