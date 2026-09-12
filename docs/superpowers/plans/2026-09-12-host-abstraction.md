@@ -1425,9 +1425,9 @@ The quad layout and the scene/cursor/pointer arithmetic do not change. The UI do
 | `CAMetalLayer *layer; CGDirectDisplayID display; CVDisplayLinkRef link` | `gpu::Swapchain chain; void *surface;` pacing thread: a `std::thread` that sleeps to the next `refresh_period()` boundary and calls the display-tick path the CVDisplayLink callback called (the same `window_wake(ts, display_tick=true)`), exiting when the service stops |
 | `id<MTLCommandQueue> queue` / `host_present_set_shared_queue` | `gpu::Device *device` / `host_present_set_device` |
 | `[queue commandBuffer]` | `device->begin()` |
-| `[cb addCompletedHandler:^(id<MTLCommandBuffer> c){...}]` | `device->on_complete(cb, [...](gpu::CommandStatus s, double ms){...})`; `status == MTLCommandBufferStatusCompleted` → `s == Completed`; `GPUEndTime - GPUStartTime` → `ms` |
+| `[cb addCompletedHandler:^(id<MTLCommandBuffer> c){...}]` | `device->on_complete(cb, [captures](gpu::CommandStatus s, double ms){...})`; `status == MTLCommandBufferStatusCompleted` → `s == Completed`; `GPUEndTime - GPUStartTime` → `ms` |
 | `[layer nextDrawable]` / `drawable.texture` | `device->acquire(chain)` / the returned texture |
-| `[cb presentDrawable:d afterMinimumDuration:t]` + `addPresentedHandler` | `device->present(cb, chain, tex, t, [...](double presented){...})`; the `completion_fallback` path stays: when `presented == 0` the frame takes the completion timestamp |
+| `[cb presentDrawable:d afterMinimumDuration:t]` + `addPresentedHandler` | `device->present(cb, chain, tex, t, [captures](double presented){...})`; the `completion_fallback` path stays: when `presented == 0` the frame takes the completion timestamp |
 | `double(CVGetCurrentHostTime()) / CVGetHostClockFrequency()` (7 sites) | `device->now_seconds()` |
 | `newTextureWithDescriptor:` for `Target` pools | `device->create_texture({w, h, Format::BGRA8, UsageRenderTarget|UsageSampled|UsageCpu})` (color), `R8` coverage, `Depth32F` depth; null handle where nil was tested (the halving-on-failure path keeps its logic) |
 | texture release on `Target` drop | `device->destroy(...)` in `Target`'s destructor, guarded by a `gpu::Device *` member |

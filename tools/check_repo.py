@@ -24,7 +24,9 @@ def main():
             errors.append(f"Environment file is tracked: {name}")
         if path.suffix.lower() != ".md":
             continue
-        text = path.read_text()
+        # Code is not prose: a C++ lambda such as `[&](int)` is not a link.
+        text = re.sub(r"```.*?```", "", path.read_text(), flags=re.S)
+        text = re.sub(r"`[^`\n]*`", "", text)
         for link in re.findall(r"\]\(([^)]+)\)", text):
             target = unquote(link.split("#", 1)[0].split("?", 1)[0].strip("<>"))
             if not target or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target):

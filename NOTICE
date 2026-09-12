@@ -19,3 +19,10 @@ hrttf111 from https://github.com/hrttf111/pop3-rev into ignored local storage.
 That upstream metadata retains its own ownership; it is not included or relicensed
 here. Ghidra, Capstone, pefile, Unicorn, NumPy and Pillow are external development
 tools with their own licenses, not original game dependencies at runtime.
+
+TinySoundFont (third_party/tsf/tsf.h) is Copyright (C) 2017-2023 Bernhard Schelling,
+licensed under the MIT License; see third_party/tsf/LICENSE. It renders the game's
+own SoundFont, which is not included.
+
+SDL3 is fetched at build time from https://github.com/libsdl-org/SDL at a pinned
+release tag and linked statically; it is licensed under the zlib License.
