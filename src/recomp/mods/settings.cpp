@@ -8,6 +8,7 @@
 // because a mod that changed another mod's setting and then failed must leave
 // no trace of either.
 #include "mods_internal.h"
+#include "layout.h"
 #include "display_settings.h"
 
 #include <algorithm>
@@ -243,7 +244,6 @@ bool mods_settings_entry(uint32_t i, uint32_t *owner, const char **mod_id, const
 // task's tests link in wave 1; the overlay's definition wins in every build
 // that has one.
 extern "C" __attribute__((weak)) const char *mods_overlay_profile_dir(void) {
-    const char *env = getenv("POPM_PROFILE_DIR");
-    return env && *env ? env : "build/recomp/profile";
+    return host_layout().profile_dir.c_str();
 }
 extern "C" __attribute__((weak)) void mods_overlay_set_profile_dir(const char *) {}

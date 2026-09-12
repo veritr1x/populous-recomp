@@ -52,8 +52,18 @@ foreach(src ${POP_FIXTURE_SOURCES})
   add_dependencies(mod_fixtures fixture_${stem})
 endforeach()
 
+# Where resources and the profile live, for every layout an executable can have.
+add_executable(layout_tests layout.cpp tests/layout_tests.cpp)
+target_include_directories(layout_tests PRIVATE ${POP_ROOT})
+target_link_libraries(layout_tests PRIVATE recomp_platform)
+target_compile_options(layout_tests PRIVATE ${POP_WARN_STRICT})
+pop_optimize(layout_tests 1)
+pop_test_binary(layout_tests)
+add_test(NAME layout_tests COMMAND layout_tests WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(layout_tests PROPERTIES LABELS nogame)
+
 # The roots resolver, run from a relocated app-shaped directory by roots_tests.py.
-add_executable(roots_probe roots.cpp ${POP_ROOT}/mods/core/tests/roots_probe.cpp)
+add_executable(roots_probe roots.cpp layout.cpp ${POP_ROOT}/mods/core/tests/roots_probe.cpp)
 target_include_directories(roots_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(roots_probe PRIVATE recomp_platform)
 pop_optimize(roots_probe 1)

@@ -4,6 +4,7 @@
 // Determinism is DECLARED, never enforced: affects_simulation is informational
 // and this record is written whatever it says.
 #include "mods_internal.h"
+#include "layout.h"
 #include "win32.h" /* host_clock_description */
 #include "../platform/os.h"
 
@@ -134,9 +135,7 @@ __attribute__((constructor)) void capture_initial() {
             g_capture_failed = true;
         return out;
     };
-    const char *profile = getenv("POPM_PROFILE_DIR");
-    std::string settings =
-        std::string(profile && *profile ? profile : "build/recomp/profile") + "/mod-settings.json";
+    std::string settings = host_layout().profile_dir + "/mod-settings.json";
     initial_settings() = slurp(settings.c_str());
     pin_script() = env_or("POP_RECOMP_SCRIPT", "");
     input_script() = slurp(pin_script().empty() ? nullptr : pin_script().c_str());

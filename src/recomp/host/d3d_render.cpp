@@ -31,6 +31,7 @@
 // Nothing here opens a window, and nothing here names a GPU API: the shaders
 // are the programs gpu/shaders.md describes, bound by slot number.
 #include "d3d_render.h"
+#include "../mods/layout.h"
 #include "../platform/os.h"
 #include "../runtime/display_seam.h"
 #include "present.h"
@@ -1009,20 +1010,11 @@ D3DRenderer::Impl::Impl(gpu::Device *device) : device_(device) {
         device_->create_texture({1, 1, gpu::Format::RGBA8, gpu::UsageSampled | gpu::UsageCpu, 1});
     uint32_t opaque_white = 0xffffffffu;
     device_->upload(white_, {0, 0, 1, 1}, &opaque_white, 4);
-    std::string packPath = "build/texture-pack";
-    const char *packEnv = getenv("POPM_TEXTURE_PACK_DIR");
-    if (packEnv)
+    std::string packPath = host_resource("texture-pack");
+    if (packPath.empty())
+        packPath = "build/texture-pack";
+    if (const char *packEnv = getenv("POPM_TEXTURE_PACK_DIR"))
         packPath = packEnv;
-    else {
-        char path[4096];
-        if (os_exe_path(path, sizeof path) == 0) {
-            std::filesystem::path exe(path);
-            if (exe.parent_path().filename() == "MacOS" &&
-                exe.parent_path().parent_path().filename() == "Contents")
-                packPath =
-                    (exe.parent_path().parent_path() / "Resources" / "texture-pack").string();
-        }
-    }
     if (const char *mb = getenv("POPM_TEXTURE_BUDGET_MB")) {
         char *end = nullptr;
         auto value = strtoul(mb, &end, 10);

@@ -18,6 +18,7 @@
 // and d3d_render.cpp owns the Direct3D scene; this file owns the window, the
 // events and the lifetime.
 #include "../../mods/display_settings.h"
+#include "../../mods/layout.h"
 #include "../../platform/os.h"
 #include "../audio.h"
 #include "../audio_capture.h"
@@ -972,19 +973,8 @@ std::string find_exe_relative_to_bundle() {
 
 // The bundled classic-modes table when this is an app bundle, else the checkout's.
 std::string classic_modes_path() {
-    char path[4096];
-    if (os_exe_path(path, sizeof path) == 0) {
-        std::string exe(path);
-        const size_t macos = exe.rfind("/Contents/MacOS/");
-        if (macos != std::string::npos) {
-            std::string candidate = exe.substr(0, macos) + "/Contents/Resources/classic-modes.json";
-            if (FILE *f = fopen(candidate.c_str(), "rb")) {
-                fclose(f);
-                return candidate;
-            }
-        }
-    }
-    return "tools/recomp/baseline/classic-modes.json";
+    std::string p = host_resource("classic-modes.json");
+    return p.empty() ? "tools/recomp/baseline/classic-modes.json" : p;
 }
 
 void post_drawable_size() {

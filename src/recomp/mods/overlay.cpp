@@ -1,6 +1,7 @@
 // Asset overlay: profile, reverse mod load order, then the original game.
 // Mutations never fall through; deleting a shadow reveals the lower file.
 #include "mods_internal.h"
+#include "layout.h"
 #include "../runtime/mods_seam.h"
 #include "../runtime/win32.h"
 #include "../platform/os.h"
@@ -213,8 +214,7 @@ void mods_overlay_reset() {
         init_owner = 0;
         init_thread = {};
         if (profile().empty()) {
-            const char *env = getenv("POPM_PROFILE_DIR");
-            profile() = env && *env ? env : "build/recomp/profile";
+            profile() = host_layout().profile_dir; // honours POPM_PROFILE_DIR
         }
         dir = profile();
     }
