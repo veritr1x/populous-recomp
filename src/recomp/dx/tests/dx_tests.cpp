@@ -8673,7 +8673,10 @@ static void test_blit_into_texture_uploads() {
 }
 
 int main() {
-    setvbuf(stdout, nullptr, _IOLBF, 0);
+    // Unbuffered, not line buffered: Windows treats _IOLBF as full buffering
+    // and a fail-fast abort drops everything queued, including the name of
+    // the test that died.
+    setvbuf(stdout, nullptr, _IONBF, 0);
     mem_init();
     imports_init();
     dx_register_shims();

@@ -43,7 +43,9 @@ def compile_flags(cc, name, scratch, env, system=None):
     """Flags for one plugin: reproducible, stripped, position independent, undefined symbols
     left for load time because the API arrives as a pointer rather than by linking."""
     system = system or platform.system()
-    flags = ["-std=c11", "-O1", "-g0", "-fPIC", "-Wall", "-Wextra", "-Wno-unused-parameter"]
+    flags = ["-std=c11", "-O1", "-g0", "-Wall", "-Wextra", "-Wno-unused-parameter"]
+    if system != "Windows":
+        flags.append("-fPIC") # COFF has no PIC flag; clang rejects it for the MSVC target
     if system == "Darwin":
         # Keep LC_UUID (dyld requires it) but derive it from content, omit
         # debug maps, and never use the random staging path as the id.
