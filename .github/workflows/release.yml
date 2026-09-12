@@ -105,9 +105,10 @@ jobs:
           else
             LAST=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
             NOTES=$(git log --oneline ${LAST:+$LAST..}HEAD | head -50)
-            git tag -f latest && git push -f origin latest
+            # Delete the old pre-release and its tag first: --cleanup-tag removes
+            # the tag, so the fresh tag has to be pushed afterwards.
             gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-            git push -f origin latest
+            git tag -f latest && git push -f origin latest
             printf 'Rolling build of main at %s.%s\n\n%s\n' "${GITHUB_SHA::7}" "${LAST:+ Changes since $LAST:}" "$NOTES" > notes.md
             gh release create latest dist/PopRecomp-* --prerelease --title "Latest (main)" --notes-file notes.md
           fi
