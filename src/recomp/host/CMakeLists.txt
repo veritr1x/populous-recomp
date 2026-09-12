@@ -13,7 +13,7 @@ pop_optimize(host_common 1)
 # Compiling Objective-C++ under ARC, as every script did; a no-op for C++.
 set(POP_OBJC_ARC $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 
-# The GPU interface, its test double, and (on Apple) the Metal backend.
+# The GPU interface, its test double, the Vulkan backend and (on Apple) Metal.
 add_subdirectory(gpu)
 
 # The platform boundary: no Objective-C++ and no Apple framework outside gpu/metal/.
@@ -27,7 +27,7 @@ set_tests_properties(host_boundary_check PROPERTIES LABELS nogame)
 add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
 target_include_directories(compositor_tests PRIVATE ${POP_ROOT} ${HOST})
 target_compile_options(compositor_tests PRIVATE ${POP_WARN_WERROR})
-target_link_libraries(compositor_tests PRIVATE gpu_metal)
+target_link_libraries(compositor_tests PRIVATE gpu_backend)
 pop_optimize(compositor_tests 1)
 pop_test_binary(compositor_tests)
 add_test(NAME compositor_tests COMMAND compositor_tests WORKING_DIRECTORY ${POP_ROOT})
@@ -74,7 +74,7 @@ endfunction()
 # The mixer, its output device and the synth: portable, over SDL audio.
 set(POP_AUDIO_SOURCES ${HOST}/audio/mixer.cpp ${HOST}/audio/sdl_sink.cpp ${HOST}/audio/midi_synth.cpp
                       ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp)
-set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common gpu_metal)
+set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common gpu_backend)
 set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.cpp ${HOST}/compositor.cpp
                         ${HOST}/ui_layer.cpp ${HOST}/performance_overlay.cpp ${HOST}/d3d_render.cpp
                         ${BACKENDS}/indexed_frame.cpp)
@@ -107,7 +107,7 @@ if(TARGET recomp_gen)
   pop_host(present_events_tests GEN UI_LAYER
     SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
             ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
-    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_metal
+    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_backend
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
   set_tests_properties(present_events_tests PROPERTIES LABELS mods)
@@ -126,7 +126,7 @@ pop_host(host_tests UI_LAYER
           ${POP_AUDIO_SOURCES}
           ${POP_ROOT}/src/recomp/dx/com.cpp ${POP_ROOT}/src/recomp/dx/host_api.cpp
           ${POP_ROOT}/src/recomp/dx/display_stubs.cpp ${POP_ROOT}/src/recomp/dx/dinput.cpp
-  LIBS recomp_platform recomp_runtime gpu_metal gpu_fake
+  LIBS recomp_platform recomp_runtime gpu_backend gpu_fake
   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
 pop_link_sdl(host_tests)
 pop_test_binary(host_tests)

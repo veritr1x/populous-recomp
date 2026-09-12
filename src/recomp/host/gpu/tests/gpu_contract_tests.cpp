@@ -1,8 +1,10 @@
-// gpu_metal_tests.cpp - the Metal backend against the gpu.h contract: bytes
+// gpu_contract_tests.cpp - a backend against the gpu.h contract: bytes
 // round-trip, a clear and a draw land where expected, commands complete in
-// commit order, a compute kernel reads what a texture holds, and a layer makes
-// a swapchain. Label gpu: needs a Metal device.
-#include "../../gpu_factory.h"
+// commit order, a compute kernel reads what a texture holds, and a native
+// surface makes a swapchain. Compiled once per backend with
+// POP_GPU_TEST_BACKEND naming it; the factory override selects it.
+#include "../../../platform/os.h"
+#include "../gpu_factory.h"
 
 #include <math.h>
 #include <mutex>
@@ -171,13 +173,16 @@ static void test_compute_readback_kernel() {
     }
 }
 
-static void test_swapchain_from_layer() {
+static void test_swapchain_from_surface() {
     auto d = create_default_device();
     if (!d)
         return;
-    void *layer = test_native_surface(32, 16);
-    CHECK(layer != nullptr);
-    Swapchain s = d->create_swapchain(layer, 32, 16);
+    void *surface = test_native_surface(32, 16);
+    if (!surface) {
+        printf("no native surface here: swapchain test skipped\n");
+        return;
+    }
+    Swapchain s = d->create_swapchain(surface, 32, 16);
     CHECK(s && d->swapchain_format(s) == Format::BGRA8);
     Texture t = d->acquire(s);
     CHECK(t && d->describe(t).width == 32 && d->describe(t).height == 16);
@@ -193,13 +198,19 @@ static void test_swapchain_from_layer() {
 }
 
 int main() {
+    os_setenv("POP_GPU_BACKEND", POP_GPU_TEST_BACKEND);
+    if (strcmp(default_backend_name(), POP_GPU_TEST_BACKEND) != 0) {
+        fprintf(stderr, "backend %s is not available here (got %s)\n", POP_GPU_TEST_BACKEND,
+                default_backend_name());
+        return 1;
+    }
     test_upload_readback();
     test_clear_and_compositor_draw();
     test_commit_order();
     test_compute_readback_kernel();
-    test_swapchain_from_layer();
+    test_swapchain_from_surface();
     printf("%d checks, %d failures\n", g_checks, g_failures);
     if (!g_failures)
-        printf("all gpu metal tests passed\n");
+        printf("all gpu %s tests passed\n", POP_GPU_TEST_BACKEND);
     return g_failures ? 1 : 0;
 }

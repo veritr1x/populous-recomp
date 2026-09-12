@@ -26,3 +26,10 @@ own SoundFont, which is not included.
 
 SDL3 is fetched at build time from https://github.com/libsdl-org/SDL at a pinned
 release tag and linked statically; it is licensed under the zlib License.
+
+volk (third_party/volk) is Copyright (c) 2018-2024 Arseny Kapoulkine, MIT License;
+see third_party/volk/LICENSE.md. The Vulkan headers (third_party/vulkan-headers)
+are Copyright 2015-2025 The Khronos Group Inc., Apache License 2.0 or MIT; see
+third_party/vulkan-headers/LICENSE.md. Both are included unmodified. The Vulkan
+loader, MoltenVK and Mesa's lavapipe are runtime components on the player's or
+developer's machine and are not distributed here.

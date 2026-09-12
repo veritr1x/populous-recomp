@@ -64,6 +64,8 @@ the checked-in `.clang-format`; generated code remains a local build product.
 | `mods/examples/` | Small C, Lua and asset-overlay examples |
 | `assets/terrain/` | Project-created material-detail artwork and its provenance |
 | `third_party/lua/` | Unmodified Lua source and upstream license |
+| `third_party/volk/` | volk 1.4.304, the Vulkan meta-loader, unmodified |
+| `third_party/vulkan-headers/` | Vulkan-Headers v1.4.304, the subset the backend includes, unmodified |
 | `CMakeLists.txt`, `cmake/` | The build: targets per directory, presets for macOS, Linux and Windows |
 | `build/recomp/gen/` | Locally generated game functions; edit the translator, not these files |
 

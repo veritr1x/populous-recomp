@@ -3,6 +3,8 @@
 #include "metal_device.h"
 
 #import <CoreGraphics/CoreGraphics.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
 
 namespace gpu {
 
@@ -21,6 +23,15 @@ double MetalDevice::refresh_period(Swapchain s) {
         CGDisplayModeRelease(mode);
     }
     return hz > 1.0 ? 1.0 / hz : 1.0 / 60;
+}
+
+void *metal_native_surface_for_window(void *sdl_window) {
+    SDL_MetalView view = SDL_Metal_CreateView(static_cast<SDL_Window *>(sdl_window));
+    return view ? SDL_Metal_GetLayer(view) : nullptr;
+}
+
+void metal_release_window_surface(void *) {
+    // The view is owned by the window; SDL_DestroyWindow releases it.
 }
 
 void *metal_test_native_surface(int w, int h) {
