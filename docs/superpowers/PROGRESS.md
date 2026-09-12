@@ -11,7 +11,7 @@ the "Now" section at every milestone and commit it with the work.
 | 1 | Portable build system + `os.h` platform layer | `specs/2026-09-12-portable-build-system-design.md` | `plans/2026-09-12-portable-build-system.md` | **Done.** Merged to `main` (commits 3fa44f4..920de70), CI green on macOS, Ubuntu, Windows. |
 | 2 | Host abstraction: GPU device interface (Metal first), SDL3 window/input on macOS, portable audio mixer + TinySoundFont MIDI | `specs/2026-09-12-host-abstraction-design.md` | `plans/2026-09-12-host-abstraction.md` | **Done.** Merged to `main` (commits 1b35ca9..0e862a5), CI green on macOS, Ubuntu, Windows. The manual window checklist is still for a person to run. |
 | 3 | Vulkan backend + Windows/Linux hosts (presets, CI labels) | `specs/2026-09-12-vulkan-and-platform-hosts-design.md` | `plans/2026-09-12-vulkan-and-platform-hosts.md` | **Done.** Merged to `main` (commits a8ff5e9..44cee8d). CI green on macOS (Metal), Ubuntu (lavapipe runs the GPU suites) and Windows (ported suites) at 4a73426 (run 34701915809). Game-backed suites pass over Vulkan on this Mac (MoltenVK). Manual runs on real Windows/Linux hardware still to do; not a merge gate. |
-| 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | `specs/2026-09-12-release-pipeline-design.md` | `plans/2026-09-12-release-pipeline.md` | **Done on branch `release-pipeline`** (pending merge). `translation/` tracked; CI builds and packages the hosts on all three platforms (run 34706772249); the Windows archive runs the game under CrossOver on this Mac; the macOS archive runs from outside the checkout. The `latest` pre-release is published by the merge. |
+| 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | `specs/2026-09-12-release-pipeline-design.md` | `plans/2026-09-12-release-pipeline.md` | **Done.** Merged to `main` with the Vulkan async-upload fix. `translation/` tracked; CI builds and packages the hosts on all three platforms (run 34706772249); the Windows archive runs the game under CrossOver on this Mac; the macOS archive runs from outside the checkout. The `latest` pre-release is published by the merge. |
 
 Decisions that must not be reopened without the user: clang only (no MSVC); SDL3 on
 every platform including macOS; one software mixer everywhere (AVAudioEngine and the
@@ -21,17 +21,21 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 ## Now
 
-- Sub-project 4 implemented on `release-pipeline` (seven plan tasks); waiting for
-  the merge decision. The merge to `main` is what first runs `release.yml` and
-  publishes the rolling `latest` pre-release with three archives.
+- Sub-project 4 merged to `main` together with the Vulkan async-upload fix
+  (branch `vulkan-async-uploads`): uploads and texture creation no longer wait
+  on the GPU, which removed ~1000 queue drains per second and is the fix for
+  the 5-10 fps report on real Windows. The merge is what first runs
+  `release.yml` and publishes the rolling `latest` pre-release.
 - Verified: `checks.yml` green on macOS, Ubuntu and Windows with the hosts built
   from `translation/` and packaged as artifacts; the macOS archive unzipped in
   /tmp boots with `--exe`, with a saved path (no dialog) and waits in the picker
   with a stale one; the Windows archive from CI runs the game under CrossOver
   (bottle `PopRecompTest`, win10_64) to the front end with mods, music and sound.
-- What a person still has to do: click through the picker and the mismatch box
-  once on macOS; run the Linux archive on Linux hardware; after the merge, check
-  `gh release view latest` lists three assets and consider tagging `v0.1.0`.
+- What a person still has to do: run the `latest` Windows archive on the real
+  Windows machine with `POP_GPU_TRACE=1` and read the per-second
+  `gpu/vulkan:` lines (one-shots should be 0; `wait()` is the renderer's own
+  readback); click through the picker and the mismatch box once on macOS; run
+  the Linux archive on Linux hardware; consider tagging `v0.1.0`.
 - All four sub-projects of the multi-platform port are then complete.
 
 ## Environment gotcha found during Task 4
@@ -106,6 +110,10 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
   playable platform until sub-project 3.
 
 ## Log
+
+- 2026-09-12: Windows 5-10 fps report traced to synchronous Vulkan uploads
+  (~1000 fence waits/s measured on the Mac flyby); fixed with a pending
+  transfer buffer; CrossOver run at the front end shows zero blocking calls.
 
 - 2026-09-12: sub-project 4 implemented on `release-pipeline`; CI green with the
   tracked translation; Windows build verified under CrossOver.
