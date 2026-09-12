@@ -183,7 +183,9 @@ class VulkanDevice final : public Device {
     Binding ring_alloc(Cmd &c, const void *bytes, uint64_t count); // mutex held
     VkCommandBuffer one_shot_begin();
     void one_shot_end_wait(VkCommandBuffer cb);
-    void wait_all_submitted(); // every fence so far
+    void wait_all_submitted();               // every fence so far; shutdown and swapchain teardown
+    void wait_submitted_before(uint64_t id); // submissions older than `id`; bounded under load
+    uint64_t submission_watermark();         // next_id_ now: everything submitted so far is older
     void fail(const char *what);
     uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);
     bool allocate(VkMemoryRequirements req, VkMemoryPropertyFlags want, VkDeviceMemory *out);

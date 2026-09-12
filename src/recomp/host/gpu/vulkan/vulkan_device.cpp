@@ -107,8 +107,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
     ici.ppEnabledExtensionNames = inst_ext.data();
     ici.enabledLayerCount = uint32_t(layers.size());
     ici.ppEnabledLayerNames = layers.data();
-    if (vkCreateInstance(&ici, nullptr, &d->instance_) != VK_SUCCESS) {
-        fprintf(stderr, "gpu/vulkan: vkCreateInstance failed\n");
+    if (VkResult r = vkCreateInstance(&ici, nullptr, &d->instance_); r != VK_SUCCESS) {
+        fprintf(stderr, "gpu/vulkan: vkCreateInstance failed (VkResult %d, loader %u.%u)\n", int(r),
+                VK_API_VERSION_MAJOR(loader_version), VK_API_VERSION_MINOR(loader_version));
         return nullptr;
     }
     volkLoadInstanceOnly(d->instance_);
@@ -550,7 +551,7 @@ bool VulkanDevice::upload(Texture tex, Region region, const void *bytes, int pit
         return false;
     const int bpp = bytes_per_pixel(t.desc.format);
     const uint64_t row = uint64_t(region.w) * bpp, total = row * region.h;
-    wait_all_submitted();
+    wait_submitted_before(submission_watermark());
     VkBuffer src = t.staging;
     VkDeviceMemory src_mem = VK_NULL_HANDLE;
     void *map = t.staging_map;
@@ -592,7 +593,7 @@ bool VulkanDevice::readback(Texture tex, Region region, void *bytes, int pitch) 
         return false;
     const int bpp = bytes_per_pixel(t.desc.format);
     const uint64_t row = uint64_t(region.w) * bpp, total = row * region.h;
-    wait_all_submitted();
+    wait_submitted_before(submission_watermark());
     VkBuffer dst = t.staging;
     VkDeviceMemory dst_mem = VK_NULL_HANDLE;
     void *map = t.staging_map;
@@ -707,7 +708,7 @@ void VulkanDevice::update(Buffer buf, uint64_t offset, const void *bytes, uint64
 }
 
 const void *VulkanDevice::map_read(Buffer buf) {
-    wait_all_submitted();
+    wait_submitted_before(submission_watermark());
     std::lock_guard lock(mutex_);
     auto it = buffers_.find(buf.id);
     return it == buffers_.end() ? nullptr : it->second.map;
@@ -954,6 +955,19 @@ CommandStatus VulkanDevice::status(CommandBuffer cb) {
 void VulkanDevice::wait_all_submitted() {
     std::unique_lock lock(mutex_);
     retired_cv_.wait(lock, [&] { return submitted_.empty(); });
+}
+
+uint64_t VulkanDevice::submission_watermark() {
+    std::lock_guard lock(mutex_);
+    return next_id_;
+}
+
+// Submissions retire in order, so "nothing older than `id` remains" is a check
+// on the queue's front. Unlike wait_all_submitted this cannot starve while the
+// presenter keeps new frames in flight.
+void VulkanDevice::wait_submitted_before(uint64_t id) {
+    std::unique_lock lock(mutex_);
+    retired_cv_.wait(lock, [&] { return submitted_.empty() || submitted_.front().id >= id; });
 }
 
 double VulkanDevice::now_seconds() {

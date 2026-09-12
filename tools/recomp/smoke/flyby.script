@@ -1,0 +1,118 @@
+# level1.script - boot, start mission 01, and play it.
+#
+# Run with `make recomp-smoke`. Every action goes in through the same host
+# state the real keyboard and mouse feed, so this exercises the paths the game
+# actually uses rather than a back door built for testing.
+#
+# HOW THE INPUT HAS TO ARRIVE, WHICH TOOK TWO FIXES TO GET RIGHT
+#
+# The front end reads DirectInput buffered data when it is told the state
+# changed; it does not poll. Buffered events are differences, so:
+#
+#   * A move must carry a relative delta. A move reporting only a destination
+#     produces no DIMOFS_X or DIMOFS_Y event and the game's own cursor never
+#     moves.
+#   * The game integrates those deltas into a pointer of its own that started
+#     wherever it chose, so an absolute coordinate here is only a guess about
+#     where that pointer already was. `moveby` sends raw relative motion, and a
+#     delta larger than the screen pins the game's pointer to the top-left
+#     corner. That corner is the one position a script can be sure of, and
+#     every coordinate below is measured from it.
+#   * A click must stay down long enough for the guest to look. Pressing and
+#     releasing in one host turn leaves the button at the level it started
+#     from, the shim's comparison finds no change, and both events are lost.
+#     The runner holds it for 120 ms.
+#
+# WHERE THE COORDINATES COME FROM
+#
+#   * New Game at (320, 140) and the tutorial prompt's No at (320, 219): the
+#     recovered menu layout in docs/MENU.md (005d9660 / 004c3290 put the first
+#     action row at y 140, rows 30 apart) and docs/MENU_NEW_GAME.md (prompt top
+#     159, Yes at the paragraph bottom, No 30 lower), both centred on x 320.
+#   * The start control at (605, 448) and the level-01 world at (322, 235):
+#     measured off a dump of the level-select screen, which is a solar system
+#     with a wooden panel across the bottom. The panel's right-hand button is
+#     what starts the mission; clicking the world itself does nothing.
+#   * The dialogue's OK at (236, 148) and the people at (390, 212): measured off
+#     a dump of the running level.
+
+# WAIT FOR THE GAME, NOT FOR THE CLOCK
+#
+# This used to be `wait 16000`, and that is what made the run fail about one
+# time in two. The front end is roughly eight seconds of loading, then the
+# copyright screen for five, then a cross-fade into the menu, which a live
+# trace put at 13.9 s - so a fixed 16 s left two seconds of margin, and every
+# second added to startup since (the mod loader, Lua, the MIDI SoundFont) spent
+# some of it. A click that lands before the menu is live dismisses whatever is
+# on screen instead of choosing New Game, the run never leaves the front end,
+# and the eight assertions about the level all fail at once with no texture and
+# no 3D scene to show for it.
+#
+# WHY THE CLAIM HAS TO HOLD
+#
+# `picture` is the share of the last presented frame that is not black. The
+# copyright screen settles at 0.960 - its black border and the white Bullfrog
+# box - and the menu at 0.998, so 0.98 tells the two apart. But both screens
+# FADE in, and a fade passes through every value on its way up: the copyright
+# screen's own fade-in crosses 0.98 for a frame or two before settling below
+# it. A bare `await picture>0.98` is answered there, five seconds early, and
+# the run fails exactly as the fixed wait did - that is not a guess, it is what
+# the first two versions of this fix did. `for 2000` requires the claim to
+# stay true, which no fade does.
+await picture>0.98 for 2000 within 60000
+dump menu
+
+# New Game, then answer No to the tutorial prompt.
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+dump levelselect
+
+# Start mission 01 from the panel's button.
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 8000
+dump level_start
+
+# Dismiss the opening dialogue.
+moveby -2000 -2000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 4000
+dump level_playing
+
+# M1's first actions: select one of the blue braves, then order it somewhere,
+# and check both against the game's own record rather than against pixels.
+#
+# WHY NOT PIXELS
+#
+# The level opens in a camera flyby, and while it runs every frame differs from
+# the last whatever the player does - so "the picture changed" cannot tell a
+# selected brave from an ignored click. The entity table can. It is 2000
+# records of 179 bytes at 0x8e0428, laid out as tests/entity_codec.hpp encodes
+# it: flags at +12, kind at +42, state at +44, owner at +47, position at +61 as
+# x, z and altitude words. A blue brave is owner 0, kind 1.
+#
+# THE FLYBY
+#
+# This waits a fixed 20 seconds for it, and says so rather than pretending to
+# detect it: there is no camera-settle signal exposed to the host, and a
+# frame-difference test cannot find one because the units keep animating after
+# the camera stops.
+wait 34000
+dump flyby_over
+quit

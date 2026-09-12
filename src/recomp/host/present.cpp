@@ -1,4 +1,5 @@
 #include "../runtime/display_seam.h"
+#include "../platform/os.h"
 #include <atomic>
 // present.mm - host_present for the windowed host.
 //
@@ -41,9 +42,7 @@ void (*g_mode_cb)(int, int, int) = nullptr;
 uint32_t g_present_count = 0;
 
 double now_seconds() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return (double)os_monotonic_ns() * 1e-9;
 }
 
 // Everything below is written on the guest thread and read by the watchdog on

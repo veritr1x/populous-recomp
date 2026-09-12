@@ -67,7 +67,8 @@ jobs:
       - name: Software Vulkan for the GPU suites (Linux)
         if: runner.os == 'Linux'
         run: |
-          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          ls -l /usr/share/vulkan/icd.d/ || true
+          echo "VK_LOADER_DEBUG=error,warn" >> "$GITHUB_ENV"
           echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
           echo "SDL_VIDEODRIVER=dummy" >> "$GITHUB_ENV"
       - name: Enter the Visual Studio developer environment (Windows)

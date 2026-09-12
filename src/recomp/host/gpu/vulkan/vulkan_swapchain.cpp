@@ -122,7 +122,7 @@ Swapchain VulkanDevice::create_swapchain(void *native_surface, int width, int he
 }
 
 void VulkanDevice::resize(Swapchain s, int width, int height) {
-    wait_all_submitted();
+    wait_submitted_before(submission_watermark());
     std::lock_guard lock(mutex_);
     auto it = swapchains_.find(s.id);
     if (it != swapchains_.end())
