@@ -19,6 +19,9 @@
 #include <limits.h>
 #include <string.h>
 #include <math.h>
+#ifndef M_LN2 /* glibc and MSVC hide the M_ constants without feature macros */
+#define M_LN2 0.693147180559945309417
+#endif
 
 #ifdef __cplusplus
 extern "C" {
