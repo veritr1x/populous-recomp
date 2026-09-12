@@ -590,6 +590,8 @@ void VulkanDevice::bind_descriptors(Cmd &c, VkPipelineBindPoint point) {
         writes[8 + i].pImageInfo = &ii[i];
     }
     vkUpdateDescriptorSets(device_, 12, writes, 0, nullptr);
+    if (trace_)
+        ++trace_second_.sets;
     vkCmdBindDescriptorSets(c.buffer, point, pipeline_layout_, 0, 1, &set, 0, nullptr);
     c.bindings_dirty = false;
     ++c.binds;

@@ -410,7 +410,14 @@ void VulkanDevice::one_shot_end_wait(VkCommandBuffer cb) {
         if (vkQueueSubmit(queue_, 1, &si, transfer_fence_) != VK_SUCCESS)
             fail("one-shot submit failed");
     }
+    const double t0 = trace_ ? now_seconds() : 0;
     vkWaitForFences(device_, 1, &transfer_fence_, VK_TRUE, UINT64_MAX);
+    ++one_shots_;
+    if (trace_) {
+        std::lock_guard lock(mutex_);
+        ++trace_second_.one_shots;
+        trace_second_.one_shot_ms += (now_seconds() - t0) * 1000;
+    }
     transfer_mutex_.unlock();
 }
 
@@ -881,6 +888,7 @@ void VulkanDevice::commit(CommandBuffer cb) {
         si.pSignalSemaphores = &c->signal_semaphore;
     }
     VkResult r;
+    const double t0 = trace_ ? now_seconds() : 0;
     {
         std::lock_guard lock(queue_mutex_);
         vkResetFences(device_, 1, &c->fence);
@@ -889,6 +897,12 @@ void VulkanDevice::commit(CommandBuffer cb) {
             queue_present(*c);
     }
     std::lock_guard lock(mutex_);
+    if (trace_) {
+        trace_second_.submit_ms += (now_seconds() - t0) * 1000;
+        ++trace_second_.commits;
+        trace_second_.draws += c->draws;
+        trace_tick();
+    }
     if (r != VK_SUCCESS) {
         fail("queue submit failed");
         auto callbacks = std::move(c->callbacks);
@@ -904,10 +918,11 @@ void VulkanDevice::commit(CommandBuffer cb) {
     if (trace_)
         fprintf(stderr,
                 "gpu/vulkan: commit %llu draws %u dispatches %u binds %u ring %llu KB textures %zu "
-                "buffers %zu graves %zu recording %zu submitted %zu\n",
+                "buffers %zu graves %zu recording %zu submitted %zu oneshots %u\n",
                 (unsigned long long)cb.id, c->draws, c->dispatches, c->binds,
                 (unsigned long long)(c->ring_used >> 10), textures_.size(), buffers_.size(),
-                graves_.size(), recording_.size(), submitted_.size());
+                graves_.size(), recording_.size(), submitted_.size(), one_shots_);
+    one_shots_ = 0;
     submitted_.push_back({cb.id, std::move(c)});
     reaper_cv_.notify_one();
 }
@@ -963,6 +978,17 @@ void VulkanDevice::reap_loop() {
 
 void VulkanDevice::wait(CommandBuffer cb) {
     std::unique_lock lock(mutex_);
+    const double t0 = trace_ ? now_seconds() : 0;
+    if (trace_)
+        ++trace_second_.waits;
+    struct Done {
+        VulkanDevice *d;
+        double t0;
+        ~Done() {
+            if (d->trace_)
+                d->trace_second_.wait_ms += (d->now_seconds() - t0) * 1000;
+        }
+    } done{this, t0};
     retired_cv_.wait(lock, [&] {
         if (retired_.count(cb.id))
             return true;
@@ -1004,6 +1030,22 @@ void VulkanDevice::wait_submitted_before(uint64_t id) {
 
 double VulkanDevice::now_seconds() {
     return double(os_monotonic_ns()) / 1e9;
+}
+
+void VulkanDevice::trace_tick() {
+    const double now = now_seconds();
+    TraceSecond &t = trace_second_;
+    if (t.started == 0)
+        t.started = now;
+    if (now - t.started < 1.0)
+        return;
+    fprintf(stderr,
+            "gpu/vulkan: %.1fs: commits %u draws %u sets %u | blocked: one-shots %u (%.1f ms) "
+            "wait() %u (%.1f ms) acquire %u (%.1f ms) submit %.1f ms\n",
+            now - t.started, t.commits, t.draws, t.sets, t.one_shots, t.one_shot_ms, t.waits,
+            t.wait_ms, t.acquires, t.acquire_ms, t.submit_ms);
+    t = TraceSecond{};
+    t.started = now;
 }
 
 std::unique_ptr<Device> vulkan_create_device() {
