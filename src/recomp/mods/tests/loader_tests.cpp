@@ -1359,6 +1359,19 @@ MOD_TEST_SUITE(loader_record_accessors_are_safe_before_and_after) {
     MOD_CHECK_EQ(mods_record_count(), 0u);
 }
 
+// Suites run in reverse order of definition. This one loads a plugin, so it
+// stays below the empty-run suite, whose record the process-wide
+// already-written guard would otherwise refuse.
+MOD_TEST_SUITE(loader_plugin_extension_substitution) {
+    fresh();
+    // The manifest names a suffix from another platform; the shipped file has
+    // this platform's. The loader must find it by stem.
+    install("x", manifest("ext.sub", "[plugin]\npath = \"good_a.plugin\"\n"),
+            plug("good_a").c_str());
+    MOD_CHECK(mods_load_all());
+    MOD_CHECK_EQ(mods_record_status("ext.sub"), POP_OK);
+}
+
 // ---------------------------------------------------------------------------
 // A run that reached the loader and found nothing is still a run. Its record
 // is what distinguishes "no mods ran" from "nothing wrote a record", so the
@@ -1392,14 +1405,4 @@ MOD_TEST_SUITE(loader_an_empty_run_still_writes_its_record) {
     // asserted against a fresh process in tools/recomp/mods_test.sh; this
     // binary has loaded mods many times over, so what it accumulates here
     // would not be evidence either way.
-}
-
-MOD_TEST_SUITE(loader_plugin_extension_substitution) {
-    fresh();
-    // The manifest names a suffix from another platform; the shipped file has
-    // this platform's. The loader must find it by stem.
-    install("x", manifest("ext.sub", "[plugin]\npath = \"good_a.plugin\"\n"),
-            plug("good_a").c_str());
-    MOD_CHECK(mods_load_all());
-    MOD_CHECK_EQ(mods_record_status("ext.sub"), POP_OK);
 }
