@@ -28,6 +28,10 @@ target_include_directories(recomp_mods PUBLIC ${POP_ROOT} ${POP_ROOT}/src ${POP_
 target_link_libraries(recomp_mods PUBLIC lua recomp_runtime)
 target_compile_options(recomp_mods PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_mods 2)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # std::atomic::is_lock_free in the page tracker needs libatomic with clang + libstdc++.
+  target_link_libraries(recomp_mods PUBLIC atomic)
+endif()
 
 add_library(recomp_mods_testing OBJECT ${POP_MODS_SOURCES})
 target_include_directories(recomp_mods_testing PUBLIC ${POP_ROOT} ${POP_ROOT}/src ${POP_ROOT}/src/recomp/runtime)
@@ -35,6 +39,9 @@ target_link_libraries(recomp_mods_testing PUBLIC lua recomp_runtime_testing)
 target_compile_definitions(recomp_mods_testing PUBLIC POPM_TESTING=1)
 target_compile_options(recomp_mods_testing PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_mods_testing 1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(recomp_mods_testing PUBLIC atomic)
+endif()
 
 # Plugin fixtures the loader tests load. Every .c becomes a module of the same
 # name; old_cpu is built with the older header AHEAD of the real one so its

@@ -15,8 +15,6 @@ extern "C" __attribute__((weak)) void mods_lua_shutdown(void) {}
 extern "C" __attribute__((weak)) uint32_t mods_lua_errors(void) {
     return 0;
 }
-// The run record is Task 13's; a build without it still shuts down cleanly.
-extern "C" __attribute__((weak)) bool mods_write_run_record(const char *) {
-    return false;
-}
+// mods_write_run_record's weak default lives in runtime/mods_seam.cpp: a
+// second weak definition is a duplicate symbol on COFF.
 extern "C" __attribute__((weak)) void mods_run_record_capture_payload(const char *) {}
