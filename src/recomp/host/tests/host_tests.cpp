@@ -6762,6 +6762,7 @@ static void test_drain_wanted() {
 }
 
 #include "../landmark.h"
+#include <algorithm>
 static void test_landmark_hidden_evidence() {
     // Simulate the arena disappearing between capture and the landmark
     // executor. The exact JSON consumed by Gate C must retain the own draw.

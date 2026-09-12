@@ -83,6 +83,11 @@ if(TARGET recomp_gen)
   file(GLOB POP_MODS_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   # layout_tests is its own nogame executable with its own main.
   list(REMOVE_ITEM POP_MODS_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/layout_tests.cpp)
+  if(WIN32)
+    # The replay bridge includes the native page tracker (mprotect, signal
+    # handlers); Windows has the capture seam stub instead.
+    list(REMOVE_ITEM POP_MODS_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/tests/replay_tests_bridge.cpp)
+  endif()
   add_executable(mods_tests ${POP_MODS_TEST_SOURCES} $<TARGET_OBJECTS:mods_api_header_test>)
   target_link_libraries(mods_tests PRIVATE recomp_platform recomp_runtime_testing recomp_snapshot recomp_mods_testing lua)
   target_compile_options(mods_tests PRIVATE ${POP_WARN_HOST})

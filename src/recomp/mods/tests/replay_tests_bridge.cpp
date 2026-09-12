@@ -11,6 +11,7 @@
 #include "../../native/page_track.h"
 #include "../../native/shim_capture.h"
 #include <utility>
+#include "../../platform/os.h"
 namespace {
 // Only for the hand-audited pure leaf below. This adapter does not provide
 // complete shim interception, so it must never be used for arbitrary targets.
@@ -107,7 +108,7 @@ MOD_TEST_SUITE(replay_real_translated_leaf) {
 // the dispatcher, which is the only evidence that what a capture discovers is
 // what a replay needs.
 MOD_TEST_SUITE(capture_a_real_call_and_replay_it) {
-    setenv("POPM_TESTING", "1", 1);
+    os_setenv("POPM_TESTING", "1");
     sched_set_guest_thread(true);
     mods_hooks_reset();
     mem_init();
@@ -206,7 +207,6 @@ MOD_TEST_SUITE(capture_a_real_call_and_replay_it) {
 }
 #endif
 #ifdef POPM_TESTING
-#include "../../platform/os.h"
 namespace {
 char capture_last_log[256];
 PopModStatus capture_log(const PopModApi *, const char *message) {
@@ -236,17 +236,17 @@ MOD_TEST_SUITE(capture_fixture_fails_closed) {
     // A host that was not built for testing: refused before anything is read.
     const char *saved = getenv("POPM_TESTING");
     std::string keep = saved ? saved : "";
-    unsetenv("POPM_TESTING");
-    setenv("POPM_CAPTURE_TARGET", "0x00401000", 1);
-    setenv("POPM_CAPTURE_OUT", "build/recomp/should-not-exist.json", 1);
+    os_unsetenv("POPM_TESTING");
+    os_setenv("POPM_CAPTURE_TARGET", "0x00401000");
+    os_setenv("POPM_CAPTURE_OUT", "build/recomp/should-not-exist.json");
     capture_last_log[0] = 0;
     MOD_CHECK_EQ(init(&api), POP_E_STATE);
     MOD_CHECK(strstr(capture_last_log, "POPM_TESTING") != nullptr);
 
     // Configured for testing but told neither what to capture nor where.
-    setenv("POPM_TESTING", keep.empty() ? "1" : keep.c_str(), 1);
-    unsetenv("POPM_CAPTURE_TARGET");
-    unsetenv("POPM_CAPTURE_OUT");
+    os_setenv("POPM_TESTING", keep.empty() ? "1" : keep.c_str());
+    os_unsetenv("POPM_CAPTURE_TARGET");
+    os_unsetenv("POPM_CAPTURE_OUT");
     capture_last_log[0] = 0;
     MOD_CHECK_EQ(init(&api), POP_E_STATE);
     MOD_CHECK(strstr(capture_last_log, "POPM_CAPTURE_TARGET") != nullptr);
@@ -254,19 +254,20 @@ MOD_TEST_SUITE(capture_fixture_fails_closed) {
     // A target that is neither an address nor a symbol. api.symbol is null
     // here, so the address form is the one this case can reach; the symbol
     // form is exercised by the capture run itself.
-    setenv("POPM_CAPTURE_TARGET", "0xnot-an-address", 1);
-    setenv("POPM_CAPTURE_OUT", "build/recomp/should-not-exist.json", 1);
+    os_setenv("POPM_CAPTURE_TARGET", "0xnot-an-address");
+    os_setenv("POPM_CAPTURE_OUT", "build/recomp/should-not-exist.json");
     capture_last_log[0] = 0;
     MOD_CHECK_EQ(init(&api), POP_E_STATE);
     MOD_CHECK(strstr(capture_last_log, "not an address") != nullptr);
-    unsetenv("POPM_CAPTURE_TARGET");
-    unsetenv("POPM_CAPTURE_OUT");
+    os_unsetenv("POPM_CAPTURE_TARGET");
+    os_unsetenv("POPM_CAPTURE_OUT");
 
     MOD_CHECK_EQ(os_dlclose(library), 0);
 }
 #endif
 #include "../../native/tests/page_track_tests.cpp"
 #include "../../native/tests/shim_capture_tests.cpp"
+#include <algorithm>
 #ifdef POPM_TESTING
 // The corpus writer. Until this suite existed the only thing that exercised it
 // was a live capture run, which is a poor place to discover that a field is
@@ -292,7 +293,7 @@ std::string slurp(const char *path) {
 }
 } // namespace
 MOD_TEST_SUITE(capture_corpus_has_every_field_replay_needs) {
-    setenv("POPM_TESTING", "1", 1);
+    os_setenv("POPM_TESTING", "1");
     mem_init();
     imports_init();
     MOD_CHECK(pop_capture_available() == 1);
@@ -378,7 +379,7 @@ MOD_TEST_SUITE(capture_corpus_has_every_field_replay_needs) {
 // same arguments are indistinguishable in either order, so a reordering test
 // built on them could not fail whatever the code did.
 MOD_TEST_SUITE(capture_to_file_and_replay_with_intercepted_shims) {
-    setenv("POPM_TESTING", "1", 1);
+    os_setenv("POPM_TESTING", "1");
     sched_set_guest_thread(true);
     mods_hooks_reset();
     mem_init();
@@ -499,7 +500,7 @@ MOD_TEST_SUITE(capture_to_file_and_replay_with_intercepted_shims) {
 // the dispatch table with the recorded shim calls served in the shims' place,
 // and require every live register and every written page to match.
 MOD_TEST_SUITE(replay_a_captured_corpus_at_its_own_target) {
-    setenv("POPM_TESTING", "1", 1);
+    os_setenv("POPM_TESTING", "1");
     sched_set_guest_thread(true);
     mods_hooks_reset();
     mem_init();
@@ -583,7 +584,7 @@ MOD_TEST_SUITE(replay_a_captured_corpus_at_its_own_target) {
 
 namespace {
 std::pair<std::string, std::string> loader_rule_corpus(const char *suite) {
-    setenv("POPM_TESTING", "1", 1);
+    os_setenv("POPM_TESTING", "1");
     sched_set_guest_thread(true);
     mods_hooks_reset();
     mem_init();

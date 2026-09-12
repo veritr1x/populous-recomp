@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <map>
 #include <string>
+#include "../../platform/os.h"
 
 namespace {
 ModTestSuite *g_head = nullptr;
@@ -61,7 +62,7 @@ const char *mod_test_dir(const char *suite) {
 int main() {
     // Settings apply now persists immediately. Even suites which only exercise
     // the UI/API must have a scratch profile rather than the player's profile.
-    setenv("POPM_PROFILE_DIR", mod_test_dir("default-profile"), 1);
+    os_setenv("POPM_PROFILE_DIR", mod_test_dir("default-profile"));
     // Line buffered, always. Redirected to a file or a pipe, stdout is block
     // buffered, and a suite that crashes takes every earlier suite's result
     // down with it - the run then looks as though nothing ran at all, which

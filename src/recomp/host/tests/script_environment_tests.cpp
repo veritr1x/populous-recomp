@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include "../../platform/os.h"
 int main() {
     HostScriptStep steps[512];
     char error[256];
@@ -54,16 +55,16 @@ int main() {
     const char *old = getenv("LANDMARK");
     std::string saved = old ? old : "";
     bool had = old;
-    unsetenv("LANDMARK");
+    os_unsetenv("LANDMARK");
     assert(parse("landmark 41 expect $LANDMARK\n") == -1);
     for (const char *bad : {"", "maybe", "visible hidden", "$OTHER"}) {
-        setenv("LANDMARK", bad, 1);
+        os_setenv("LANDMARK", bad);
         assert(parse("landmark 41 expect $LANDMARK\n") == -1);
     }
-    setenv("LANDMARK", "visible", 1);
+    os_setenv("LANDMARK", "visible");
     assert(parse("landmark 41 expect $LANDMARK within 800\n") == 1);
     assert(steps[0].entity_id == 41 && steps[0].want_visible == 1 && steps[0].timeout_ms == 800);
-    setenv("LANDMARK", "hidden", 1);
+    os_setenv("LANDMARK", "hidden");
     assert(parse("landmark 41 expect $LANDMARK\n") == 1 && steps[0].want_visible == 0);
     for (const char *bad : {"$", "$9BAD", "${LANDMARK}", "$LANDMARK-bad"}) {
         std::string line = "landmark 41 expect " + std::string(bad) + "\n";
@@ -104,7 +105,7 @@ int main() {
         text << f.rdbuf();
         assert(text.str().find("PLACEHOLDER") == std::string::npos);
         for (const char *expectation : {"visible", "hidden"}) {
-            setenv("LANDMARK", expectation, 1);
+            os_setenv("LANDMARK", expectation);
             int count = parse(text.str().c_str());
             if (count < 0)
                 fprintf(stderr, "%s: %s\n", path, error);
@@ -159,8 +160,8 @@ int main() {
         }
     }
     if (had)
-        setenv("LANDMARK", saved.c_str(), 1);
+        os_setenv("LANDMARK", saved.c_str());
     else
-        unsetenv("LANDMARK");
+        os_unsetenv("LANDMARK");
     puts("script environment and fixture parser checks passed");
 }

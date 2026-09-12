@@ -5,12 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include "../../platform/os.h"
 
 namespace {
 const char *PROFILE = nullptr; // this suite's own, from mod_test_dir
 void fresh() {
     PROFILE = mod_test_dir("settings");
-    setenv("POPM_PROFILE_DIR", PROFILE, 1);
+    os_setenv("POPM_PROFILE_DIR", PROFILE);
     mods_settings_reset();
     mods_overlay_set_profile_dir(PROFILE);
 }

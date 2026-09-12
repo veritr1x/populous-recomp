@@ -20,6 +20,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 // The entry points a capture mod calls. A mod is a dylib loaded with
 // -undefined dynamic_lookup, so it declares these itself and the loader binds

@@ -85,9 +85,9 @@ void fresh() {
     static std::string tree;
     tree = mod_test_dir("loader-tree");
     TREE = tree.c_str();
-    setenv("POPM_MODS_DIR", TREE, 1);
-    setenv("POPM_CORE_MODS_DIR", (tree + "/absent-core").c_str(), 1);
-    unsetenv("POPM_NO_MODS");
+    os_setenv("POPM_MODS_DIR", TREE);
+    os_setenv("POPM_CORE_MODS_DIR", (tree + "/absent-core").c_str());
+    os_unsetenv("POPM_NO_MODS");
     // The profile directory is set through the overlay, which is what the
     // settings layer actually reads. POPM_SETTINGS is read by nobody, so
     // setting it isolated nothing and every suite shared one profile.
@@ -244,7 +244,7 @@ void two_case_conflict() {
 // Keep the existing first-run record test first in reverse registration order.
 MOD_TEST_SUITE(loader_packaged_core_display) {
     fresh();
-    setenv("POPM_CORE_MODS_DIR", "build/recomp/mods/core", 1);
+    os_setenv("POPM_CORE_MODS_DIR", "build/recomp/mods/core");
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("core.display"));
     MOD_CHECK_EQ(mods_record_status("core.display"), POP_OK);
@@ -262,7 +262,7 @@ MOD_TEST_SUITE(loader_core_roots) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-tree");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("first", manifest("z.core", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
             plug("good_a").c_str());
@@ -284,7 +284,7 @@ MOD_TEST_SUITE(loader_core_discovery_wins_duplicate) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-duplicate");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("z", manifest("same.id"));
     TREE = user;
@@ -298,15 +298,15 @@ MOD_TEST_SUITE(loader_no_mods_disables_both_roots) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-disabled");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("core", manifest("z.core"));
     TREE = user;
     install("user", manifest("a.user"));
-    setenv("POPM_NO_MODS", "1", 1);
+    os_setenv("POPM_NO_MODS", "1");
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 0u);
-    unsetenv("POPM_NO_MODS");
+    os_unsetenv("POPM_NO_MODS");
 }
 
 MOD_TEST_SUITE(loader_missing_core_and_failed_core_allow_users) {
@@ -318,7 +318,7 @@ MOD_TEST_SUITE(loader_missing_core_and_failed_core_allow_users) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-failure");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("broken", manifest("z.broken", "[plugin]\npath = \"" + plug("missing") + "\"\n"));
     TREE = user;
@@ -333,7 +333,7 @@ MOD_TEST_SUITE(loader_core_cycle_and_reverse_dependency_do_not_block_users) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-cycle");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("a", manifest("core.a", "requires = [\"core.b >= 1.0.0\"]\n"));
     install("b", manifest("core.b", "requires = [\"core.a >= 1.0.0\"]\n"));
@@ -353,7 +353,7 @@ MOD_TEST_SUITE(loader_core_conflict_precedes_lexically_smaller_user) {
     fresh();
     const char *user = TREE;
     std::string core = mod_test_dir("core-conflict");
-    setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
+    os_setenv("POPM_CORE_MODS_DIR", core.c_str());
     TREE = core.c_str();
     install("core", manifest("z.core", "conflicts = [\"a.user\"]\n"));
     TREE = user;
@@ -635,7 +635,7 @@ MOD_TEST_SUITE(loader_rollback_undoes_registrations_that_really_happened) {
 MOD_TEST_SUITE(loader_absent_and_empty_directories) {
     fresh();
     std::string gone = std::string(TREE) + "/definitely-not-here";
-    setenv("POPM_MODS_DIR", gone.c_str(), 1);
+    os_setenv("POPM_MODS_DIR", gone.c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 0u);
     // Nothing was installed, so the registry holds only the runtime's own
@@ -647,7 +647,7 @@ MOD_TEST_SUITE(loader_absent_and_empty_directories) {
     fresh();
     std::string empty = std::string(TREE) + "/empty-tree";
     mkdirs(empty);
-    setenv("POPM_MODS_DIR", empty.c_str(), 1);
+    os_setenv("POPM_MODS_DIR", empty.c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 0u);
     MOD_CHECK_EQ(mods_overlay_layer_count(), 0u);
@@ -1350,7 +1350,7 @@ MOD_TEST_SUITE(loader_record_accessors_are_safe_before_and_after) {
     fresh();
     std::string empty = std::string(TREE) + "/nothing";
     mkdirs(empty);
-    setenv("POPM_MODS_DIR", empty.c_str(), 1);
+    os_setenv("POPM_MODS_DIR", empty.c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 0u);
     MOD_CHECK(!mods_record(0, &id, nullptr, nullptr, nullptr, nullptr, nullptr, &is_loaded, nullptr,
@@ -1381,7 +1381,7 @@ MOD_TEST_SUITE(loader_an_empty_run_still_writes_its_record) {
     fresh();
     std::string empty = std::string(TREE) + "/no-mods-here";
     mkdirs(empty);
-    setenv("POPM_MODS_DIR", empty.c_str(), 1);
+    os_setenv("POPM_MODS_DIR", empty.c_str());
 
     // The path the loader writes to. Removed first and confirmed gone, so
     // what is found afterwards was written by THIS shutdown and is not

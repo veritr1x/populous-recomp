@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #include <vector>
+#include <functional>
 
 namespace {
 class SdlSink final : public AudioSink {

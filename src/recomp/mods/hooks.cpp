@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
+#include <algorithm>
 
 #define MODS_MAX_CHAIN 16
 #define MODS_MAX_DEPTH 32
