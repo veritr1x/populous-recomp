@@ -9,7 +9,7 @@ the "Now" section at every milestone and commit it with the work.
 | # | Sub-project | Spec | Plan | State |
 | --- | --- | --- | --- | --- |
 | 1 | Portable build system + `os.h` platform layer | `specs/2026-09-12-portable-build-system-design.md` | `plans/2026-09-12-portable-build-system.md` | **Done.** Merged to `main` (commits 3fa44f4..920de70), CI green on macOS, Ubuntu, Windows. |
-| 2 | Host abstraction: GPU device interface (Metal first), SDL3 window/input on macOS, portable audio mixer + TinySoundFont MIDI | `specs/2026-09-12-host-abstraction-design.md` | `plans/2026-09-12-host-abstraction.md` | **Implemented** on branch `host-abstraction` (10 tasks, 9 commits). Awaiting the manual window checklist, the branch CI run and the merge decision. |
+| 2 | Host abstraction: GPU device interface (Metal first), SDL3 window/input on macOS, portable audio mixer + TinySoundFont MIDI | `specs/2026-09-12-host-abstraction-design.md` | `plans/2026-09-12-host-abstraction.md` | **Done.** Merged to `main` (commits 1b35ca9..0e862a5), CI green on macOS, Ubuntu, Windows. The manual window checklist is still for a person to run. |
 | 3 | Vulkan backend + Windows/Linux hosts (presets, CI labels) | not yet | not yet | Not started. |
 | 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | not yet | not yet | Not started. |
 
@@ -21,13 +21,13 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 ## Now
 
-- Branch: `host-abstraction` (forked from `main` at 920de70).
+- Sub-project 2 merged to `main` at 0e862a5; branch deleted locally and on origin.
 - Plan: `plans/2026-09-12-host-abstraction.md`, all ten tasks executed inline;
   execution notes at the end of the plan record every deviation.
 - What a person still has to do: launch `build/PopRecomp.app` and run the
   window checklist (front end renders; mouse and keyboard reach the game;
   Escape releases capture; window modes 0/1/2 from the settings page; resize;
-  focus loss; Cmd-Q quits with the close report). Then decide merge vs PR.
+  focus loss; Cmd-Q quits with the close report).
 - CI: green on macOS, Ubuntu and Windows at 39bb72d (run 34692907811). The Linux job now installs SDL3's documented build dependencies.
 - Next sub-project: 3 (Vulkan backend behind `gpu/gpu.h`, Windows/Linux hosts
   over the same SDL host, presets and CI labels). Start with brainstorming.
