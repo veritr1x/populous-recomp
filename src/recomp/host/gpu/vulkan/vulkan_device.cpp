@@ -306,6 +306,8 @@ VulkanDevice::~VulkanDevice() {
         vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
     if (set_layout_)
         vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
+    if (transfer_fence_)
+        vkDestroyFence(device_, transfer_fence_, nullptr);
     vkDestroyCommandPool(device_, command_pool_, nullptr);
     vkDestroyDevice(device_, nullptr);
     vkDestroyInstance(instance_, nullptr);
@@ -364,38 +366,39 @@ void VulkanDevice::full_barrier(VkCommandBuffer cb) {
 }
 
 VkCommandBuffer VulkanDevice::one_shot_begin() {
-    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    ai.commandPool = command_pool_;
-    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-    VkCommandBuffer cb = VK_NULL_HANDLE;
-    {
+    transfer_mutex_.lock(); // released by one_shot_end_wait
+    if (!transfer_cb_) {
+        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = command_pool_;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         std::lock_guard lock(queue_mutex_); // the pool is externally synchronised
-        vkAllocateCommandBuffers(device_, &ai, &cb);
+        vkAllocateCommandBuffers(device_, &ai, &transfer_cb_);
+        vkCreateFence(device_, &fci, nullptr, &transfer_fence_);
+    } else {
+        std::lock_guard lock(queue_mutex_);
+        vkResetCommandBuffer(transfer_cb_, 0);
     }
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cb, &bi);
-    return cb;
+    vkBeginCommandBuffer(transfer_cb_, &bi);
+    return transfer_cb_;
 }
 
 void VulkanDevice::one_shot_end_wait(VkCommandBuffer cb) {
     vkEndCommandBuffer(cb);
-    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    VkFence fence;
-    vkCreateFence(device_, &fci, nullptr, &fence);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;
     {
         std::lock_guard lock(queue_mutex_);
-        if (vkQueueSubmit(queue_, 1, &si, fence) != VK_SUCCESS)
+        vkResetFences(device_, 1, &transfer_fence_);
+        if (vkQueueSubmit(queue_, 1, &si, transfer_fence_) != VK_SUCCESS)
             fail("one-shot submit failed");
     }
-    vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(device_, fence, nullptr);
-    std::lock_guard lock(queue_mutex_);
-    vkFreeCommandBuffers(device_, command_pool_, 1, &cb);
+    vkWaitForFences(device_, 1, &transfer_fence_, VK_TRUE, UINT64_MAX);
+    transfer_mutex_.unlock();
 }
 
 // ---------------------------------------------------------------- textures

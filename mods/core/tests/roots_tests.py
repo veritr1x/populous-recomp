@@ -33,7 +33,8 @@ def main():
         macos.mkdir(parents=True)
         relocated = macos / src.name
         shutil.copy2(src, relocated)
-        run(relocated, [str(macos / "../Resources/mods/core"), "mods"], {})
+        # The resolver reports forward slashes on every platform.
+        run(relocated, [(macos / "../Resources/mods/core").as_posix(), "mods"], {})
         run(relocated, ["/override", "mods"], {"POPM_CORE_MODS_DIR": "/override"})
         run(probe, ["/incorrect/core", "mods"], {}, expect_ok=False)
     print("PASS: default, overrides, empty overrides, relocated app and negative control")

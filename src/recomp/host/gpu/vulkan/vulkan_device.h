@@ -212,6 +212,13 @@ class VulkanDevice final : public Device {
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    // The one-shot transfer buffer uploads and readbacks share, serialised by
+    // transfer_mutex_ (held from one_shot_begin to one_shot_end_wait). Reused
+    // rather than allocated per call: freeing command buffers is slow on
+    // MoltenVK and used to starve the other threads.
+    VkCommandBuffer transfer_cb_ = VK_NULL_HANDLE;
+    VkFence transfer_fence_ = VK_NULL_HANDLE;
+    std::mutex transfer_mutex_;
     VkPhysicalDeviceProperties props_{};
     VkPhysicalDeviceMemoryProperties memory_props_{};
     uint32_t subgroup_size_ = 32;
