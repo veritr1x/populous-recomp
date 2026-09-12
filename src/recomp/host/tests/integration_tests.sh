@@ -176,8 +176,10 @@ check "and recorded an empty mod set" \
 
 echo "== windowed app: links the runtime, never launched here =="
 make recomp > "$OUT/app.log" 2>&1
-check "the app build reports its installed core root" \
-      "grep -Fq 'core mods: installed $ROOT/build/PopRecomp.app/Contents/Resources/mods/core' $OUT/app.log"
+# The installer runs as the bundle's post-build step, which Ninja skips when
+# the app is already up to date, so the evidence is the installed plugin.
+check "the app build installed its core root" \
+      "[ -s build/PopRecomp.app/Contents/Resources/mods/core/display/display.dylib ]"
 check "the app contains the executable-relative roots resolver" \
       "nm -U build/PopRecomp.app/Contents/MacOS/PopRecomp | grep -q mods_roots"
 check "the app core resources were copied" \
