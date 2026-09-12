@@ -36,7 +36,7 @@
 #include "../../runtime/win32.h"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_metal.h>
+#include <SDL3/SDL_vulkan.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -74,8 +74,7 @@ enum {
 namespace {
 
 SDL_Window *g_window = nullptr;
-SDL_MetalView g_metal_view = nullptr;
-void *g_surface = nullptr; // the CAMetalLayer the presenter draws into
+void *g_surface = nullptr; // the native surface the presenter draws into
 std::unique_ptr<gpu::Device> g_gpu;
 bool g_close_requested = false; // the user asked to close
 bool g_guest_activated = false; // WM_ACTIVATEAPP(1) has been delivered
@@ -833,206 +832,12 @@ void apply_mode_change() {
     g_mode_w = (int)g_pending_mode_w;
     g_mode_h = (int)g_pending_mode_h;
     int scale = window_scale_for(g_mode_w, g_mode_h);
-    if (g_window_mode == 0 && !g_fullscreen_transition) {
-        SDL_SetWindowSize(g_window, g_mode_w * scale, g_mode_h * scale);
-        SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-        post_drawable_size();
-    }
-    host_set_client_size(host_main_window(), g_mode_w, g_mode_h);
-    // The window may never be smaller than the guest's frame, or the integer
-    // scaling has no whole multiple to take.
-    SDL_SetWindowMinimumSize(g_window, g_mode_w, g_mode_h);
-}
-
-// True when this thread may touch the window at all.
-bool on_host_thread() {
-    if (boot_on_run_thread() && SDL_IsMainThread())
-        return true;
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        fprintf(stderr, "[host] a guest worker thread reached the host; the window is "
-                        "serviced only on the main thread\n");
-    }
-    return false;
-}
-
-// One turn of the host's event loop, called from inside guest code.
-//
-// The tick can arrive on any guest thread: the runtime's cooperative scheduler
-// hands the baton to real pthreads and whichever one holds it reads the clock.
-// The window belongs to the thread that called boot_run, so a tick on any
-// other thread does nothing at all and hands control straight back.
-void pump() {
-    if (!on_host_thread())
-        return;
-    // First: anything an idle slice decoded but could not apply. This thread
-    // reached here through the guest's own clock read, so it holds the baton
-    // and a mod callback dispatched from here is serialised against every
-    // other guest thread, which is the whole point.
-    deliver_pending_input();
-    apply_window_mode();
-    apply_mode_change();
-    service(0.0);
-    after_events();
-    host_gate_pointer_tick();
-}
-
-// The runtime's idle wait, called on the run thread when the guest is about to
-// block. Returns 1 when input arrived, so the caller can re-check its own
-// condition at once.
-int idle_wait(double seconds) {
-    if (!on_host_thread())
-        return 0;
-    if (seconds < 0.0)
-        seconds = 0.0;
-    apply_window_mode();
-    apply_mode_change();
-    int changed = service(seconds);
-    after_events();
-    return changed;
-}
-
-void on_mode_change(int w, int h, int bpp) {
-    (void)bpp;
-    if (w <= 0 || h <= 0)
-        return;
-    g_pending_mode_w = (uint32_t)w;
-    g_pending_mode_h = (uint32_t)h;
-    g_mode_dirty = true;
-}
-
-// The watchdog takes the report lock before calling this and main takes it
-// around its own call, so everything below reads a consistent snapshot.
-void report(FILE *out, bool abnormal) {
-    fprintf(out, "\n== windowed run ==\n");
-    fprintf(out, "stopped:            %s\n", boot_stop_reason());
-    fprintf(out, "elapsed:            %.1fs\n", boot_elapsed());
-    fprintf(out, "presented frames:   %u\n", host_present_count());
-    // Per display mode, because a rate averaged over a whole run mixes the
-    // menu and the loading screen in with gameplay.
-    for (int i = 0; i < host_present_rate_count(); ++i) {
-        HostPresentRate r;
-        memset(&r, 0, sizeof r);
-        host_present_rate(i, &r);
-        fprintf(out, "  %4dx%-4d %2dbpp:  %u guest presents; %.1fs at this mode\n", r.w, r.h, r.bpp,
-                r.presents, r.seconds);
-    }
-    // The two lines the display baseline is made of, in the same words the
-    // smoke host uses, because display_compare.py parses the text.
-    {
-        char line[768];
-        if (host_stats_gameplay_line(line, sizeof line))
-            fprintf(out, "gameplay: %s\n", line);
-        if (host_stats_access_line(line, sizeof line))
-            fprintf(out, "%s\n", line);
-    }
-    fprintf(out, "input changes:      %u announced to the DirectInput shim\n",
-            host_input_notify_count());
-    fprintf(out,
-            "Direct3D:           %u draws, %u textures, %u write-backs into the "
-            "render target\n",
-            host_d3d_total_draws(), host_d3d_total_textures(), host_d3d_total_flushes());
-    // What the mixer actually produced, when the run was asked to capture it.
-    host_capture_print(out);
-    boot_print_dx_objects(out);
-    boot_print_exit_code(out);
-    boot_print_undeliverable(out);
-    fflush(out);
-    boot_print_import_stats(out, abnormal);
-}
-
-// The .app can be started from anywhere, and the guest's file system is rooted
-// at the directory holding the EXE. Walking up from the executable finds the
-// checkout whichever way the app was launched.
-std::string find_exe_relative_to_bundle() {
-    if (const char *env = getenv("POP_RECOMP_EXE"))
-        return env;
-    char path[4096];
-    if (os_exe_path(path, sizeof path) != 0)
-        return "";
-    std::string dir(path);
-    for (int depth = 0; depth < 12; ++depth) {
-        size_t slash = dir.find_last_of('/');
-        if (slash == std::string::npos)
-            break;
-        dir = dir.substr(0, slash);
-        std::string candidate = dir + "/original/gog/D3DPopTB.exe";
-        FILE *f = fopen(candidate.c_str(), "rb");
-        if (f) {
-            fclose(f);
-            // The runtime resolves the guest's relative paths against the
-            // process's working directory, so the checkout root becomes it.
-            if (os_chdir(dir.c_str()) != 0)
-                fprintf(stderr, "[host] could not enter %s\n", dir.c_str());
-            return candidate;
-        }
-    }
-    return "";
-}
-
-// The bundled classic-modes table when this is an app bundle, else the checkout's.
-std::string classic_modes_path() {
-    char path[4096];
-    if (os_exe_path(path, sizeof path) == 0) {
-        std::string exe(path);
-        const size_t macos = exe.rfind("/Contents/MacOS/");
-        if (macos != std::string::npos) {
-            std::string candidate = exe.substr(0, macos) + "/Contents/Resources/classic-modes.json";
-            if (FILE *f = fopen(candidate.c_str(), "rb")) {
-                fclose(f);
-                return candidate;
-            }
-        }
-    }
-    return "tools/recomp/baseline/classic-modes.json";
-}
-
-void post_drawable_size() {
-    int bw, bh, dw, dh;
-    window_sizes(&bw, &bh, &dw, &dh);
-    static int last_w = 0, last_h = 0;
-    if (dw <= 0 || dh <= 0 || (last_w == dw && last_h == dh))
-        return;
-    last_w = dw;
-    last_h = dh;
-    host_present_resize(dw, dh);
-}
-
-} // namespace
-
-// ---------------------------------------------------------------------------
-
-int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
-    std::string exe = find_exe_relative_to_bundle();
-    if (exe.empty()) {
-        fprintf(stderr, "PopRecomp: original/gog/D3DPopTB.exe was not found above this "
-                        "executable.\nRun the binary from the checkout, or set "
-                        "POP_RECOMP_EXE to the image.\n");
-        return 2;
-    }
-
-    // A click that brings the window forward reaches the game in the same
-    // event, rather than being swallowed as the activating click.
-    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
-    SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "0");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
-        fprintf(stderr, "PopRecomp: SDL_Init failed: %s\n", SDL_GetError());
-        return 3;
-    }
-
-    g_gpu = gpu::create_default_device();
-    if (!g_gpu) {
-        fprintf(stderr, "PopRecomp: no GPU device is available (%s)\n",
-                gpu::default_backend_name());
-        return 3;
-    }
-
-    int scale = window_scale_for(g_mode_w, g_mode_h);
+    const bool vulkan = strcmp(gpu::default_backend_name(), "vulkan") == 0;
+    if (vulkan && !SDL_Vulkan_LoadLibrary(gpu::vulkan_loader_path()))
+        fprintf(stderr, "PopRecomp: SDL_Vulkan_LoadLibrary: %s\n", SDL_GetError());
+    const SDL_WindowFlags surface_flag = vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_METAL;
     g_window = SDL_CreateWindow("Populous: The Beginning", g_mode_w * scale, g_mode_h * scale,
-                                SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+                                surface_flag | SDL_WINDOW_HIGH_PIXEL_DENSITY |
                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
     if (!g_window) {
         fprintf(stderr, "PopRecomp: SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -1040,12 +845,13 @@ int main(int argc, char **argv) {
     }
     SDL_SetWindowMinimumSize(g_window, g_mode_w, g_mode_h);
     SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
-    g_metal_view = SDL_Metal_CreateView(g_window);
-    g_surface = g_metal_view ? SDL_Metal_GetLayer(g_metal_view) : nullptr;
+    g_surface = gpu::native_surface_for_window(g_window);
     if (!g_surface) {
-        fprintf(stderr, "PopRecomp: no Metal layer for the window: %s\n", SDL_GetError());
+        fprintf(stderr, "PopRecomp: no %s surface for the window: %s\n",
+                gpu::default_backend_name(), SDL_GetError());
         return 3;
     }
+    fprintf(stderr, "GPU backend: %s\n", gpu::default_backend_name());
 
     // The renderer first: the presenter shares its device, so a present
     // cannot run ahead of the scene it is showing.
@@ -1136,7 +942,7 @@ int main(int argc, char **argv) {
     // Whatever else happens, the user gets their cursor back.
     apply_pointer_capture(false);
     SDL_HideWindow(g_window);
-    SDL_Metal_DestroyView(g_metal_view);
+    gpu::release_window_surface(g_surface);
     SDL_DestroyWindow(g_window);
     SDL_Quit();
     return 0;

@@ -349,8 +349,8 @@ Pipeline VulkanDevice::compute_pipeline(const std::string &shader) {
     cci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     cci.stage.module = m;
     cci.stage.pName = "main";
-    if (core13_ && width != 256)
-        cci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+    // No REQUIRE_FULL_SUBGROUPS: that needs local_size_x to be a multiple of the
+    // subgroup size and the kernel is 16x16; 256 lanes fill whole subgroups anyway.
     cci.layout = pipeline_layout_;
     ComputePipe cp;
     cp.width = width;

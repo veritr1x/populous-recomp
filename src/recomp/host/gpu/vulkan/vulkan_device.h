@@ -153,6 +153,14 @@ class VulkanDevice final : public Device {
         uint64_t id = 0;
         std::unique_ptr<Cmd> cmd;
     };
+    // A destroyed resource a recording or in-flight command buffer may still
+    // reference: freed once every command buffer in `waits` has retired, the
+    // retention Metal's encoders gave for free.
+    struct Grave {
+        Tex tex;
+        Buf buf;
+        std::vector<uint64_t> waits;
+    };
     struct Chain {
         void *window = nullptr; // SDL_Window*
         VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -192,6 +200,9 @@ class VulkanDevice final : public Device {
     VkSampler sampler_for(const SamplerState &s);
     void bind_descriptors(Cmd &c, VkPipelineBindPoint point);
     void destroy_tex(Tex &t);
+    void destroy_buf(Buf &b);
+    void bury(Tex tex, Buf buf);         // mutex held
+    void retire_graves(uint64_t cmd_id); // mutex held
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
@@ -205,6 +216,7 @@ class VulkanDevice final : public Device {
     bool subgroup_arithmetic_ = false;
     bool anisotropy_ = false;
     bool core13_ = false;
+    bool full_subgroups_ = false; // computeFullSubgroups enabled
     bool failed_ = false;
 
     std::mutex mutex_; // guards every table below
@@ -216,6 +228,7 @@ class VulkanDevice final : public Device {
     std::vector<std::unique_ptr<Cmd>> free_cmds_;
     // Submitted and not yet retired, in submission order (the reaper's queue).
     std::deque<Submission> submitted_;
+    std::vector<Grave> graves_;
     std::unordered_map<uint64_t, CommandStatus> retired_; // bounded: last 1024
     std::deque<uint64_t> retired_order_;
     std::condition_variable reaper_cv_, retired_cv_;

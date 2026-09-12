@@ -33,6 +33,7 @@
 //   POPM_LOG, POPM_IMPORT_STATS  as documented in src/recomp/runtime/README.md
 #include "audio.h"
 #include "audio_capture.h"
+#include "../platform/os.h"
 #include "boot.h"
 #include "page_overlay.h"
 #include "../runtime/guest.h"
@@ -44,7 +45,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include <string>
 #include <vector>
@@ -93,7 +93,7 @@ void mkdir_p(const std::string &path) {
     while (i <= path.size()) {
         if (i == path.size() || path[i] == '/') {
             if (!acc.empty())
-                mkdir(acc.c_str(), 0755);
+                os_mkdir(acc.c_str());
         }
         if (i < path.size())
             acc.push_back(path[i]);

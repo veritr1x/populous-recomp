@@ -11,7 +11,11 @@ target_compile_options(host_common PRIVATE ${POP_WARN_HOST})
 pop_optimize(host_common 1)
 
 # Compiling Objective-C++ under ARC, as every script did; a no-op for C++.
-set(POP_OBJC_ARC $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+if(APPLE)
+  set(POP_OBJC_ARC $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+else()
+  set(POP_OBJC_ARC "")
+endif()
 
 # The GPU interface, its test double, the Vulkan backend and (on Apple) Metal.
 add_subdirectory(gpu)
@@ -46,15 +50,15 @@ pop_test_binary(ui_layer_tests)
 add_test(NAME ui_layer_tests COMMAND ui_layer_tests WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(ui_layer_tests PROPERTIES LABELS nogame)
 
-# The hosts and the full host suite: until sub-project 3 supplies a Vulkan
-# backend, only the platform with a GPU backend builds them.
-if(NOT APPLE)
-  return()
+# The hosts and the full host suite build on every platform over gpu_backend.
+if(APPLE)
+  set(FW_FOUNDATION "-framework Foundation")
+  set(FW_METAL "-framework Metal" "-framework MetalKit" "-framework CoreText"
+               "-framework CoreVideo" "-framework CoreGraphics" "-framework QuartzCore")
+else()
+  set(FW_FOUNDATION "")
+  set(FW_METAL "")
 endif()
-
-set(FW_FOUNDATION "-framework Foundation")
-set(FW_METAL "-framework Metal" "-framework MetalKit" "-framework CoreText"
-             "-framework CoreVideo" "-framework CoreGraphics" "-framework QuartzCore")
 
 # pop_host(<target> [GEN] [UI_LAYER] [OPT <n>] SOURCES ... LIBS ... FRAMEWORKS ...):
 # a host or a test binary over the runtime, shims, mods and Lua.
@@ -107,16 +111,20 @@ if(TARGET recomp_gen)
     LIBS ${POP_CORE_LIBS}
     FRAMEWORKS ${FW_METAL})
   pop_link_sdl(PopRecomp)
-  pop_mac_bundle(PopRecomp)
+  if(APPLE)
+    pop_mac_bundle(PopRecomp)
+  endif()
 
-  # Real loader, hooks and DirectDraw seal/service with fake GPU acks.
-  pop_host(present_events_tests GEN UI_LAYER
-    SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
-            ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
-    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_backend
-    FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
-  add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
-  set_tests_properties(present_events_tests PROPERTIES LABELS mods)
+  if(APPLE) # Objective-C++ source
+    # Real loader, hooks and DirectDraw seal/service with fake GPU acks.
+    pop_host(present_events_tests GEN UI_LAYER
+      SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
+              ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
+      LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_backend
+      FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
+    add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
+    set_tests_properties(present_events_tests PROPERTIES LABELS mods)
+  endif()
 endif()
 
 # Host tests: offscreen GPU work and the mixer rendered offline, no window and

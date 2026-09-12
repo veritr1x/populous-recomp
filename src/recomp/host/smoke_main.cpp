@@ -2249,6 +2249,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "smoke: no GPU device\n");
             return 3;
         }
+        fprintf(stderr, "GPU backend: %s\n", gpu::default_backend_name());
         g_renderer = new D3DRenderer(gpu_device.get());
         host_present_set_device(gpu_device.get());
         if (!g_renderer->ok()) {

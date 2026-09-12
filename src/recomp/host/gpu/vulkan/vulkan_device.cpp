@@ -190,7 +190,16 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
     VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
     if (d->core13_) {
+        VkPhysicalDeviceVulkan13Features have13{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceFeatures2 have2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        have2.pNext = &have13;
+        vkGetPhysicalDeviceFeatures2(chosen, &have2);
         f13.dynamicRendering = VK_TRUE;
+        if (have13.subgroupSizeControl && have13.computeFullSubgroups) {
+            f13.subgroupSizeControl = f13.computeFullSubgroups = VK_TRUE;
+            d->full_subgroups_ = true;
+        }
         f2.pNext = &f13;
     } else {
         fdr.dynamicRendering = VK_TRUE;
@@ -255,9 +264,11 @@ VulkanDevice::~VulkanDevice() {
     }
     for (auto &[id, t] : textures_)
         destroy_tex(t);
-    for (auto &[id, b] : buffers_) {
-        vkDestroyBuffer(device_, b.buffer, nullptr);
-        vkFreeMemory(device_, b.memory, nullptr);
+    for (auto &[id, b] : buffers_)
+        destroy_buf(b);
+    for (auto &g : graves_) {
+        destroy_tex(g.tex);
+        destroy_buf(g.buf);
     }
     if (dummy_buffer_.buffer) {
         vkDestroyBuffer(device_, dummy_buffer_.buffer, nullptr);
@@ -480,6 +491,45 @@ void VulkanDevice::destroy_tex(Tex &t) {
     t = Tex{};
 }
 
+void VulkanDevice::destroy_buf(Buf &b) {
+    if (b.buffer)
+        vkDestroyBuffer(device_, b.buffer, nullptr);
+    if (b.memory)
+        vkFreeMemory(device_, b.memory, nullptr);
+    b = Buf{};
+}
+
+void VulkanDevice::bury(Tex tex, Buf buf) {
+    Grave g;
+    g.tex = tex;
+    g.buf = buf;
+    for (auto &[id, c] : recording_)
+        g.waits.push_back(id);
+    for (auto &s : submitted_)
+        g.waits.push_back(s.id);
+    if (g.waits.empty()) {
+        destroy_tex(g.tex);
+        destroy_buf(g.buf);
+        return;
+    }
+    graves_.push_back(std::move(g));
+}
+
+void VulkanDevice::retire_graves(uint64_t cmd_id) {
+    for (size_t i = 0; i < graves_.size();) {
+        auto &w = graves_[i].waits;
+        w.erase(std::remove(w.begin(), w.end(), cmd_id), w.end());
+        if (w.empty()) {
+            destroy_tex(graves_[i].tex);
+            destroy_buf(graves_[i].buf);
+            graves_[i] = std::move(graves_.back());
+            graves_.pop_back();
+        } else {
+            ++i;
+        }
+    }
+}
+
 static bool region_in_level(const TextureDesc &d, Region r, int level) {
     if (level < 0 || level >= d.mip_levels)
         return false;
@@ -572,13 +622,14 @@ bool VulkanDevice::readback(Texture tex, Region region, void *bytes, int pitch) 
 }
 
 void VulkanDevice::destroy(Texture tex) {
-    wait_all_submitted();
     std::lock_guard lock(mutex_);
     auto it = textures_.find(tex.id);
     if (it == textures_.end())
         return;
-    destroy_tex(it->second);
+    Tex t = it->second;
     textures_.erase(it);
+    if (!t.external)
+        bury(t, Buf{});
 }
 
 TextureDesc VulkanDevice::describe(Texture tex) {
@@ -669,14 +720,13 @@ uint64_t VulkanDevice::buffer_bytes(Buffer buf) {
 }
 
 void VulkanDevice::destroy(Buffer buf) {
-    wait_all_submitted();
     std::lock_guard lock(mutex_);
     auto it = buffers_.find(buf.id);
     if (it == buffers_.end())
         return;
-    vkDestroyBuffer(device_, it->second.buffer, nullptr);
-    vkFreeMemory(device_, it->second.memory, nullptr);
+    Buf b = it->second;
     buffers_.erase(it);
+    bury(Tex{}, b);
 }
 
 // --------------------------------------------------------- command buffers
@@ -818,6 +868,7 @@ void VulkanDevice::commit(CommandBuffer cb) {
         auto callbacks = std::move(c->callbacks);
         retired_[cb.id] = CommandStatus::Error;
         retired_order_.push_back(cb.id);
+        retire_graves(cb.id);
         free_cmds_.push_back(std::move(c));
         for (auto &fn : callbacks)
             fn(CommandStatus::Error, 0);
@@ -861,6 +912,7 @@ void VulkanDevice::reap_loop() {
         s.cmd->presented = nullptr;
         retired_[s.id] = status;
         retired_order_.push_back(s.id);
+        retire_graves(s.id);
         while (retired_order_.size() > 1024) {
             retired_.erase(retired_order_.front());
             retired_order_.pop_front();
