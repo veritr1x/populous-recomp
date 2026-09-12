@@ -253,6 +253,7 @@ VulkanDevice::~VulkanDevice() {
             vkDestroyInstance(instance_, nullptr);
         return;
     }
+    flush_pending();
     wait_all_submitted();
     {
         std::lock_guard lock(mutex_);
@@ -382,6 +383,7 @@ void VulkanDevice::full_barrier(VkCommandBuffer cb) {
 
 VkCommandBuffer VulkanDevice::one_shot_begin() {
     transfer_mutex_.lock(); // released by one_shot_end_wait
+    flush_pending_locked(); // queue order puts the pending transfers first
     if (!transfer_cb_) {
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -481,18 +483,26 @@ Texture VulkanDevice::create_texture(const TextureDesc &desc) {
             return {};
         }
     }
-    // Move to GENERAL once; it never leaves.
-    VkCommandBuffer cb = one_shot_begin();
-    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = t.image;
-    b.subresourceRange = vci.subresourceRange;
-    b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &b);
-    one_shot_end_wait(cb);
+    // Move to GENERAL once, in the pending transfer buffer: every consumer's
+    // submission is preceded by its flush, so the image is never used first.
+    {
+        std::lock_guard transfer(transfer_mutex_);
+        Cmd *p = pending_locked();
+        if (!p) {
+            destroy_tex(t);
+            return {};
+        }
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = t.image;
+        b.subresourceRange = vci.subresourceRange;
+        b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(p->buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        pending_dirty_ = true;
+    }
     std::lock_guard lock(mutex_);
     uint64_t id = next_id_++;
     textures_[id] = t;
@@ -574,35 +584,34 @@ bool VulkanDevice::upload(Texture tex, Region region, const void *bytes, int pit
         return false;
     const int bpp = bytes_per_pixel(t.desc.format);
     const uint64_t row = uint64_t(region.w) * bpp, total = row * region.h;
-    // No wait on in-flight command buffers: the one-shot copy is queued behind
-    // them on the single queue and its barrier orders it after their work, as
-    // Metal's replaceRegion is. Waiting here would also deadlock a caller that
-    // holds a lock the reaper's completion callbacks need.
-    VkBuffer src = t.staging;
-    VkDeviceMemory src_mem = VK_NULL_HANDLE;
-    void *map = t.staging_map;
-    const bool transient = !src || level != 0 || total > t.staging_bytes;
-    if (transient &&
-        !make_host_buffer(*this, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &src, &src_mem, &map))
+    // A transient staging buffer per upload: the copy runs later, in the
+    // pending transfer buffer, so the shared staging cannot be reused yet.
+    // The graveyard frees it once that buffer has retired.
+    Buf staging;
+    staging.bytes = total;
+    if (!make_host_buffer(*this, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging.buffer,
+                          &staging.memory, &staging.map))
         return false;
     for (int y = 0; y < region.h; ++y)
-        memcpy(static_cast<uint8_t *>(map) + y * row,
+        memcpy(static_cast<uint8_t *>(staging.map) + y * row,
                static_cast<const uint8_t *>(bytes) + uint64_t(y) * pitch, size_t(row));
-    VkCommandBuffer cb = one_shot_begin();
-    full_barrier(cb);
+    std::lock_guard transfer(transfer_mutex_);
+    Cmd *p = pending_locked();
+    if (!p) {
+        destroy_buf(staging);
+        return false;
+    }
+    full_barrier(p->buffer); // orders this copy after earlier copies to the same image
     VkBufferImageCopy c{};
     c.bufferRowLength = uint32_t(region.w);
     c.bufferImageHeight = uint32_t(region.h);
     c.imageSubresource = {aspect_of(t.desc.format), uint32_t(level), 0, 1};
     c.imageOffset = {region.x, region.y, 0};
     c.imageExtent = {uint32_t(region.w), uint32_t(region.h), 1};
-    vkCmdCopyBufferToImage(cb, src, t.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-    full_barrier(cb);
-    one_shot_end_wait(cb);
-    if (transient) {
-        vkDestroyBuffer(device_, src, nullptr);
-        vkFreeMemory(device_, src_mem, nullptr);
-    }
+    vkCmdCopyBufferToImage(p->buffer, staging.buffer, t.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    pending_dirty_ = true;
+    std::lock_guard lock(mutex_);
+    bury(Tex{}, staging);
     return true;
 }
 
@@ -859,7 +868,45 @@ void VulkanDevice::on_complete(CommandBuffer cb, std::function<void(CommandStatu
         c->callbacks.push_back(std::move(fn));
 }
 
+VulkanDevice::Cmd *VulkanDevice::pending_locked() {
+    if (!pending_id_) {
+        CommandBuffer cb = begin();
+        if (!cb)
+            return nullptr;
+        pending_id_ = cb.id;
+    }
+    std::lock_guard lock(mutex_);
+    return cmd({pending_id_});
+}
+
+void VulkanDevice::flush_pending_locked() {
+    if (!pending_id_)
+        return;
+    if (!pending_dirty_)
+        return; // keep the open, empty buffer for the next transfer
+    std::unique_ptr<Cmd> c;
+    const uint64_t id = pending_id_;
+    {
+        std::lock_guard lock(mutex_);
+        auto it = recording_.find(id);
+        if (it != recording_.end()) {
+            c = std::move(it->second);
+            recording_.erase(it);
+        }
+    }
+    pending_id_ = 0;
+    pending_dirty_ = false;
+    if (c)
+        submit_cmd(id, std::move(c));
+}
+
+void VulkanDevice::flush_pending() {
+    std::lock_guard transfer(transfer_mutex_);
+    flush_pending_locked();
+}
+
 void VulkanDevice::commit(CommandBuffer cb) {
+    flush_pending(); // the transfers this work may read go first, in queue order
     std::unique_ptr<Cmd> c;
     {
         std::lock_guard lock(mutex_);
@@ -870,6 +917,11 @@ void VulkanDevice::commit(CommandBuffer cb) {
         recording_.erase(it);
         end_passes(*c);
     }
+    submit_cmd(cb.id, std::move(c));
+}
+
+void VulkanDevice::submit_cmd(uint64_t id, std::unique_ptr<Cmd> c) {
+    const CommandBuffer cb{id};
     if (c->queries)
         vkCmdWriteTimestamp(c->buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, c->queries, 1);
     vkEndCommandBuffer(c->buffer);

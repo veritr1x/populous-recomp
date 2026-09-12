@@ -218,13 +218,22 @@ class VulkanDevice final : public Device {
     // pool: the host's per-command-buffer discipline is then all the pool needs.
     std::vector<std::unique_ptr<Cmd>> free_cmds_;  // guarded by mutex_
     VkCommandPool transfer_pool_ = VK_NULL_HANDLE; // guarded by transfer_mutex_
-    // The one-shot transfer buffer uploads and readbacks share, serialised by
-    // transfer_mutex_ (held from one_shot_begin to one_shot_end_wait). Reused
-    // rather than allocated per call: freeing command buffers is slow on
-    // MoltenVK and used to starve the other threads.
-    VkCommandBuffer transfer_cb_ = VK_NULL_HANDLE;
-    VkFence transfer_fence_ = VK_NULL_HANDLE;
+    // Transfers. Uploads and texture creation record into one pending command
+    // buffer (a normal Cmd, registered in recording_ so the graveyard waits on
+    // it) that every commit submits ahead of its own work; nothing on the
+    // upload path waits for the GPU. Readbacks still use the synchronous
+    // one-shot buffer below, after flushing the pending transfers, so the bytes
+    // are there on return. transfer_mutex_ serialises all of it and is taken
+    // before mutex_.
     std::mutex transfer_mutex_;
+    uint64_t pending_id_ = 0;                      // the pending transfer Cmd's id, 0 for none
+    bool pending_dirty_ = false;                   // it has recorded something
+    VkCommandBuffer transfer_cb_ = VK_NULL_HANDLE; // readback one-shot
+    VkFence transfer_fence_ = VK_NULL_HANDLE;
+    Cmd *pending_locked();       // transfer_mutex_ held; nullptr when the device failed
+    void flush_pending_locked(); // transfer_mutex_ held
+    void flush_pending();
+    void submit_cmd(uint64_t id, std::unique_ptr<Cmd> c); // the tail of commit()
     VkPhysicalDeviceProperties props_{};
     VkPhysicalDeviceMemoryProperties memory_props_{};
     uint32_t subgroup_size_ = 32;
