@@ -34,6 +34,7 @@
 //
 // Completions are lock-free atomics, fired from the render loop: a stale
 // generation names a playback that is already over and is ignored.
+#include "../../platform/os.h"
 #include "../audio.h"
 #include "../audio_capture.h"
 #include "sink.h"
@@ -41,6 +42,9 @@
 // The arithmetic lives in audio_math.cpp; this file is the engine.
 
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -287,9 +291,7 @@ struct Channel {
 };
 
 double now_seconds() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return (double)os_monotonic_ns() * 1e-9;
 }
 
 // --- the clock a play cursor runs on ----------------------------------------
