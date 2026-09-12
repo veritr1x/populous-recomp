@@ -22,13 +22,31 @@ startup and never runs `WinMain`.
 | `report_lock.cpp` | the one mutex a host's run bookkeeping is written under |
 | `headless_main.cpp` | the frame-writing host and its caps |
 | `sdl/main.cpp` | the window, the SDL event pump and the lifetime |
-| `present.{h,mm}` | `host_present`: 8-bit and 5-6-5 expansion, the letterbox, the drawable |
-| `d3d_render.{h,mm}` | the Metal renderer behind `host_d3d_draw` |
+| `present.{h,cpp}` | `host_present`: 8-bit and 5-6-5 expansion, the letterbox, the drawable |
+| `present_thread.cpp`, `present_frame.h` | the presenter: sealed frames, the target pool, the swapchain worker |
+| `compositor.{h,cpp}`, `performance_overlay.{h,cpp}` | world, UI and overlays composed onto the drawable; the FPS overlay |
+| `d3d_render.{h,cpp}` | the renderer behind `host_d3d_draw`, over `gpu/gpu.h` |
+| `gpu/gpu.h`, `gpu/shaders.md` | the device-level GPU interface every backend implements, and the shader contract |
+| `gpu/metal/` | the Metal backend, the only Objective-C++ in the host |
+| `gpu/fake/` | the CPU test double |
+| `sdl/keymap.cpp` | SDL scancodes and modifiers to the host's key codes |
 | `input.{h,cpp}` | host key codes to DirectInput scan codes, Win32 messages and `GetAsyncKeyState`, and waking the guest's input threads |
-| `audio.h`, `audio/mixer.cpp` | `host_audio_play` on the software mixer (SDL audio output, TinySoundFont music), and the lock order that keeps it out of a deadlock |
+| `audio.h`, `audio/mixer.cpp` | `host_audio_play` on the software mixer, and the lock order that keeps it out of a deadlock |
+| `audio/sdl_sink.cpp`, `audio/midi_synth.cpp` | the output device through SDL; the music through TinySoundFont |
 | `Info.plist` | the app bundle's |
-| `tests/host_tests.mm` | the headless tests |
+| `tests/host_tests.cpp` | the headless tests |
 | CMake targets `host_tests`, `compositor_tests`, `ui_layer_tests` | built by `tools/test.py --compile-only`, run by `--native` |
+
+## The GPU interface
+
+Nothing outside `gpu/metal/` names a GPU API. `gpu/gpu.h` is a device-level
+interface: textures, buffers, pipelines and command buffers as 64-bit handles,
+one queue whose command buffers complete in commit order, and a swapchain made
+from whatever native surface the window layer hands over. `gpu/shaders.md` is
+the contract for the four render programs and three compute kernels a backend
+supplies, by name and binding slot. `gpu/fake/` is the CPU double the
+presenter's tests run on; `gpu_metal_tests` checks the Metal backend against
+the same contract.
 
 ## The shared boot
 

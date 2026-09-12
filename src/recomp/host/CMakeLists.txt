@@ -16,6 +16,32 @@ set(POP_OBJC_ARC $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 # The GPU interface, its test double, and (on Apple) the Metal backend.
 add_subdirectory(gpu)
 
+# The platform boundary: no Objective-C++ and no Apple framework outside gpu/metal/.
+add_test(NAME host_boundary_check
+  COMMAND ${Python3_EXECUTABLE} -m unittest ${POP_ROOT}/tools/recomp/tests/test_host_boundary.py
+  WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(host_boundary_check PROPERTIES LABELS nogame)
+
+# Portable pieces built everywhere. compositor_tests needs a real device for
+# its pixel half (label gpu); ui_layer_tests needs nothing.
+add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
+target_include_directories(compositor_tests PRIVATE ${POP_ROOT} ${HOST})
+target_compile_options(compositor_tests PRIVATE ${POP_WARN_WERROR})
+target_link_libraries(compositor_tests PRIVATE gpu_metal)
+pop_optimize(compositor_tests 1)
+pop_test_binary(compositor_tests)
+add_test(NAME compositor_tests COMMAND compositor_tests WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(compositor_tests PROPERTIES LABELS gpu)
+
+add_executable(ui_layer_tests ${HOST}/ui_layer.cpp ${HOST}/tests/test_frame_builder.cpp ${HOST}/tests/ui_layer_tests.cpp)
+target_compile_options(ui_layer_tests PRIVATE ${POP_WARN_WERROR})
+pop_optimize(ui_layer_tests 1)
+pop_test_binary(ui_layer_tests)
+add_test(NAME ui_layer_tests COMMAND ui_layer_tests WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(ui_layer_tests PROPERTIES LABELS nogame)
+
+# The hosts and the full host suite: until sub-project 3 supplies a Vulkan
+# backend, only the platform with a GPU backend builds them.
 if(NOT APPLE)
   return()
 endif()
@@ -107,18 +133,3 @@ pop_test_binary(host_tests)
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(host_tests PROPERTIES LABELS gpu)
 
-add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
-target_include_directories(compositor_tests PRIVATE ${POP_ROOT} ${HOST})
-target_compile_options(compositor_tests PRIVATE ${POP_WARN_WERROR})
-target_link_libraries(compositor_tests PRIVATE gpu_metal)
-pop_optimize(compositor_tests 1)
-pop_test_binary(compositor_tests)
-add_test(NAME compositor_tests COMMAND compositor_tests WORKING_DIRECTORY ${POP_ROOT})
-set_tests_properties(compositor_tests PROPERTIES LABELS gpu)
-
-add_executable(ui_layer_tests ${HOST}/ui_layer.cpp ${HOST}/tests/test_frame_builder.cpp ${HOST}/tests/ui_layer_tests.cpp)
-target_compile_options(ui_layer_tests PRIVATE ${POP_WARN_WERROR})
-pop_optimize(ui_layer_tests 1)
-pop_test_binary(ui_layer_tests)
-add_test(NAME ui_layer_tests COMMAND ui_layer_tests WORKING_DIRECTORY ${POP_ROOT})
-set_tests_properties(ui_layer_tests PROPERTIES LABELS nogame)
