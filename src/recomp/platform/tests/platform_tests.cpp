@@ -158,6 +158,10 @@ void test_process_and_strings() {
     CHECK(strstr(exe, "platform_tests") != nullptr);
     CHECK(os_strcasecmp("Data", "DATA") == 0);
     CHECK(os_strcasecmp("a", "b") < 0);
+    CHECK(os_setenv("POP_PLATFORM_TEST", "yes") == 0);
+    CHECK(getenv("POP_PLATFORM_TEST") && strcmp(getenv("POP_PLATFORM_TEST"), "yes") == 0);
+    CHECK(os_unsetenv("POP_PLATFORM_TEST") == 0);
+    CHECK(getenv("POP_PLATFORM_TEST") == nullptr || getenv("POP_PLATFORM_TEST")[0] == 0);
     const char *ext = os_plugin_extension();
     CHECK(ext[0] == '.' && strlen(ext) >= 3);
     CHECK(os_dlopen_noload("/definitely/not/loaded") == nullptr);

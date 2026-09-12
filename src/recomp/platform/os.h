@@ -124,6 +124,12 @@ void os_sleep_us(uint64_t us);
 // ---------------------------------------------------------------------------
 int os_strcasecmp(const char *a, const char *b);
 
+// ---------------------------------------------------------------------------
+// Environment. Values are copied; 0 or -1.
+// ---------------------------------------------------------------------------
+int os_setenv(const char *name, const char *value);
+int os_unsetenv(const char *name);
+
 #ifdef __cplusplus
 }
 #endif

@@ -387,4 +387,11 @@ int os_strcasecmp(const char *a, const char *b) {
     return _stricmp(a, b);
 }
 
+int os_setenv(const char *name, const char *value) {
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+}
+int os_unsetenv(const char *name) {
+    return _putenv_s(name, "") == 0 ? 0 : -1;
+}
+
 } // extern "C"

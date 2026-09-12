@@ -4380,14 +4380,14 @@ static void test_classic_probe_surface_creation() {
                 }
             }
             for (const auto &[key, value] : values)
-                unsetenv(key.c_str());
+                os_unsetenv(key.c_str());
             return values;
         }
         ProbeEnvironment() : saved(take()) {}
         ~ProbeEnvironment() {
             take();
             for (const auto &[key, value] : saved)
-                setenv(key.c_str(), value.c_str(), 1);
+                os_setenv(key.c_str(), value.c_str());
             ddraw_reset_modes();
         }
     } environment;
@@ -4404,12 +4404,12 @@ static void test_classic_probe_surface_creation() {
             if (size[0] != 640 || size[1] != 480)
                 list += "," + target;
             std::string path = std::string(root) + "/build/recomp/mode-probe/" + target;
-            setenv("POPM_DDRAW_MODES", list.c_str(), 1);
-            setenv("POPM_NO_MODS", "1", 1);
-            setenv("POP_RECOMP_PIN_CLOCK", "1", 1);
-            setenv("POP_RECOMP_SCRIPT", (path + "/probe.script").c_str(), 1);
-            setenv("POP_HOST_DUMP_DIR", path.c_str(), 1);
-            setenv("POP_SMOKE_CLASSIC_PROBE", target.c_str(), 1);
+            os_setenv("POPM_DDRAW_MODES", list.c_str());
+            os_setenv("POPM_NO_MODS", "1");
+            os_setenv("POP_RECOMP_PIN_CLOCK", "1");
+            os_setenv("POP_RECOMP_SCRIPT", (path + "/probe.script").c_str());
+            os_setenv("POP_HOST_DUMP_DIR", path.c_str());
+            os_setenv("POP_SMOKE_CLASSIC_PROBE", target.c_str());
             ddraw_reset_modes();
             CHECK_EQ(ddraw_set_modes(getenv("POPM_DDRAW_MODES")), 1);
             cpu_reset();
@@ -4492,7 +4492,7 @@ static void test_configurable_display_modes() {
     };
 
     // A list of two, one of which the built-in table does not contain.
-    setenv("POPM_DDRAW_MODES", "640x480x8,1280x960x16", 1);
+    os_setenv("POPM_DDRAW_MODES", "640x480x8,1280x960x16");
     ddraw_reset_modes();
     uint32_t dd = fresh_dd();
     enum_modes_now(dd, cb);
@@ -4510,7 +4510,7 @@ static void test_configurable_display_modes() {
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {800, 600, 16}), DDERR_INVALIDPARAMS);
 
     // A single mode, which is how a display test forces the game's hand.
-    setenv("POPM_DDRAW_MODES", "1920x1080x16", 1);
+    os_setenv("POPM_DDRAW_MODES", "1920x1080x16");
     ddraw_reset_modes();
     dd = fresh_dd();
     enum_modes_now(dd, cb);
@@ -4533,7 +4533,7 @@ static void test_configurable_display_modes() {
         "640x480x8,junk",        // one bad entry rejects the whole list
     };
     for (const char *spec : bad) {
-        setenv("POPM_DDRAW_MODES", spec, 1);
+        os_setenv("POPM_DDRAW_MODES", spec);
         ddraw_reset_modes();
         dd = fresh_dd();
         enum_modes_now(dd, cb);
@@ -4549,7 +4549,7 @@ static void test_configurable_display_modes() {
     // game selects 640x480x8 at startup without asking what is available, so
     // a variable that omits it has that call refused and the guest walks into
     // a SIGBUS. Setting the table after boot has no such problem.
-    unsetenv("POPM_DDRAW_MODES");
+    os_unsetenv("POPM_DDRAW_MODES");
     ddraw_reset_modes();
     dd = fresh_dd();
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {640, 480, 8}), DD_OK);
@@ -4573,7 +4573,7 @@ static void test_configurable_display_modes() {
 
     // Unset is the same list as well, which is the state every other test runs in -
     // so this one has to leave it that way.
-    unsetenv("POPM_DDRAW_MODES");
+    os_unsetenv("POPM_DDRAW_MODES");
     ddraw_reset_modes();
     dd = fresh_dd();
     enum_modes_now(dd, cb);
@@ -7370,14 +7370,14 @@ static void test_qmixer_refill_gate() {
     // queued_bytes reads zero and the pump refills a channel that needs
     // nothing. That is the difference the contract argument rests on, so it
     // is asserted here rather than only described.
-    setenv("POPM_QMIX_GATE", "queue", 1);
+    os_setenv("POPM_QMIX_GATE", "queue");
     qmixer_gate_reset_for_test();
     g_voice_remaining = 2 * kChunk;
     g_queued_bytes = 0;
     uint32_t old_gate = g_gate_calls;
     qmixer_frame_pump(&g_cpu);
     CHECK(g_gate_calls > old_gate);
-    unsetenv("POPM_QMIX_GATE");
+    os_unsetenv("POPM_QMIX_GATE");
     qmixer_gate_reset_for_test();
 
     // A play that replaces a sound still playing reports the NEW sound's

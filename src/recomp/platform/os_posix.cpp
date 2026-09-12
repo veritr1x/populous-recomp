@@ -278,4 +278,11 @@ int os_strcasecmp(const char *a, const char *b) {
     return strcasecmp(a, b);
 }
 
+int os_setenv(const char *name, const char *value) {
+    return setenv(name, value, 1);
+}
+int os_unsetenv(const char *name) {
+    return unsetenv(name);
+}
+
 } // extern "C"
