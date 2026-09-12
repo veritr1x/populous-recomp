@@ -10,7 +10,8 @@
 #include "mods_tests.h"
 #include "../../platform/os.h"
 #ifndef _WIN32
-#include <unistd.h> // symlink, POSIX-only check
+#include <sys/stat.h> // mkfifo, POSIX-only check
+#include <unistd.h>   // symlink, POSIX-only check
 #endif
 #include "../mods_internal.h"
 
@@ -95,7 +96,9 @@ MOD_TEST_SUITE(run_record_capture) {
     {
         std::string d = make_dir(suite, "fifo");
         write_file(d + "/mod.toml", "[mod]\nid=\"fifo\"\n");
+#ifndef _WIN32
         mkfifo((d + "/pipe").c_str(), 0644);
+#endif
         MOD_CHECK(finishes_within(10, capture, d));
     }
 
