@@ -57,7 +57,10 @@ def compile_flags(cc, name, scratch, env, system=None):
         if linker_accepts(cc, "-Wl,-reproducible", scratch, env):
             flags.append("-Wl,-reproducible")
     elif system == "Windows":
-        flags += ["-shared", "-fuse-ld=lld", "-Wl,/Brepro", "-Wl,/timestamp:0"]
+        # /debug:none: without it lld-link still writes a CodeView debug
+        # directory naming a PDB under the random staging path, with a GUID
+        # that changes on every link.
+        flags += ["-shared", "-fuse-ld=lld", "-Wl,/Brepro", "-Wl,/timestamp:0", "-Wl,/debug:none"]
     else:
         flags += ["-shared", "-Wl,--build-id=none"]
     return flags
