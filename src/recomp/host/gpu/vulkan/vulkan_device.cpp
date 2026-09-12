@@ -556,7 +556,10 @@ bool VulkanDevice::upload(Texture tex, Region region, const void *bytes, int pit
         return false;
     const int bpp = bytes_per_pixel(t.desc.format);
     const uint64_t row = uint64_t(region.w) * bpp, total = row * region.h;
-    wait_submitted_before(submission_watermark());
+    // No wait on in-flight command buffers: the one-shot copy is queued behind
+    // them on the single queue and its barrier orders it after their work, as
+    // Metal's replaceRegion is. Waiting here would also deadlock a caller that
+    // holds a lock the reaper's completion callbacks need.
     VkBuffer src = t.staging;
     VkDeviceMemory src_mem = VK_NULL_HANDLE;
     void *map = t.staging_map;
@@ -598,7 +601,6 @@ bool VulkanDevice::readback(Texture tex, Region region, void *bytes, int pitch) 
         return false;
     const int bpp = bytes_per_pixel(t.desc.format);
     const uint64_t row = uint64_t(region.w) * bpp, total = row * region.h;
-    wait_submitted_before(submission_watermark());
     VkBuffer dst = t.staging;
     VkDeviceMemory dst_mem = VK_NULL_HANDLE;
     void *map = t.staging_map;
@@ -713,7 +715,6 @@ void VulkanDevice::update(Buffer buf, uint64_t offset, const void *bytes, uint64
 }
 
 const void *VulkanDevice::map_read(Buffer buf) {
-    wait_submitted_before(submission_watermark());
     std::lock_guard lock(mutex_);
     auto it = buffers_.find(buf.id);
     return it == buffers_.end() ? nullptr : it->second.map;

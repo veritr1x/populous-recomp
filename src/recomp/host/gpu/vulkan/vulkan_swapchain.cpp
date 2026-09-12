@@ -122,7 +122,7 @@ Swapchain VulkanDevice::create_swapchain(void *native_surface, int width, int he
 }
 
 void VulkanDevice::resize(Swapchain s, int width, int height) {
-    wait_submitted_before(submission_watermark());
+    // build_swapchain waits for the device to go idle itself.
     std::lock_guard lock(mutex_);
     auto it = swapchains_.find(s.id);
     if (it != swapchains_.end())
@@ -141,13 +141,8 @@ Texture VulkanDevice::acquire(Swapchain s) {
     if (it == swapchains_.end() || failed_)
         return {};
     Chain &c = *it->second;
-    if (c.needs_recreate) {
-        lock.unlock();
-        wait_all_submitted();
-        lock.lock();
-        if (!build_swapchain(*this, c, c.width, c.height))
-            return {};
-    }
+    if (c.needs_recreate && !build_swapchain(*this, c, c.width, c.height))
+        return {}; // build_swapchain waits for the device to go idle
     VkSemaphore sem = c.acquire_semaphores[c.next_acquire % c.acquire_semaphores.size()];
     uint32_t index = 0;
     VkResult r =
@@ -261,7 +256,6 @@ double VulkanDevice::refresh_period(Swapchain s) {
 }
 
 void VulkanDevice::destroy(Swapchain s) {
-    wait_all_submitted();
     std::lock_guard lock(mutex_);
     auto it = swapchains_.find(s.id);
     if (it == swapchains_.end())
