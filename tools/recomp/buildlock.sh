@@ -5,9 +5,9 @@
 #
 #   Any script that reads or writes build/recomp/gen, build/recomp/obj or
 #   build/recomp/librecomp_gen.a must hold this lock for as long as it is
-#   using them.  That is tools/recomp/build.sh, which regenerates all three;
-#   tools/recomp/parity_build.sh, which compiles and links against them; and
-#   tools/recomp/headless_build.sh.  A reader needs gen/ and the archive to
+#   using them.  That is tools/build.py, which regenerates all three and links
+#   every host against them, and the run-only scripts that read the outputs.
+#   A reader needs gen/ and the archive to
 #   agree with EACH OTHER, not merely to be individually whole, so holding the
 #   lock is the requirement - publishing each artifact atomically would not be
 #   enough on its own, and is not relied on.

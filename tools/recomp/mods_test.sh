@@ -29,9 +29,9 @@ RECORD=build/recomp/mods/mods-test-run.json
 rm -rf "$PROFILE" build/recomp/mods
 mkdir -p "$PROFILE" build/recomp/mods
 
-src/recomp/mods/lua/build_lua.sh
-mods/examples/build_examples.sh
-tools/recomp/smoke_build.sh
+PY=${PY:-$ROOT/.venv/bin/python}
+"$PY" tools/build.py --target plugins
+"$PY" tools/build.py --target smoke
 
 POPM_MODS_DIR=mods/examples POPM_PROFILE_DIR="$PROFILE" \
 POP_RECOMP_SCRIPT=tools/recomp/smoke/mods.script \

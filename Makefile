@@ -3,7 +3,8 @@ PYTHON ?= .venv/bin/python
 .PHONY: help all test format format-check recomp recomp-tests recomp-mods recomp-smoke
 help:
 	@echo 'Prepare: see CONTRIBUTING.md (requires your own game installation)'
-	@echo 'Build:   make all'
+	@echo 'Build:   make all (tools/build.py over CMake)'
+	@echo 'Presets: tools/build.py --preset macos|linux|windows --config Release|Debug'
 	@echo 'Check:   make test / make format-check'
 	@echo 'Native:  make recomp-tests / make recomp-mods'
 

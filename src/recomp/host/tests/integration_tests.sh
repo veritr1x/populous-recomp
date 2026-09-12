@@ -13,6 +13,7 @@ cd "$ROOT"
 BUILDLOCK_SH="$ROOT/tools/recomp/buildlock.sh"
 . "$BUILDLOCK_SH"
 buildlock_acquire "$ROOT" "host integration tests" "$ROOT/src/recomp/host/tests/integration_tests.sh" "$@"
+PY=${PY:-$ROOT/.venv/bin/python}
 unset POPM_CORE_MODS_DIR POPM_NO_MODS
 "$ROOT/mods/core/tests/roots_tests.sh"
 "$ROOT/mods/core/tests/packaging_tests.sh"
@@ -21,14 +22,13 @@ OUT=build/recomp/integration
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
-xcrun clang -std=c11 -O1 -g -dynamiclib -fPIC -I"$ROOT/src/recomp/mods" \
-    -Wl,-undefined,dynamic_lookup mods/smoke/probe.c -o mods/smoke/probe.dylib
+"$PY" tools/build.py --target plugins >/dev/null
 
 fail=0
 check() { if eval "$2"; then echo "  [ok] $1"; else echo "  [FAIL] $1"; fail=1; fi }
 
 echo "== headless host =="
-tools/recomp/headless_build.sh >/dev/null
+"$PY" tools/build.py --target headless >/dev/null
 POPM_MODS_DIR=mods POPM_PROFILE_DIR="$OUT/headless" \
 POP_RECOMP_MAX_FRAMES=60 POP_RECOMP_FRAME_EVERY=0 \
     build/recomp/pop_headless > "$OUT/headless.log" 2>&1 || true
@@ -68,7 +68,7 @@ check "a guest ExitProcess inside a hooked call still tore down completely" \
        [ -s $OUT/headless/probe.txt ]"
 
 echo "== smoke host =="
-tools/recomp/smoke_build.sh >/dev/null
+"$PY" tools/build.py --target smoke >/dev/null
 POPM_MODS_DIR=mods POPM_PROFILE_DIR="$OUT/smoke" \
 POP_RECOMP_SCRIPT=tools/recomp/smoke/integration.script \
 POP_HOST_DUMP_DIR="$OUT/smoke-frames" \
@@ -97,7 +97,7 @@ check "F10 opened the settings page" \
       "grep -q 'settings page opened' $OUT/smoke.log"
 
 echo "== parity fixture =="
-tools/recomp/parity_build.sh >/dev/null
+"$PY" tools/build.py --target fixture >/dev/null
 # Exercise default core discovery directly, without the Python oracle or a
 # user-root opt-in. A fixture that retains its old opt-in guard fails this.
 (

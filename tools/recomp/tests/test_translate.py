@@ -3,7 +3,7 @@
 
     .venv/bin/python tools/recomp/tests/test_translate.py [-n ITERATIONS]
 
-Builds build/recomp/librecomp_gen.a via tools/recomp/build.sh, links it with
+Builds build/recomp/librecomp_gen.a via tools/build.py --target gen, links it with
 tools/recomp/tests/harness.c into a dylib, then for each covered function runs
 the same random inputs through Unicorn and through the generated code and
 compares every general register plus guest memory.
@@ -39,7 +39,7 @@ GEN = os.path.join(ROOT, "build/recomp/gen")
 LIB_A = os.path.join(ROOT, "build/recomp/librecomp_gen.a")
 DYLIB = os.path.join(ROOT, "build/recomp/librecomp_test.dylib")
 LOCKFILE = os.path.join(ROOT, "build/recomp/.lock")
-BUILDLOCK = os.path.join(ROOT, "tools/recomp/buildlock.sh")
+BUILDLOCK = os.path.join(ROOT, "tools/recomp/buildlock.py")
 
 
 # ------------------------------------------------------------------- lock --
@@ -47,25 +47,25 @@ BUILDLOCK = os.path.join(ROOT, "tools/recomp/buildlock.sh")
 def reexec_under_lock(script=None):
     """Re-run the whole test inside the shared build lock.
 
-    Letting tools/recomp/build.sh take the lock and drop it on exit is not
+    Letting tools/build.py --target gen take the lock and drop it on exit is not
     enough: what this test does afterwards - link the harness against
     librecomp_gen.a, compile the dispatch probe out of gen/, and read both for
     the rest of the run - depends on those two artifacts staying the pair the
-    build published.  A build.sh running beside it would replace them halfway
+    build published.  A build running beside it would replace them halfway
     through.  The lock covers generation and every dependent read only if the
     whole process runs under it, so it does.
 
-    buildlock.sh exports BUILDLOCK_HELD, so the re-executed test does not take
-    it twice, and the build.sh it invokes runs inside the same lock."""
+    buildlock.py exports BUILDLOCK_HELD, so the re-executed test does not take
+    it twice, and the build it invokes runs inside the same lock."""
     if os.environ.get("BUILDLOCK_HELD") == "1":
         return
     # The caller's script, not this module's: other tests in this directory
     # import this helper, and re-executing test_translate.py on their behalf
     # would run the wrong suite.
     script = os.path.abspath(script or __file__)
-    os.execv(BUILDLOCK, [BUILDLOCK, "run", ROOT,
-                         os.path.relpath(script, ROOT),
-                         sys.executable, script] + sys.argv[1:])
+    os.execv(sys.executable, [sys.executable, BUILDLOCK, "run", ROOT,
+                              os.path.relpath(script, ROOT),
+                              sys.executable, script] + sys.argv[1:])
 
 
 def lock_is_free():
@@ -203,7 +203,7 @@ class X86(C.Structure):
 def build(verbose=True):
     if verbose:
         print("== building librecomp_gen.a ==")
-    subprocess.check_call([os.path.join(ROOT, "tools/recomp/build.sh")])
+    subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/build.py"), "--target", "gen"])
     if verbose:
         print("== linking test dylib ==")
     synth = generate_synthetic(os.path.join(ROOT, "build/recomp/synth.c"))
@@ -231,7 +231,7 @@ class Native(object):
         if not os.path.exists(DYLIB):
             raise SystemExit(
                 "%s is missing. Run without --no-build, or "
-                "tools/recomp/build.sh first." % DYLIB)
+                "tools/build.py --target gen first." % DYLIB)
         built = os.path.getmtime(DYLIB)
         for src in ("tools/recomp/runtime/x86.h", "tools/recomp/translate.py",
                     "tools/recomp/tests/harness.c"):

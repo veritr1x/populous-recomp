@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def rename_identity(plist_path, name):
-    """A bundle built under another name gets its own identity, as app_build.sh did."""
+    """A bundle built under another name gets its own identity of its own."""
     if name == "PopRecomp":
         return
     data = plistlib.loads(plist_path.read_bytes())
