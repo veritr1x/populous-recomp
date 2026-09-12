@@ -3284,3 +3284,51 @@ git add -A docs && git commit -m "Sub-project 3 verified over Vulkan on macOS; p
 ```
 
 Then use superpowers:finishing-a-development-branch (base branch `main`).
+
+---
+
+## Execution notes (2026-09-12)
+
+Deviations from the plan, in task order:
+
+- Task 1: `gpu_backend` is a STATIC library built from the backend objects, not an
+  INTERFACE target: object files do not propagate through an INTERFACE library to
+  indirect consumers. `SDL3/SDL_metal.h` moved into `metal_surface.mm`.
+- Task 2: `shaders_spv.h` records the glslc version; `shaders.py check` skips (exit 0)
+  under a different glslc, since each version emits different but equivalent SPIR-V.
+  CI's Ubuntu glslc 2023.8 differs from Homebrew's 2026.4.
+- Task 3/4: `REQUIRE_FULL_SUBGROUPS` dropped (needs `local_size_x` to be a multiple
+  of the subgroup size; the kernel is 16x16). Destroyed textures and buffers go to
+  a graveyard until every command buffer recording or in flight at that moment has
+  retired: Metal's encoders retained resources, Vulkan does not, and the renderer's
+  texture versioning relies on it. Files split: `vulkan_pipeline.cpp` holds
+  pipelines, passes, bindings and transfers.
+- Task 5: the swapchain extent is the caller's size clamped to the surface bounds
+  (MoltenVK lets the swapchain set the layer's drawable size; X11 pins it).
+- Task 6: the first edit of `sdl/main.cpp` matched the wrong `window_scale_for`
+  call and deleted code between it and `main`; restored from the Task 5 commit and
+  reapplied (commit b4c331b). CI does not build `PopRecomp` (no translation), so
+  this was caught only by a local host build.
+- Task 7: `runtime_tests` also used `pthread` directly for two waiter threads;
+  now `os_thread_create`. `mkfifo` and `symlink` checks stay POSIX-only.
+- Task 8: the Apple Vulkan suite is labelled `moltenvk` (a `gpu-vulkan` label
+  matches the `gpu` regex). Linux needs no `VK_ICD_FILENAMES`; lavapipe is the only
+  ICD on the runner. Windows needed `M_PI` and a portable clock in the mixer,
+  `present.cpp` and the host tests, and the roots test compares POSIX-style paths.
+- Task 9, found by the game runs and fixed in the backend:
+  - Every command buffer owns its command pool: pools are single-threaded and the
+    host records a command buffer from whichever thread holds it (validation:
+    `UNASSIGNED-Threading-MultipleThreads-Write`).
+  - One persistent transfer command buffer and fence for uploads and readbacks:
+    allocating and freeing one per upload was pathologically slow on MoltenVK and
+    starved the guest thread.
+  - Uploads, readbacks and `map_read` do not wait for the reaper: the guest thread
+    uploads while holding the presenter's mutex and the reaper's completion
+    callbacks need it (deadlock). Queue order plus the transfer barrier already
+    orders the copy after in-flight work.
+  - `compare_frames.py` bounds the fraction of pixels over `--max` (default 1%)
+    instead of the single worst pixel: rasteriser edge pixels flip whole colours.
+    Flyby present: mean 0.963, 0.56% outliers; scene: 0.972, 0.48%.
+- CI runs: 34697742593 (label/portability fixes), 34697930465, 34698258485,
+  34698474555, 34698753707 (first green), 34700679045, 34701915809 (green at
+  4a73426).

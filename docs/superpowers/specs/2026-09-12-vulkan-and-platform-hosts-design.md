@@ -224,9 +224,9 @@ it and the development machine runs it.
 
 Game-backed proof on macOS with `POP_GPU_BACKEND=vulkan`: `tools/test.py
 --gameplay`, `--mods`, `integration_tests.sh`, and the offline flyby scene
-compared to the Metal render with a per-pixel tolerance (mean absolute
-difference under 2 levels over the frame, no pixel over 24), since two drivers
-rasterise differently.
+compared to the Metal render with a tolerance (mean absolute difference under
+2 levels over the frame, at most 1% of pixels with a channel over 24), since two
+drivers rasterise edge pixels differently.
 
 Manual: one run each on real Windows and Linux hardware, recorded in
 `PROGRESS.md`, when the hardware is available; not a gate for merging.
