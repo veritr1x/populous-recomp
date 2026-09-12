@@ -77,6 +77,10 @@ void test_time() {
     CHECK(b > a);
     CHECK(b - a >= 1000000ull);                            // at least 1 ms elapsed
     CHECK(os_wall_time_us() > 1600000000ull * 1000000ull); // after 2020
+    struct tm utc{};
+    CHECK(os_gmtime(86400, &utc) == 0 && utc.tm_year == 70 && utc.tm_mday == 2 && utc.tm_hour == 0);
+    struct tm local{};
+    CHECK(os_localtime(86400 * 365, &local) == 0 && local.tm_year >= 70);
 }
 
 void test_vm() {

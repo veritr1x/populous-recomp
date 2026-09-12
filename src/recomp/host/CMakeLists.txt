@@ -79,7 +79,9 @@ if(TARGET recomp_gen)
   set_tests_properties(present_events_tests PROPERTIES LABELS mods)
 endif()
 
-# Headless host tests: offscreen Metal, no window, no audio device.
+# Headless host tests: offscreen Metal and the real audio engine rendered
+# offline, no window. Labelled `device`: a hosted CI runner has no audio
+# device and its offline render does not reach the levels the suite asserts.
 # report_lock.cpp is a source here rather than host_common, because the script
 # never linked boot.cpp into this suite.
 pop_host(host_tests UI_LAYER
@@ -94,7 +96,7 @@ pop_host(host_tests UI_LAYER
   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL} ${FW_AUDIO})
 pop_test_binary(host_tests)
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})
-set_tests_properties(host_tests PROPERTIES LABELS gpu)
+set_tests_properties(host_tests PROPERTIES LABELS device)
 
 add_executable(compositor_tests ${HOST}/compositor.mm ${HOST}/tests/compositor_tests.mm)
 target_include_directories(compositor_tests PRIVATE ${POP_ROOT})

@@ -3786,3 +3786,8 @@ Deviations found while executing, all landed in the task commits:
   and rebuild afterwards.
 - The checks workflow does not run on a feature-branch push; it was dispatched
   with `gh workflow run checks.yml --ref portable-build-system`.
+- `host_tests` failed on the macOS CI runner at an audio-level assertion
+  (`peak > 0.095f` after an offline AVAudioEngine render) while passing
+  locally; it is labelled `device` and runs only through `tools/test.py
+  --native` on a real machine. `kernel32.cpp` also needed `os_localtime` and
+  `os_gmtime` for Windows.

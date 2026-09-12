@@ -354,6 +354,15 @@ void os_exit_immediately(int code) {
     _exit(code);
 }
 
+int os_localtime(int64_t seconds, struct tm *out) {
+    __time64_t t = (__time64_t)seconds;
+    return _localtime64_s(out, &t) == 0 ? 0 : -1;
+}
+int os_gmtime(int64_t seconds, struct tm *out) {
+    __time64_t t = (__time64_t)seconds;
+    return _gmtime64_s(out, &t) == 0 ? 0 : -1;
+}
+
 uint64_t os_monotonic_ns(void) {
     static LARGE_INTEGER freq = {};
     if (!freq.QuadPart)

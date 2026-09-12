@@ -248,6 +248,15 @@ void os_exit_immediately(int code) {
     _exit(code);
 }
 
+int os_localtime(int64_t seconds, struct tm *out) {
+    time_t t = (time_t)seconds;
+    return localtime_r(&t, out) ? 0 : -1;
+}
+int os_gmtime(int64_t seconds, struct tm *out) {
+    time_t t = (time_t)seconds;
+    return gmtime_r(&t, out) ? 0 : -1;
+}
+
 uint64_t os_monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

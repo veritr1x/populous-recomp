@@ -329,6 +329,8 @@ The Makefile keeps its verbs and calls the Python entry points.
   the binary builds.
 - `game`: loads the guest image or reads game data. Local only.
 - `gpu`: uses an offscreen Metal texture. macOS local and macOS CI.
+- `device`: uses the real audio engine as well; macOS local only, because a
+  hosted runner's offline render does not reach the asserted levels.
 - `mods`: needs the generated archive and the entity snapshot; driven by
   `tools/test.py --mods`.
 
@@ -341,7 +343,7 @@ The Makefile keeps its verbs and calls the Python entry points.
 | `test_build_core.py` | nogame | all |
 | `ui_layer_tests` | nogame | macOS |
 | `compositor_tests` | gpu | macOS |
-| `host_tests` | gpu | macOS |
+| `host_tests` | device | macOS, local only |
 | `runtime_tests` | game | macOS, Linux |
 | `profile_tests` (two runs) | game | macOS, Linux |
 | `mods_tests`, `present_events_tests` | mods | macOS |

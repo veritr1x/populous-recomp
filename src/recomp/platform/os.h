@@ -8,6 +8,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,6 +113,9 @@ void os_exit_immediately(int code);
 // Time.
 // ---------------------------------------------------------------------------
 uint64_t os_monotonic_ns(void); // never goes backwards; arbitrary origin
+// Broken-down local and UTC time for a Unix timestamp; 0 or -1.
+int os_localtime(int64_t seconds, struct tm *out);
+int os_gmtime(int64_t seconds, struct tm *out);
 uint64_t os_wall_time_us(void); // microseconds since the Unix epoch
 void os_sleep_us(uint64_t us);
 

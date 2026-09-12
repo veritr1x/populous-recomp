@@ -1511,17 +1511,15 @@ void put_systemtime(uint32_t p, const struct tm &t, int millis) {
 }
 
 void k_GetLocalTime(X86 *c) {
-    time_t now = time(nullptr);
     struct tm t{};
-    localtime_r(&now, &t);
+    os_localtime((int64_t)time(nullptr), &t);
     put_systemtime(arg(c, 0), t, (int)(host_millis() % 1000));
     set_eax(c, 0);
 }
 
 void k_GetSystemTime(X86 *c) {
-    time_t now = time(nullptr);
     struct tm t{};
-    gmtime_r(&now, &t);
+    os_gmtime((int64_t)time(nullptr), &t);
     put_systemtime(arg(c, 0), t, (int)(host_millis() % 1000));
     set_eax(c, 0);
 }

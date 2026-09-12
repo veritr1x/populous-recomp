@@ -42,7 +42,7 @@ def native(preset, env, jobs, run_tests):
     build_py.configure(preset)
     build_py.build(preset, ["check_binaries"], jobs)
     if run_tests:
-        ctest(preset, "nogame|game|gpu", env)
+        ctest(preset, "nogame|game|gpu|device", env)
 
 
 def mods(preset, env, jobs):

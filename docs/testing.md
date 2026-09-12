@@ -13,8 +13,9 @@ Run checks appropriate to your change. Every suite's output belongs under ignore
 | `tools/test.py --gameplay` | Menu navigation, mode cycling, selection, movement and clean exit | Yes, plus translated archive |
 
 Native suites are CTest entries with labels: `nogame` runs everywhere and in CI,
-`game` needs your installation, `gpu` needs a Metal device, `mods` needs the
-translated archive and the entity snapshot `tools/test.py --mods` captures. Run
+`game` needs your installation, `gpu` needs a Metal device, `device` needs a
+real Metal and audio device (the offline audio render is not what a hosted CI
+runner produces), `mods` needs the translated archive and the entity snapshot `tools/test.py --mods` captures. Run
 one directly with `.venv/bin/ctest --preset macos -L nogame` or `-R dx_tests`.
 
 Invoke these with `.venv/bin/python`. The native tests need a macOS Metal device;
