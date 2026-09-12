@@ -50,9 +50,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install clang and lld (Linux)
+      - name: Install clang, lld and SDL3's window and audio headers (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang lld
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libasound2-dev libpulse-dev
       - name: Enter the Visual Studio developer environment (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
