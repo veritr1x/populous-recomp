@@ -18,7 +18,8 @@ target_include_directories(volk PUBLIC ${POP_ROOT}/third_party/volk ${POP_ROOT}/
 target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
 pop_optimize(volk 2)
 
-add_library(gpu_vulkan OBJECT vulkan/vulkan_loader.cpp vulkan/vulkan_device.cpp vulkan/vulkan_swapchain.cpp)
+add_library(gpu_vulkan OBJECT vulkan/vulkan_loader.cpp vulkan/vulkan_device.cpp vulkan/vulkan_pipeline.cpp
+                               vulkan/vulkan_swapchain.cpp)
 target_link_libraries(gpu_vulkan PUBLIC volk)
 target_include_directories(gpu_vulkan PUBLIC ${POP_ROOT} ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(gpu_vulkan PRIVATE ${POP_WARN_HOST})
