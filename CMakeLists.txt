@@ -28,6 +28,20 @@ set(POP_TRANSLATE AUTO CACHE STRING "AUTO, ON or OFF: define targets that need b
 set_property(CACHE POP_TRANSLATE PROPERTY STRINGS AUTO ON OFF)
 set(POP_TRACE_DIR "" CACHE PATH "Snapshot directory for pop_fixture_trace")
 set(POP_RECOMP_APP_NAME PopRecomp CACHE STRING "macOS bundle name")
+
+# The version is the git description of the commit being built; a tree
+# without git history gets "unknown". The release workflow passes it in.
+find_package(Git QUIET)
+set(POP_RECOMP_VERSION "unknown" CACHE STRING "Version string baked into the hosts")
+if(POP_RECOMP_VERSION STREQUAL "unknown" AND GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+                  WORKING_DIRECTORY ${POP_ROOT} OUTPUT_VARIABLE POP_GIT_DESCRIBE
+                  OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(POP_GIT_DESCRIBE)
+    set(POP_RECOMP_VERSION ${POP_GIT_DESCRIBE})
+  endif()
+endif()
+configure_file(${POP_ROOT}/src/recomp/host/version.h.in ${CMAKE_BINARY_DIR}/generated/version.h @ONLY)
 if(NOT POP_RECOMP_APP_NAME MATCHES "^[A-Za-z0-9_-]+$")
   message(FATAL_ERROR "Invalid POP_RECOMP_APP_NAME: ${POP_RECOMP_APP_NAME}")
 endif()

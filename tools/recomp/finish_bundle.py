@@ -12,13 +12,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def rename_identity(plist_path, name):
-    """A bundle built under another name gets its own identity of its own."""
-    if name == "PopRecomp":
-        return
+def rename_identity(plist_path, name, version):
+    """A bundle built under another name gets its own identity; every bundle its version."""
     data = plistlib.loads(plist_path.read_bytes())
-    data.update(CFBundleName=name, CFBundleDisplayName=name, CFBundleExecutable=name,
-                CFBundleIdentifier="io.github.veritr1x.populousrecomp." + name.lower())
+    if name != "PopRecomp":
+        data.update(CFBundleName=name, CFBundleDisplayName=name, CFBundleExecutable=name,
+                    CFBundleIdentifier="io.github.veritr1x.populousrecomp." + name.lower())
+    if version:
+        data.update(CFBundleShortVersionString=version.lstrip("v"), CFBundleVersion=version.lstrip("v"))
     plist_path.write_bytes(plistlib.dumps(data))
 
 
@@ -27,13 +28,14 @@ def main():
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--cc", required=True)
+    parser.add_argument("--version", default="")
     parser.add_argument("--pack", type=Path,
                         default=Path(os.environ.get("POPM_TEXTURE_PACK_DIR") or ROOT / "build/texture-pack"))
     args = parser.parse_args()
     contents = args.bundle / "Contents"
     resources = contents / "Resources"
     resources.mkdir(parents=True, exist_ok=True)
-    rename_identity(contents / "Info.plist", args.name)
+    rename_identity(contents / "Info.plist", args.name, args.version)
     # The committed probe list. A missing list is labelled a baseline fallback
     # by the settings layer; packaging never manufactures measurements.
     probes = ROOT / "tools/recomp/baseline/classic-modes.json"

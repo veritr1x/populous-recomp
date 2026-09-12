@@ -38,22 +38,23 @@ HostLayout compute() {
         if (c == '\\')
             c = '/';
     const std::string dir = parent(exe);
+    // A checkout above the executable makes this a developer run whatever the
+    // executable's own shape (build/recomp/pop_smoke or build/PopRecomp.app).
+    std::string up = dir;
+    for (int depth = 0; depth < 12 && !up.empty(); ++depth) {
+        if (exists(up + "/tools/recomp/baseline/classic-modes.json")) {
+            l.checkout_root = up;
+            l.developer = true;
+            break;
+        }
+        up = parent(up);
+    }
     if (ends_with(dir, "/Contents/MacOS"))
         l.resources_dir = parent(dir) + "/Resources";
     else if (exists(dir + "/resources"))
         l.resources_dir = dir + "/resources";
-    else {
-        std::string up = dir;
-        for (int depth = 0; depth < 12 && !up.empty(); ++depth) {
-            if (exists(up + "/tools/recomp/baseline/classic-modes.json")) {
-                l.checkout_root = up;
-                l.developer = true;
-                l.resources_dir = up;
-                break;
-            }
-            up = parent(up);
-        }
-    }
+    else if (l.developer)
+        l.resources_dir = l.checkout_root;
     const char *env = getenv("POPM_PROFILE_DIR");
     if (env && *env)
         l.profile_dir = env;
@@ -83,7 +84,7 @@ std::string host_resource(const char *rel) {
     const HostLayout &l = host_layout();
     if (l.resources_dir.empty())
         return "";
-    if (l.developer) {
+    if (l.developer && l.resources_dir == l.checkout_root) {
         if (strcmp(rel, "mods/core") == 0)
             return l.checkout_root + "/build/recomp/mods/core";
         if (strcmp(rel, "texture-pack") == 0)

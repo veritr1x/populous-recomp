@@ -88,6 +88,15 @@ int main() {
     CHECK(host_layout().resources_dir.empty());
     CHECK(host_resource("mods/core").empty());
     CHECK(!host_layout().developer);
+    // 6. A bundle built inside a checkout: developer profile, the bundle's own resources.
+    mkdir_p(root + "/co/build/Y.app/Contents/MacOS");
+    mkdir_p(root + "/co/build/Y.app/Contents/Resources");
+    touch(root + "/co/build/Y.app/Contents/MacOS/Y");
+    host_layout_set_exe_path_for_test((root + "/co/build/Y.app/Contents/MacOS/Y").c_str());
+    CHECK(host_layout().developer);
+    CHECK(host_layout().resources_dir == root + "/co/build/Y.app/Contents/Resources");
+    CHECK(host_resource("mods/core") == root + "/co/build/Y.app/Contents/Resources/mods/core");
+    CHECK(host_layout().profile_dir == root + "/co/build/recomp/profile");
     host_layout_set_exe_path_for_test(nullptr);
     printf("%d checks, %d failures\n", g_checks, g_failures);
     if (!g_failures)

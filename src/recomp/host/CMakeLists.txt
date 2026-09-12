@@ -73,7 +73,8 @@ function(pop_host target)
   add_executable(${target} ${ARG_SOURCES})
   target_link_libraries(${target} PRIVATE ${ARG_LIBS} ${ARG_FRAMEWORKS})
   target_include_directories(${target} PRIVATE ${POP_ROOT} ${POP_ROOT}/src ${POP_ROOT}/src/recomp/runtime
-                                               ${POP_ROOT}/src/recomp/host ${POP_ROOT}/third_party/lua)
+                                               ${POP_ROOT}/src/recomp/host ${POP_ROOT}/third_party/lua
+                                               ${CMAKE_BINARY_DIR}/generated)
   target_compile_options(${target} PRIVATE ${POP_WARN_HOST} ${POP_OBJC_ARC})
   if(ARG_UI_LAYER)
     target_compile_definitions(${target} PRIVATE POPM_PRESENT_HAS_UI_LAYER=1)

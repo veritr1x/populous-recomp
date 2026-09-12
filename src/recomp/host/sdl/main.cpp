@@ -31,6 +31,7 @@
 #include "../present.h"
 #include "../window_presentation.h"
 #include "keymap.h"
+#include "version.h"
 #include "../../dx/dx.h"
 #include "../../runtime/loader.h"
 #include "../../runtime/mods_seam.h"
@@ -993,8 +994,33 @@ void post_drawable_size() {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    // --version and --probe-layout answer before SDL or the GPU come up, so a
+    // packaged build can be checked on a machine with neither a display nor
+    // the game.
+    const char *exe_flag = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("PopRecomp %s (%s)\n", POP_RECOMP_VERSION, gpu::default_backend_name());
+            return 0;
+        }
+        if (strcmp(argv[i], "--probe-layout") == 0) {
+            const HostLayout &l = host_layout();
+            printf("resources_dir=%s\nprofile_dir=%s\ndeveloper=%d\n", l.resources_dir.c_str(),
+                   l.profile_dir.c_str(), int(l.developer));
+            return 0;
+        }
+        if (strcmp(argv[i], "--exe") == 0 && i + 1 < argc)
+            exe_flag = argv[++i];
+        else if (strncmp(argv[i], "--exe=", 6) == 0)
+            exe_flag = argv[i] + 6;
+        else {
+            fprintf(stderr,
+                    "usage: PopRecomp [--exe <D3DPopTB.exe>] [--version] [--probe-layout]\n");
+            return 2;
+        }
+    }
+    if (exe_flag)
+        os_setenv("POP_RECOMP_EXE", exe_flag); // until game_path_resolve takes it directly
     std::string exe = find_exe_relative_to_bundle();
     if (exe.empty()) {
         fprintf(stderr, "PopRecomp: original/gog/D3DPopTB.exe was not found above this "

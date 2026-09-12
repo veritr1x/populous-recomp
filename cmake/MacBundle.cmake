@@ -10,7 +10,7 @@ function(pop_mac_bundle target)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${Python3_EXECUTABLE} ${POP_ROOT}/tools/recomp/finish_bundle.py
             --bundle ${POP_ROOT}/build/${POP_RECOMP_APP_NAME}.app
-            --name ${POP_RECOMP_APP_NAME} --cc ${CMAKE_C_COMPILER}
+            --name ${POP_RECOMP_APP_NAME} --cc ${CMAKE_C_COMPILER} --version ${POP_RECOMP_VERSION}
     WORKING_DIRECTORY ${POP_ROOT}
     COMMENT "Finishing ${POP_RECOMP_APP_NAME}.app"
     VERBATIM)
