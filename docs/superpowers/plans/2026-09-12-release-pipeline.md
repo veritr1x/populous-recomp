@@ -1124,3 +1124,35 @@ PROGRESS.md: row 4 → "Done on branch `release-pipeline` (pending merge)" with 
 - [ ] **Step 3: Finish**
 
 Use superpowers:finishing-a-development-branch (base `main`). After the merge, confirm the `Release` workflow ran on `main` and `gh release view latest` lists three assets.
+
+---
+
+## Execution notes (2026-09-12)
+
+- Task 1: `test_every_chunk_present` checks contiguous chunk numbering (`table.c`
+  does not name chunks). Building the app no longer needs the game; only
+  `--regenerate` checks for it. `translation/x86.h` (and the tool copy) define
+  `M_LN2`: glibc and MSVC hide it. The first CI round with the hosts compiled the
+  whole mods layer off macOS for the first time (OBJECT libraries compile only
+  when linked): `<algorithm>` includes, `os_setenv` in tests, the replay bridge
+  excluded on Windows (page tracker is POSIX), a duplicate weak C definition of
+  `mods_write_run_record` (COFF rejects two weak definitions), libatomic on Linux.
+- Task 3: the layout unit moved again, to `src/recomp/runtime/layout.{h,cpp}`,
+  because the runtime's registry path needs it. A bundle under a checkout is a
+  developer run (checkout profile) with the bundle's own resources. Added
+  `host_state_file()` for the registry and the run record.
+- Task 5: unchanged. The picker's click-through cases stay manual.
+- Task 6: `checks.yml` also packages and uploads each platform's archive (7 days),
+  since `workflow_dispatch` cannot start a workflow that is not yet on `main`.
+  `symbols.json` ships in resources (the mod loader needs it); `build_core.py`
+  accepts `dist/` as an install root; `layout_tests` compares forward-slash paths.
+- Windows under CrossOver found three bugs the suites cannot: `dirname_of` split
+  on `/` only (backslash exe path → no data dir → the game exited after the
+  registry prompt); plugin symbols need `__declspec(dllexport)` on COFF
+  (`POP_MOD_EXPORT`); `vkCmdBeginRendering` is null on a 1.2 device that offers
+  the KHR extension (volk does not alias), now aliased after `volkLoadDevice`.
+  The new Windows fault handler (`SetUnhandledExceptionFilter`) prints the crash
+  RVA and stack return RVAs; the Windows preset links with `/map` and the map
+  travels in the CI artifact, which is how the null call was attributed.
+- CI runs: 34703872387, 34704127366, 34704503013, 34704838816, 34705177789
+  (first green), 34705917362, 34706392639, 34706772249 (green, Wine-verified).

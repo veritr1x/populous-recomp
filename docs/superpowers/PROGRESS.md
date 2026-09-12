@@ -11,7 +11,7 @@ the "Now" section at every milestone and commit it with the work.
 | 1 | Portable build system + `os.h` platform layer | `specs/2026-09-12-portable-build-system-design.md` | `plans/2026-09-12-portable-build-system.md` | **Done.** Merged to `main` (commits 3fa44f4..920de70), CI green on macOS, Ubuntu, Windows. |
 | 2 | Host abstraction: GPU device interface (Metal first), SDL3 window/input on macOS, portable audio mixer + TinySoundFont MIDI | `specs/2026-09-12-host-abstraction-design.md` | `plans/2026-09-12-host-abstraction.md` | **Done.** Merged to `main` (commits 1b35ca9..0e862a5), CI green on macOS, Ubuntu, Windows. The manual window checklist is still for a person to run. |
 | 3 | Vulkan backend + Windows/Linux hosts (presets, CI labels) | `specs/2026-09-12-vulkan-and-platform-hosts-design.md` | `plans/2026-09-12-vulkan-and-platform-hosts.md` | **Done.** Merged to `main` (commits a8ff5e9..44cee8d). CI green on macOS (Metal), Ubuntu (lavapipe runs the GPU suites) and Windows (ported suites) at 4a73426 (run 34701915809). Game-backed suites pass over Vulkan on this Mac (MoltenVK). Manual runs on real Windows/Linux hardware still to do; not a merge gate. |
-| 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | not yet | not yet | Not started. |
+| 4 | Release pipeline with the translation embedded; player points at their own D3DPopTB.exe | `specs/2026-09-12-release-pipeline-design.md` | `plans/2026-09-12-release-pipeline.md` | **Done on branch `release-pipeline`** (pending merge). `translation/` tracked; CI builds and packages the hosts on all three platforms (run 34706772249); the Windows archive runs the game under CrossOver on this Mac; the macOS archive runs from outside the checkout. The `latest` pre-release is published by the merge. |
 
 Decisions that must not be reopened without the user: clang only (no MSVC); SDL3 on
 every platform including macOS; one software mixer everywhere (AVAudioEngine and the
@@ -21,20 +21,18 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 ## Now
 
-- Sub-project 3 merged to `main` at 44cee8d; branch deleted locally and on origin. Execution notes at the end of the plan record every
-  deviation and the bugs the game runs found (command-pool threading, a
-  deadlock between uploads and presenter callbacks, MoltenVK's slow free).
-- Verified over Vulkan on this Mac (`POP_GPU_BACKEND=vulkan`): `gpu_vulkan_tests`,
-  `compositor_tests`, `host_tests` (3.9M checks), `tools/test.py --gameplay`,
-  `tools/test.py --mods`, and the pinned flyby: Metal vs Vulkan present frame
-  mean 0.96 levels, 0.56% of pixels differ by more than 24 (rasteriser edges);
-  scene 0.97 / 0.48%; level start 0.56 / 0.53%. Validation layer clean over a
-  150 s flyby.
-- What a person still has to do: run `build/PopRecomp.app` on this Mac with
-  `POP_GPU_BACKEND=vulkan` for the window checklist, and one run each on real
-  Windows and Linux hardware (the executables are `build/recomp/PopRecomp` there;
-  they need the game files beside the checkout as on the Mac).
-- Next sub-project: 4 (release pipeline shipping the compiled translation).
+- Sub-project 4 implemented on `release-pipeline` (seven plan tasks); waiting for
+  the merge decision. The merge to `main` is what first runs `release.yml` and
+  publishes the rolling `latest` pre-release with three archives.
+- Verified: `checks.yml` green on macOS, Ubuntu and Windows with the hosts built
+  from `translation/` and packaged as artifacts; the macOS archive unzipped in
+  /tmp boots with `--exe`, with a saved path (no dialog) and waits in the picker
+  with a stale one; the Windows archive from CI runs the game under CrossOver
+  (bottle `PopRecompTest`, win10_64) to the front end with mods, music and sound.
+- What a person still has to do: click through the picker and the mismatch box
+  once on macOS; run the Linux archive on Linux hardware; after the merge, check
+  `gh release view latest` lists three assets and consider tagging `v0.1.0`.
+- All four sub-projects of the multi-platform port are then complete.
 
 ## Environment gotcha found during Task 4
 
@@ -63,6 +61,19 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
    confirm the run's `headSha` matches `HEAD` before trusting it.
 
 ## Environment notes
+
+- Release archives: `python3 tools/recomp/package.py --preset macos --version $(git describe --tags --always)`
+  writes `dist/`. `PopRecomp --version`, `--probe-layout`, `--exe <path>`; the
+  profile is `~/Library/Application Support/PopRecomp` outside a checkout and
+  `build/recomp/profile` inside one (`POPM_PROFILE_DIR` overrides).
+- Windows archive under CrossOver on this Mac: download the `PopRecomp-windows`
+  artifact of a checks run, unzip, then
+  `/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxstart --bottle PopRecompTest --wait-children "$PWD/PopRecomp.exe" --exe 'Z:\Users\...\original\gog\D3DPopTB.exe'`
+  (the bottle must be a 64-bit template: `cxbottle --bottle PopRecompTest --create --template win10_64`).
+  `--version` and `--probe-layout` work the same way. The Windows artifact also
+  carries `PopRecomp.map`; the Windows fault handler prints crash RVAs against it.
+- `tools/build.py --publish-tracked` regenerates and copies the translation into
+  `translation/` (needs the game and Ghidra listings); plain builds need neither.
 
 - Vulkan on this Mac: `brew install molten-vk vulkan-loader vulkan-headers shaderc`
   (and `vulkan-validationlayers` for validation). The Homebrew loader is not on
@@ -95,6 +106,9 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
   playable platform until sub-project 3.
 
 ## Log
+
+- 2026-09-12: sub-project 4 implemented on `release-pipeline`; CI green with the
+  tracked translation; Windows build verified under CrossOver.
 
 - 2026-09-12: sub-project 3 implemented on `vulkan-hosts` (spec, plan, nine tasks);
   CI green on all three platforms; Vulkan game runs match Metal on this Mac.
