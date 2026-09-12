@@ -15,6 +15,13 @@ pop_optimize(lua 2)
 # picked up by the next configure.
 file(GLOB POP_MODS_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp ${CMAKE_CURRENT_SOURCE_DIR}/lua/*.cpp)
+# The capture seam includes the page-tracking harness from src/recomp/native,
+# which is mprotect and signal handlers. Windows gets the stub that says so.
+list(REMOVE_ITEM POP_MODS_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/capture_seam_win32.cpp)
+if(WIN32)
+  list(REMOVE_ITEM POP_MODS_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/capture_seam.cpp)
+  list(APPEND POP_MODS_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/capture_seam_win32.cpp)
+endif()
 
 add_library(recomp_mods OBJECT ${POP_MODS_SOURCES})
 target_include_directories(recomp_mods PUBLIC ${POP_ROOT} ${POP_ROOT}/src ${POP_ROOT}/src/recomp/runtime)

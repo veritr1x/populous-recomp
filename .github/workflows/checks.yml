@@ -30,10 +30,46 @@ jobs:
         run: .venv/bin/python tools/check_repo.py
 
   native-compile:
-    runs-on: macos-15
+    # The game and locally generated code are not available in public CI.
+    # Each platform configures with POP_TRANSLATE=OFF, builds every test
+    # binary it has, and runs the suites that need neither game files nor a
+    # GPU. No original assets, bundles, profiles or diagnostics are uploaded.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            preset: macos
+            labels: "nogame|gpu"
+          - os: ubuntu-24.04
+            preset: linux
+            labels: nogame
+          - os: windows-2025
+            preset: windows
+            labels: nogame
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Compile native runtime, adapters and host test binaries
-        run: python3 tools/test.py --compile-only
-      # The game and locally generated code are not available in public CI.
-      # No original assets, app bundles, profiles or diagnostics are uploaded.
+      - name: Install clang and lld (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang lld
+      - name: Enter the Visual Studio developer environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install CMake and Ninja
+        shell: bash
+        run: |
+          python3 -m venv .ci
+          if [ -d .ci/Scripts ]; then BIN=.ci/Scripts; else BIN=.ci/bin; fi
+          "$BIN/python" -m pip install cmake==4.1.2 ninja==1.13.0
+          if [ "$RUNNER_OS" = Windows ]; then
+            cygpath -w "$PWD/$BIN" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/$BIN" >> "$GITHUB_PATH"
+          fi
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }} -DPOP_TRANSLATE=OFF
+      - name: Build every test binary this platform has
+        run: cmake --build --preset ${{ matrix.preset }} --target check_binaries
+      - name: Run the suites that need no game files
+        run: ctest --preset ${{ matrix.preset }} -L "${{ matrix.labels }}" --output-on-failure
