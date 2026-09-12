@@ -1,6 +1,6 @@
 #include "memory.h"
 
-#include <sys/mman.h>
+#include "../platform/os.h"
 #include <map>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,11 +132,11 @@ void heap_reset() {
 
 void mem_init() {
     if (g_mem) {
-        munmap(g_mem, GUEST_SIZE);
+        os_vm_release(g_mem, GUEST_SIZE);
         g_mem = nullptr;
     }
-    void *p = mmap(nullptr, GUEST_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) {
+    void *p = os_vm_reserve(GUEST_SIZE);
+    if (!p) {
         fprintf(stderr, "[popm] fatal: cannot map %u bytes of guest memory\n", GUEST_SIZE);
         abort();
     }
@@ -146,7 +146,7 @@ void mem_init() {
 
 void mem_shutdown() {
     if (g_mem) {
-        munmap(g_mem, GUEST_SIZE);
+        os_vm_release(g_mem, GUEST_SIZE);
         g_mem = nullptr;
     }
     if (g_blocks) {

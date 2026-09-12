@@ -5,7 +5,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
+#include "../platform/os.h"
 
 namespace {
 
@@ -23,7 +23,7 @@ void make_parent_dirs(const std::string &path) {
             next = dir.size();
         acc.append(dir, i, next - i);
         if (!acc.empty())
-            mkdir(acc.c_str(), 0755); // EEXIST is fine
+            os_mkdir(acc.c_str()); // EEXIST is fine
         acc.push_back('/');
         i = next + 1;
     }

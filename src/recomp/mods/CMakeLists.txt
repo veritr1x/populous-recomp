@@ -66,7 +66,7 @@ if(TARGET recomp_gen)
 
   file(GLOB POP_MODS_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
   add_executable(mods_tests ${POP_MODS_TEST_SOURCES} $<TARGET_OBJECTS:mods_api_header_test>)
-  target_link_libraries(mods_tests PRIVATE recomp_runtime_testing recomp_snapshot recomp_mods_testing lua)
+  target_link_libraries(mods_tests PRIVATE recomp_platform recomp_runtime_testing recomp_snapshot recomp_mods_testing lua)
   target_compile_options(mods_tests PRIVATE ${POP_WARN_HOST})
   pop_optimize(mods_tests 1)
   pop_link_gen(mods_tests)

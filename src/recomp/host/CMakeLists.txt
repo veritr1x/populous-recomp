@@ -42,7 +42,7 @@ function(pop_host target)
   endif()
 endfunction()
 
-set(POP_CORE_LIBS recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common)
+set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common)
 set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.mm ${HOST}/compositor.mm
                         ${HOST}/ui_layer.mm ${HOST}/d3d_render.mm ${BACKENDS}/indexed_frame.cpp)
 
@@ -73,7 +73,7 @@ if(TARGET recomp_gen)
   pop_host(present_events_tests GEN UI_LAYER
     SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
             ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.mm ${HOST}/input_gate.cpp
-    LIBS recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua
+    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
   set_tests_properties(present_events_tests PROPERTIES LABELS mods)
@@ -90,7 +90,7 @@ pop_host(host_tests UI_LAYER
           ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp
           ${POP_ROOT}/src/recomp/dx/com.cpp ${POP_ROOT}/src/recomp/dx/host_api.cpp
           ${POP_ROOT}/src/recomp/dx/display_stubs.cpp ${POP_ROOT}/src/recomp/dx/dinput.cpp
-  LIBS recomp_runtime
+  LIBS recomp_platform recomp_runtime
   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL} ${FW_AUDIO})
 pop_test_binary(host_tests)
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})

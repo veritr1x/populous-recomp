@@ -140,6 +140,8 @@ void test_paths_and_descriptors() {
     CHECK(os_lstat(sub.c_str(), &st) == 0 && !st.is_symlink);
     CHECK(os_unlink((sub + "/a.txt").c_str()) == 0);
     CHECK(os_stat((sub + "/a.txt").c_str(), &st) == -1);
+    CHECK(os_rmdir(sub.c_str()) == 0);
+    CHECK(os_stat(sub.c_str(), &st) == -1);
 
     char cwd[4096];
     CHECK(os_getcwd(cwd, sizeof cwd) == 0 && cwd[0] != 0);

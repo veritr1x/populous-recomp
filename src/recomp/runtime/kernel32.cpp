@@ -13,21 +13,19 @@
 #include "win32.h"
 #include "loader.h"
 
-#include <dirent.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <pthread.h>
+#include "../platform/os.h"
+
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <map>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -199,20 +197,18 @@ std::map<std::string, std::map<std::string, std::string>> &dir_cache() {
     return m;
 }
 
+int collect_listing(const char *name, void *user) {
+    auto *entries = (std::map<std::string, std::string> *)user;
+    entries->emplace(lower(name), name);
+    return 0;
+}
+
 const std::map<std::string, std::string> &listing(const std::string &dir) {
     auto it = dir_cache().find(dir);
     if (it != dir_cache().end())
         return it->second;
     std::map<std::string, std::string> entries;
-    if (DIR *d = opendir(dir.c_str())) {
-        while (struct dirent *e = readdir(d)) {
-            std::string n = e->d_name;
-            if (n == "." || n == "..")
-                continue;
-            entries.emplace(lower(n), n);
-        }
-        closedir(d);
-    }
+    os_listdir(dir.c_str(), collect_listing, &entries);
     return dir_cache().emplace(dir, std::move(entries)).first->second;
 }
 
@@ -322,8 +318,8 @@ static std::string resolve_in_game_dir(const std::vector<std::string> &norm, boo
     std::string host = g_game_dir;
     for (size_t i = 0; i < norm.size(); ++i) {
         std::string next = host + "/" + norm[i];
-        struct stat st;
-        if (stat(next.c_str(), &st) == 0) {
+        OsStat st;
+        if (os_stat(next.c_str(), &st) == 0) {
             host = next;
             continue;
         }
@@ -438,15 +434,15 @@ uint64_t filetime(time_t t) {
     return ((uint64_t)t + 11644473600ull) * 10000000ull;
 }
 
-void put_filetime(uint32_t addr, time_t t) {
+void put_filetime(uint32_t addr, int64_t t) {
     uint64_t ft = filetime(t);
     wr32(addr, (uint32_t)ft);
     wr32(addr + 4, (uint32_t)(ft >> 32));
 }
 
-uint32_t attrs_for(const struct stat &st) {
-    uint32_t a = S_ISDIR(st.st_mode) ? FILE_ATTRIBUTE_DIRECTORY_ : FILE_ATTRIBUTE_ARCHIVE_;
-    if (!(st.st_mode & S_IWUSR))
+uint32_t attrs_for(const OsStat &st) {
+    uint32_t a = st.is_dir ? FILE_ATTRIBUTE_DIRECTORY_ : FILE_ATTRIBUTE_ARCHIVE_;
+    if (st.is_readonly)
         a |= FILE_ATTRIBUTE_READONLY_;
     return a;
 }
@@ -471,14 +467,14 @@ bool wildcard_match(const char *pat, const char *str) {
 
 void fill_find_data(uint32_t addr, const std::string &host_path, const std::string &name) {
     memset(g_mem + addr, 0, 0x140);
-    struct stat st{};
-    if (stat(host_path.c_str(), &st) == 0) {
+    OsStat st{};
+    if (os_stat(host_path.c_str(), &st) == 0) {
         wr32(addr + 0, attrs_for(st));
-        put_filetime(addr + 4, st.st_ctime);
-        put_filetime(addr + 12, st.st_atime);
-        put_filetime(addr + 20, st.st_mtime);
-        wr32(addr + 28, (uint32_t)((uint64_t)st.st_size >> 32));
-        wr32(addr + 32, (uint32_t)st.st_size);
+        put_filetime(addr + 4, st.ctime);
+        put_filetime(addr + 12, st.atime);
+        put_filetime(addr + 20, st.mtime);
+        wr32(addr + 28, (uint32_t)(st.size >> 32));
+        wr32(addr + 32, (uint32_t)st.size);
     } else {
         wr32(addr + 0, FILE_ATTRIBUTE_NORMAL_);
     }
@@ -657,24 +653,24 @@ void k_CreateFileA(X86 *c) {
         set_eax(c, INVALID_HANDLE_VALUE_);
         return;
     }
-    int flags = want_write ? (access & 0x80000000u ? O_RDWR : O_WRONLY) : O_RDONLY;
+    int flags = want_write ? (access & 0x80000000u ? OS_O_RDWR : OS_O_WRONLY) : OS_O_RDONLY;
     switch (disp) {
     case 1:
-        flags |= O_CREAT | O_EXCL;
+        flags |= OS_O_CREAT | OS_O_EXCL;
         break; // CREATE_NEW
     case 2:
-        flags |= O_CREAT | O_TRUNC;
+        flags |= OS_O_CREAT | OS_O_TRUNC;
         break; // CREATE_ALWAYS
     case 4:
-        flags |= O_CREAT;
+        flags |= OS_O_CREAT;
         break; // OPEN_ALWAYS
     case 5:
-        flags |= O_TRUNC;
+        flags |= OS_O_TRUNC;
         break; // TRUNCATE_EXISTING
     default:
         break; // OPEN_EXISTING
     }
-    int fd = open(host.c_str(), flags, 0644);
+    int fd = os_fd_open(host.c_str(), flags);
     if (fd < 0) {
         set_last_error(ERROR_FILE_NOT_FOUND_);
         set_eax(c, INVALID_HANDLE_VALUE_);
@@ -709,7 +705,7 @@ void k_ReadFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    ssize_t n = read(o->fd, g_mem + buf, want);
+    int64_t n = os_fd_read(o->fd, g_mem + buf, want);
     if (n < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
         if (pread)
@@ -737,7 +733,7 @@ void k_WriteFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    ssize_t n = write(o->fd, g_mem + buf, want);
+    int64_t n = os_fd_write(o->fd, g_mem + buf, want);
     if (n < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
         set_eax(c, 0);
@@ -760,8 +756,8 @@ void k_SetFilePointer(X86 *c) {
     int64_t off = dist;
     if (phigh)
         off |= ((int64_t)(int32_t)rd32(phigh)) << 32;
-    int whence = method == 1 ? SEEK_CUR : method == 2 ? SEEK_END : SEEK_SET;
-    off_t pos = lseek(o->fd, (off_t)off, whence);
+    int whence = method == 1 ? OS_SEEK_CUR : method == 2 ? OS_SEEK_END : OS_SEEK_SET;
+    int64_t pos = os_fd_seek(o->fd, off, whence);
     if (pos < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
         set_eax(c, INVALID_HANDLE_VALUE_);
@@ -780,14 +776,14 @@ void k_GetFileSize(X86 *c) {
         set_eax(c, INVALID_HANDLE_VALUE_);
         return;
     }
-    struct stat st{};
-    if (fstat(o->fd, &st) != 0) {
+    OsStat st{};
+    if (os_fd_stat(o->fd, &st) != 0) {
         set_eax(c, INVALID_HANDLE_VALUE_);
         return;
     }
     if (phigh)
-        wr32(phigh, (uint32_t)((uint64_t)st.st_size >> 32));
-    set_eax(c, (uint32_t)st.st_size);
+        wr32(phigh, (uint32_t)(st.size >> 32));
+    set_eax(c, (uint32_t)st.size);
 }
 
 void k_CloseHandle(X86 *c) {
@@ -799,7 +795,7 @@ void k_CloseHandle(X86 *c) {
         return;
     }
     if ((o->kind == H_FILE || o->kind == H_MAPPING) && o->fd >= 0)
-        close(o->fd);
+        os_fd_close(o->fd);
     handles().erase(h);
     set_eax(c, 1);
 }
@@ -807,7 +803,7 @@ void k_CloseHandle(X86 *c) {
 void k_FlushFileBuffers(X86 *c) {
     HObj *o = handle_get(arg(c, 0), H_FILE);
     if (o)
-        fsync(o->fd);
+        os_fd_fsync(o->fd);
     set_eax(c, 1);
 }
 
@@ -817,8 +813,8 @@ void k_SetEndOfFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    off_t pos = lseek(o->fd, 0, SEEK_CUR);
-    set_eax(c, ftruncate(o->fd, pos) == 0 ? 1 : 0);
+    int64_t pos = os_fd_seek(o->fd, 0, OS_SEEK_CUR);
+    set_eax(c, os_fd_truncate(o->fd, pos) == 0 ? 1 : 0);
 }
 
 void k_GetFileType(X86 *c) {
@@ -832,8 +828,8 @@ void k_GetFileType(X86 *c) {
 
 void k_GetFileAttributesA(X86 *c) {
     std::string host = win32_host_path(gm_str(arg(c, 0)));
-    struct stat st{};
-    if (host.empty() || stat(host.c_str(), &st) != 0) {
+    OsStat st{};
+    if (host.empty() || os_stat(host.c_str(), &st) != 0) {
         set_last_error(ERROR_FILE_NOT_FOUND_);
         set_eax(c, 0xffffffffu);
         return;
@@ -858,7 +854,7 @@ void k_CreateDirectoryA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    int rc = mkdir(host.c_str(), 0755);
+    int rc = os_mkdir(host.c_str());
     win32_invalidate_dir_cache();
     set_eax(c, rc == 0 ? 1 : 0);
 }
@@ -870,7 +866,7 @@ void k_RemoveDirectoryA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    int rc = rmdir(host.c_str());
+    int rc = os_rmdir(host.c_str());
     win32_invalidate_dir_cache();
     set_eax(c, rc == 0 ? 1 : 0);
 }
@@ -882,7 +878,7 @@ void k_DeleteFileA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    int rc = unlink(host.c_str());
+    int rc = os_unlink(host.c_str());
     win32_invalidate_dir_cache();
     set_eax(c, rc == 0 ? 1 : 0);
 }
@@ -895,7 +891,7 @@ void k_MoveFileA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    int rc = rename(from.c_str(), to.c_str());
+    int rc = os_rename(from.c_str(), to.c_str());
     win32_invalidate_dir_cache();
     set_eax(c, rc == 0 ? 1 : 0);
 }
@@ -909,8 +905,8 @@ void k_CopyFileA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    struct stat st{};
-    if (fail_if_exists && stat(to.c_str(), &st) == 0) {
+    OsStat st{};
+    if (fail_if_exists && os_stat(to.c_str(), &st) == 0) {
         set_last_error(ERROR_ALREADY_EXISTS_);
         set_eax(c, 0);
         return;
@@ -1173,12 +1169,12 @@ void k_CreateFileMappingA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    struct stat st{};
-    fstat(f->fd, &st);
+    OsStat st{};
+    os_fd_stat(f->fd, &st);
     if (!size)
-        size = (uint32_t)st.st_size;
+        size = (uint32_t)st.size;
     uint32_t h = handle_new(H_MAPPING);
-    handles()[h].fd = dup(f->fd);
+    handles()[h].fd = os_fd_dup(f->fd);
     handles()[h].map_size = size;
     handles()[h].path = f->path;
     set_eax(c, h);
@@ -1199,8 +1195,8 @@ void k_MapViewOfFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    lseek(m->fd, off_low, SEEK_SET);
-    ssize_t got = read(m->fd, g_mem + addr, n);
+    os_fd_seek(m->fd, off_low, OS_SEEK_SET);
+    int64_t got = os_fd_read(m->fd, g_mem + addr, n);
     if (got < 0)
         got = 0;
     m->map_view = addr;
@@ -1794,7 +1790,7 @@ struct GuestThread {
     X86 ctx{};
     uint32_t stack_lo = 0, stack_hi = 0;
     uint32_t teb = TEB_BASE, tls = TLS_BASE;
-    pthread_t tid{};
+    OsThreadId tid = 0;
     bool is_main = false;
     bool spawned = false; // a host thread exists for it
     bool finished = false;
@@ -1825,9 +1821,7 @@ struct GuestThread {
 // the guest clock can be pinned (the parity fixture pins it to a constant) and
 // a pinned clock would make every timed wait either instant or eternal.
 double sched_now() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return (double)os_monotonic_ns() * 1e-9;
 }
 
 std::vector<GuestThread *> &threads() {
@@ -1835,8 +1829,8 @@ std::vector<GuestThread *> &threads() {
     return v;
 }
 
-pthread_mutex_t g_sched_m = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t g_sched_cv = PTHREAD_COND_INITIALIZER;
+std::mutex g_sched_m;
+std::condition_variable_any g_sched_cv;
 size_t g_baton = 0; // index of the thread allowed to run
 // Read by the host from the very thread that sets it, so a plain bool is the
 // whole of it: no other thread looks.
@@ -1970,16 +1964,16 @@ std::map<size_t, ProfileSlot *> &profile_slots() {
 }
 } // namespace
 void sched_register_profile_slot(ProfileSlot *slot) {
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     cur_thread(); // initialise the main registry/baton before starting the sampler
     profile_slots()[t_self] = slot;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
 }
 ProfileSlot *sched_current_holder_slot() {
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     auto it = profile_slots().find(g_baton);
     ProfileSlot *slot = it == profile_slots().end() ? nullptr : it->second;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return slot;
 }
 bool sched_is_guest_thread() {
@@ -1999,14 +1993,14 @@ void sched_set_guest_thread(bool yes) {
         recomp_profile_truncate(0);
         return;
     }
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     g_guest_entry_begun = true;
-    // Remember WHICH pthread this is. The run thread is never pthread_create'd
+    // Remember WHICH host thread this is. The run thread is never created
     // by the scheduler, so nothing else records it, and sched_run_thread_finished
     // has to be able to tell it from a host thread that merely defaulted to
     // t_self 0 and would otherwise declare the main thread finished.
-    cur_thread()->tid = pthread_self();
-    pthread_mutex_unlock(&g_sched_m);
+    cur_thread()->tid = os_thread_self();
+    g_sched_m.unlock();
 }
 
 // The whole answer, for a caller that already holds g_sched_m. Everything it
@@ -2018,9 +2012,9 @@ bool sched_holds_baton_locked() {
 bool sched_holds_baton() {
     if (!t_is_guest)
         return false;
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     bool mine = sched_holds_baton_locked();
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return mine;
 }
 
@@ -2036,9 +2030,9 @@ bool sched_guest_threads_stopped_locked() {
 }
 
 bool sched_guest_threads_stopped() {
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     bool all_done = sched_guest_threads_stopped_locked();
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return all_done;
 }
 
@@ -2055,17 +2049,17 @@ bool sched_guest_entry_begun_locked() {
 // code can reset is not a latch, and the pre-entry pump's whole guarantee is
 // that once the guest is running nothing can be granted again.
 void sched_forget_guest_entry() {
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     g_guest_entry_begun = false;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
 }
 #endif
 
 void sched_registry_lock() {
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
 }
 void sched_registry_unlock() {
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
 }
 
 bool sched_in_idle_slice() {
@@ -2077,9 +2071,9 @@ bool sched_in_idle_slice() {
 // second, and would sleep out that deadline with the input in hand; this wakes
 // it so it re-evaluates. Signalling costs nothing when nobody is parked.
 void sched_input_arrived() {
-    pthread_mutex_lock(&g_sched_m);
-    pthread_cond_broadcast(&g_sched_cv);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.lock();
+    g_sched_cv.notify_all();
+    g_sched_m.unlock();
 }
 
 void sched_set_input_queue(bool (*pending)(), void (*drain)()) {
@@ -2128,7 +2122,7 @@ void sched_wait_locked(size_t me, double until, double max_slice) {
         if (until && until - now < slice)
             slice = until - now;
         int (*waiter)(double) = g_idle_waiter;
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         // The lock is down and another guest thread may take the baton and run
         // guest code for the whole slice. Say so, so the host can hold back
         // anything the guest would see - input delivery, and mod callbacks
@@ -2140,7 +2134,7 @@ void sched_wait_locked(size_t me, double until, double max_slice) {
         // first, then wait on the notification the returning worker signals.
         waiter(awaiting_baton ? 0.0 : slice);
         g_in_idle_slice = false;
-        pthread_mutex_lock(&g_sched_m);
+        g_sched_m.lock();
         if (!awaiting_baton || g_baton == me)
             return;
     }
@@ -2154,15 +2148,7 @@ void sched_wait_locked(size_t me, double until, double max_slice) {
         return;
     if (wait > 1.0)
         wait = 1.0;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += (time_t)wait;
-    ts.tv_nsec += (long)((wait - (double)(time_t)wait) * 1e9);
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_nsec -= 1000000000L;
-        ++ts.tv_sec;
-    }
-    pthread_cond_timedwait(&g_sched_cv, &g_sched_m, &ts);
+    g_sched_cv.wait_for(g_sched_m, std::chrono::duration<double>(wait));
 }
 
 // ---------------------------------------------------------------------------
@@ -2460,7 +2446,7 @@ void sched_run_others_locked(size_t me, const char *why) {
         if (next != NO_THREAD) {
             g_baton = next;
             record_handoff_locked(me, next, why);
-            pthread_cond_broadcast(&g_sched_cv);
+            g_sched_cv.notify_all();
             // Wait for the baton, then loop: holding it is not the same as
             // being runnable, and a thread that ends hands the baton on
             // without knowing who is eligible. The run thread services the
@@ -2493,9 +2479,9 @@ void sched_run_others_locked(size_t me, const char *why) {
         // which is a hang rather than a safety property.
         if (g_input_pending && g_input_drain && mods_hook_depth() == 0 && g_input_pending()) {
             g_baton = me;
-            pthread_mutex_unlock(&g_sched_m);
+            g_sched_m.unlock();
             g_input_drain();
-            pthread_mutex_lock(&g_sched_m);
+            g_sched_m.lock();
             continue;
         }
 
@@ -2530,14 +2516,14 @@ void sched_handoff_on_exit_locked(size_t me, const char *why) {
         next = 0;
     g_baton = next;
     record_handoff_locked(me, next, why);
-    pthread_cond_broadcast(&g_sched_cv);
+    g_sched_cv.notify_all();
 }
 
 // Blocks the calling thread until its wait completes or its deadline passes.
 // Returns what the wait should report. Caller fills in the wait descriptor.
 uint32_t guest_block(const char *why) {
     GuestThread *me = cur_thread();
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (g_baton != me->index) {
         static bool told = false;
         if (!told) {
@@ -2545,13 +2531,13 @@ uint32_t guest_block(const char *why) {
             dump_scheduler_locked("block without the baton", me->index);
         }
         me->blocked = false;
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return 0x102;
     }
     me->last_yield = sched_now();
     sched_run_others_locked(me->index, why);
     uint32_t r = me->wait_result;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     if (g_exit_requested)
         thread_finish_exit_process();
     return r;
@@ -2564,14 +2550,14 @@ bool guest_yield() {
     if (threads().size() < 2)
         return false;
     GuestThread *me = cur_thread();
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (g_baton != me->index) {
         static bool told = false;
         if (!told) {
             told = true;
             dump_scheduler_locked("yield without the baton", me->index);
         }
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return false;
     }
     me->last_yield = sched_now();
@@ -2581,11 +2567,11 @@ bool guest_yield() {
     if (moved) {
         g_baton = next;
         record_handoff_locked(me->index, next, "yield");
-        pthread_cond_broadcast(&g_sched_cv);
+        g_sched_cv.notify_all();
         while (g_baton != me->index)
             sched_wait_locked(me->index, 0.0, HOST_IDLE_BATON_SLICE);
     }
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     if (moved && g_exit_requested)
         thread_finish_exit_process();
     return moved;
@@ -2629,10 +2615,10 @@ void host_set_idle_waiter(int (*fn)(double seconds)) {
 void guest_event_signal_from_host(uint32_t handle) {
     if (!handle || handle == 0xffffffffu)
         return;
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     g_host_signals.push_back(handle);
-    pthread_cond_broadcast(&g_sched_cv);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_cv.notify_all();
+    g_sched_m.unlock();
 }
 
 // Hands the baton to whatever else can run and takes it back. False means
@@ -2649,9 +2635,9 @@ void sched_checkpoint() {
     // reaches the scheduler proper, and a signal it never applied is a wait
     // that never ends.
     if (!g_host_signals.empty()) {
-        pthread_mutex_lock(&g_sched_m);
+        g_sched_m.lock();
         apply_host_signals_locked();
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
     }
     if (threads().size() < 2)
         return;
@@ -2669,9 +2655,9 @@ namespace {
 // is reconsidered at the next scheduling pass rather than sleeping out its
 // whole timeout.
 void sched_wake_all() {
-    pthread_mutex_lock(&g_sched_m);
-    pthread_cond_broadcast(&g_sched_cv);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.lock();
+    g_sched_cv.notify_all();
+    g_sched_m.unlock();
 }
 
 void sched_sleep_ms(uint32_t ms) {
@@ -2681,13 +2667,13 @@ void sched_sleep_ms(uint32_t ms) {
         guest_yield();
         return;
     } // give up the rest of the slice
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     me->blocked = true;
     me->wait_kind = W_NONE;
     me->wait_n = 0;
     me->has_deadline = true;
     me->deadline = sched_now() + (double)ms / 1000.0;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     guest_block("sleep");
 }
 
@@ -2711,7 +2697,7 @@ uint32_t sched_wait_objects(const uint32_t *handles_, uint32_t count, bool wait_
     GuestThread *me = cur_thread();
 
     // Satisfiable right now?  Taken here so a zero timeout still consumes.
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     bool ready = true, abandoned = false;
     uint32_t index = 0;
     if (wait_all) {
@@ -2733,11 +2719,11 @@ uint32_t sched_wait_objects(const uint32_t *handles_, uint32_t count, bool wait_
             abandoned = object_take(handles_[index], me->id);
     }
     if (ready) {
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return (abandoned ? 0x80u : 0u) + index; // WAIT_ABANDONED_0 + i
     }
     if (timeout_ms == 0) {
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return 0x102;
     }
 
@@ -2749,16 +2735,16 @@ uint32_t sched_wait_objects(const uint32_t *handles_, uint32_t count, bool wait_
         me->wait_h[i] = handles_[i];
     me->has_deadline = timeout_ms != 0xffffffffu; // INFINITE has none
     me->deadline = me->has_deadline ? sched_now() + (double)timeout_ms / 1000.0 : 0.0;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return guest_block("wait");
 }
 
 void sched_enter_critsec(uint32_t cs) {
     GuestThread *me = cur_thread();
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (critsec_available(cs, me->id)) {
         critsec_take(cs, me->id);
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return;
     }
     me->blocked = true;
@@ -2766,17 +2752,17 @@ void sched_enter_critsec(uint32_t cs) {
     me->wait_cs = cs;
     me->wait_n = 0;
     me->has_deadline = false; // EnterCriticalSection does not time out
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     guest_block("critical section");
 }
 
 bool sched_try_critsec(uint32_t cs) {
     GuestThread *me = cur_thread();
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     bool got = critsec_available(cs, me->id);
     if (got)
         critsec_take(cs, me->id);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return got;
 }
 
@@ -2784,13 +2770,13 @@ void sched_leave_critsec(uint32_t cs) {
     if (!cs || !gm_valid(cs, 24))
         return;
     GuestThread *me = cur_thread();
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (rd32(cs + CS_OFF_OWNER) != me->id) {
         // Leaving a section this thread does not own is a guest bug; Windows
         // corrupts the section rather than diagnosing it, so say so once.
         log_once("critsec-not-owner",
                  "LeaveCriticalSection(%08x) from thread %u, which does not own it", cs, me->id);
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         return;
     }
     uint32_t rec = rd32(cs + CS_OFF_RECURSION);
@@ -2800,9 +2786,9 @@ void sched_leave_critsec(uint32_t cs) {
     wr32(cs + CS_OFF_LOCK_COUNT, rec ? rec - 1 : 0xffffffffu);
     if (!rec) {
         wr32(cs + CS_OFF_OWNER, 0);
-        pthread_cond_broadcast(&g_sched_cv);
+        g_sched_cv.notify_all();
     }
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
 }
 
 // Everything a guest thread must do before it may be seen as finished, run
@@ -2845,10 +2831,10 @@ void *thread_host_main(void *arg) {
     t_ctx = &t->ctx;
     t_id = t->id;
 
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     while (g_baton != t->index)
-        pthread_cond_wait(&g_sched_cv, &g_sched_m);
-    pthread_mutex_unlock(&g_sched_m);
+        g_sched_cv.wait(g_sched_m);
+    g_sched_m.unlock();
 
     uint32_t start = 0, param = 0;
     if (HObj *o = handle_any(t->handle)) {
@@ -2864,7 +2850,7 @@ void *thread_host_main(void *arg) {
     // Before anything is published: this thread still holds the baton here.
     thread_run_exit_cleanup(t);
 
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     t->finished = true;
     release_mutexes_of_locked(t->id);
     if (HObj *o = handle_any(t->handle)) {
@@ -2872,7 +2858,7 @@ void *thread_host_main(void *arg) {
         o->thread_ran = true;
     }
     sched_handoff_on_exit_locked(t->index, "thread ended");
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return nullptr;
 }
 
@@ -2890,18 +2876,18 @@ void thread_finish_exit_process() {
             longjmp(g_exit_jmp, 1);
         exit((int)g_exit_code);
     }
-    // This host thread ends in pthread_exit and never returns to
+    // This host thread ends in os_thread_exit and never returns to
     // thread_host_main, so the cleanup has to happen here too - and here as
     // well it runs while the baton is still held and before `finished` is
     // published.
     thread_run_exit_cleanup(me);
 
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     me->finished = true;
     release_mutexes_of_locked(me->id);
     sched_handoff_on_exit_locked(me->index, "process exit");
-    pthread_mutex_unlock(&g_sched_m);
-    pthread_exit(nullptr);
+    g_sched_m.unlock();
+    os_thread_exit();
 }
 
 // ExitProcess called from a guest thread cannot longjmp: the landing pad is on
@@ -2912,13 +2898,13 @@ void thread_finish_exit_process() {
 bool request_process_exit(uint32_t code) {
     if (cur_thread()->is_main)
         return false;
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     g_exit_requested = true;
     g_exit_requested_code = code;
     // Wake anything parked: the main thread may be inside an indefinite wait,
     // and it is the only thread that can perform the exit.
-    pthread_cond_broadcast(&g_sched_cv);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_cv.notify_all();
+    g_sched_m.unlock();
     thread_finish_exit_process();
     return true;
 }
@@ -3009,14 +2995,16 @@ bool thread_spawn(uint32_t h) {
         return false;
     }
     threads().push_back(t);
-    if (pthread_create(&t->tid, nullptr, thread_host_main, t) != 0) {
+    OsThread *host = os_thread_create(thread_host_main, t, 0);
+    if (!host) {
         threads().pop_back();
         heap_free(t->stack_lo);
         heap_free(t->teb);
         delete t;
         return false;
     }
-    pthread_detach(t->tid);
+    t->tid = os_thread_id_of(host);
+    os_thread_detach(host);
     t->spawned = true;
     return true;
 }
@@ -3131,14 +3119,14 @@ void k_ResumeThread(X86 *c) {
     for (GuestThread *t : threads()) {
         if (t->handle != h || !t->spawned)
             continue;
-        pthread_mutex_lock(&g_sched_m);
+        g_sched_m.lock();
         int32_t was = t->suspend_count;
         if (t->suspend_count > 0)
             --t->suspend_count;
         o->thread_suspended = t->suspend_count > 0;
         if (!t->suspend_count)
-            pthread_cond_broadcast(&g_sched_cv);
-        pthread_mutex_unlock(&g_sched_m);
+            g_sched_cv.notify_all();
+        g_sched_m.unlock();
         set_eax(c, (uint32_t)was);
         return;
     }
@@ -3164,10 +3152,10 @@ void k_SuspendThread(X86 *c) {
     for (GuestThread *t : threads()) {
         if (t->handle != h || !t->spawned)
             continue;
-        pthread_mutex_lock(&g_sched_m);
+        g_sched_m.lock();
         int32_t was = t->suspend_count++;
         o->thread_suspended = true;
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         set_eax(c, (uint32_t)was);
         // Suspending yourself has to take effect before the call returns, so
         // it deschedules here and comes back only once somebody resumes it.
@@ -3446,7 +3434,7 @@ void k_CompareStringA(X86 *c) {
         l1 < 0 ? gm_str(arg(c, 2)) : std::string((const char *)(g_mem + arg(c, 2)), (size_t)l1);
     std::string b =
         l2 < 0 ? gm_str(arg(c, 4)) : std::string((const char *)(g_mem + arg(c, 4)), (size_t)l2);
-    int r = (flags & 1) ? strcasecmp(a.c_str(), b.c_str()) : strcmp(a.c_str(), b.c_str());
+    int r = (flags & 1) ? os_strcasecmp(a.c_str(), b.c_str()) : strcmp(a.c_str(), b.c_str());
     set_eax(c, r < 0 ? 1 : r == 0 ? 2 : 3);
 }
 
@@ -3467,7 +3455,7 @@ void k_CompareStringW(X86 *c) {
             break;
         b.push_back((char)w);
     }
-    int r = (flags & 1) ? strcasecmp(a.c_str(), b.c_str()) : strcmp(a.c_str(), b.c_str());
+    int r = (flags & 1) ? os_strcasecmp(a.c_str(), b.c_str()) : strcmp(a.c_str(), b.c_str());
     set_eax(c, r < 0 ? 1 : r == 0 ? 2 : 3);
 }
 
@@ -3553,18 +3541,18 @@ void sched_run_thread_unwind_frames() {
 void sched_run_thread_finished() {
     GuestThread *t = nullptr;
     bool have_baton = false;
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (!threads().empty() && t_self < threads().size()) {
         GuestThread *candidate = threads()[t_self];
         // Only the thread that registered itself may declare itself finished.
         // A host thread that never ran guest code has t_self 0 by default, and
         // without this check it would retire the main thread on its behalf.
-        if (pthread_equal(pthread_self(), candidate->tid) && !candidate->finished) {
+        if (os_thread_self() == candidate->tid && !candidate->finished) {
             t = candidate;
             have_baton = (g_baton == t_self);
         }
     }
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     if (!t)
         return;
 
@@ -3574,7 +3562,7 @@ void sched_run_thread_finished() {
     // thread's own state, so they are correct whoever holds the baton.
     thread_run_exit_cleanup(t);
 
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     t->finished = true;
     release_mutexes_of_locked(t->id);
     // The HANDOFF is the part that needs the baton. This can be reached from a
@@ -3590,7 +3578,7 @@ void sched_run_thread_finished() {
         LOGV("sched: run thread %zu finished without the baton; the holder "
              "will hand off",
              t_self);
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
 }
 
 // ---------------------------------------------------------------------------
@@ -3630,9 +3618,9 @@ bool sched_drive_until_stopped(double timeout_seconds) {
     const double kYield = 0.001; // a guest Sleep(1), which is what this is
 
     sched_set_guest_thread(true);
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     if (threads().empty() || t_self >= threads().size()) {
-        pthread_mutex_unlock(&g_sched_m);
+        g_sched_m.unlock();
         sched_set_guest_thread(false);
         return true; // no scheduler to drive
     }
@@ -3705,7 +3693,7 @@ bool sched_drive_until_stopped(double timeout_seconds) {
         g_baton = me;
     g_drive_was_finished = was_finished;
     g_drive_open = true;
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     return stopped;
 }
 
@@ -3714,7 +3702,7 @@ bool sched_drive_until_stopped(double timeout_seconds) {
 void sched_drive_release(void) {
     if (!g_drive_open)
         return;
-    pthread_mutex_lock(&g_sched_m);
+    g_sched_m.lock();
     g_drive_open = false;
     if (!threads().empty() && t_self < threads().size()) {
         GuestThread *t = threads()[t_self];
@@ -3738,10 +3726,10 @@ void sched_drive_release(void) {
             } else {
                 g_baton = NO_THREAD;
             }
-            pthread_cond_broadcast(&g_sched_cv);
+            g_sched_cv.notify_all();
         }
     }
-    pthread_mutex_unlock(&g_sched_m);
+    g_sched_m.unlock();
     sched_set_guest_thread(false);
 }
 

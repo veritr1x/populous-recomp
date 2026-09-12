@@ -129,6 +129,9 @@ int os_rename(const char *from, const char *to) {
 int os_unlink(const char *path) {
     return unlink(path);
 }
+int os_rmdir(const char *path) {
+    return rmdir(path);
+}
 int os_getcwd(char *buf, size_t cap) {
     return getcwd(buf, cap) ? 0 : -1;
 }

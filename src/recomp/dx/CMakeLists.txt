@@ -30,7 +30,7 @@ set_tests_properties(host_api_header_check PROPERTIES LABELS nogame)
 add_executable(dx_tests tests/dx_tests.cpp
   ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp
   $<TARGET_OBJECTS:host_api_header_test>)
-target_link_libraries(dx_tests PRIVATE recomp_dx recomp_runtime)
+target_link_libraries(dx_tests PRIVATE recomp_platform recomp_dx recomp_runtime)
 target_compile_options(dx_tests PRIVATE ${POP_WARN_HOST})
 pop_optimize(dx_tests 1)
 pop_test_binary(dx_tests)

@@ -58,6 +58,7 @@ int os_lstat(const char *path, OsStat *out);     // does not follow
 int os_mkdir(const char *path);                  // 0, or -1 (an existing directory is -1, as mkdir)
 int os_rename(const char *from, const char *to); // replaces an existing destination file
 int os_unlink(const char *path);
+int os_rmdir(const char *path);       // the directory must be empty
 int os_getcwd(char *buf, size_t cap); // 0 or -1
 int os_chdir(const char *path);
 // Calls `fn` for every entry except "." and "..", in directory order. A

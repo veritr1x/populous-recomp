@@ -9,9 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <strings.h>
+#include "../platform/os.h"
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -30,9 +28,7 @@ uint32_t (*g_time_source)() = nullptr;
 const char *g_clock_desc = nullptr;
 
 uint64_t now_us() {
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
+    return os_wall_time_us();
 }
 } // namespace
 
@@ -354,7 +350,7 @@ struct RegValue {
 // Registry key paths and value names are case-insensitive on Windows.
 struct CiLess {
     bool operator()(const std::string &a, const std::string &b) const {
-        return strcasecmp(a.c_str(), b.c_str()) < 0;
+        return os_strcasecmp(a.c_str(), b.c_str()) < 0;
     }
 };
 typedef std::map<std::string, RegValue, CiLess> RegValues;
@@ -492,7 +488,7 @@ void registry_flush() {
     // Create the parent directory chain (build/recomp) if it is missing.
     size_t pos = 0;
     while ((pos = path.find('/', pos + 1)) != std::string::npos)
-        mkdir(path.substr(0, pos).c_str(), 0755);
+        os_mkdir(path.substr(0, pos).c_str());
     FILE *f = fopen(path.c_str(), "wb");
     if (!f) {
         LOGW("registry: cannot write %s", path.c_str());
@@ -991,8 +987,8 @@ std::string midi_soundfont_path() {
         std::string host = win32_host_path(g);
         if (host.empty())
             continue;
-        struct stat st;
-        if (stat(host.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+        OsStat st;
+        if (os_stat(host.c_str(), &st) == 0 && st.is_regular)
             return host;
     }
     return std::string();
