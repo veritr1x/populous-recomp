@@ -3791,3 +3791,11 @@ Deviations found while executing, all landed in the task commits:
   locally; it is labelled `device` and runs only through `tools/test.py
   --native` on a real machine. `kernel32.cpp` also needed `os_localtime` and
   `os_gmtime` for Windows.
+- Windows CI iterations: `kernel32.cpp` needed `os_localtime`/`os_gmtime`; the
+  DX tests needed `os_setenv`/`os_unsetenv` and unbuffered stdout; the
+  installer needed no `-fPIC`, the `.lib`/`.exp` sidecars dropped, and
+  `/debug:none` because lld-link otherwise writes a CodeView directory with a
+  per-link GUID and the random staging path. Run 34681704139 is green on all
+  four jobs at commit 643fc45.
+- A `gh workflow run --ref <branch>` issued right after a push can resolve
+  the previous commit; check the run's `headSha` against `HEAD`.
