@@ -28,3 +28,31 @@ target_link_libraries(recomp_mods_testing PUBLIC lua recomp_runtime_testing)
 target_compile_definitions(recomp_mods_testing PUBLIC POPM_TESTING=1)
 target_compile_options(recomp_mods_testing PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_mods_testing 1)
+
+# Plugin fixtures the loader tests load. Every .c becomes a module of the same
+# name; old_cpu is built with the older header AHEAD of the real one so its
+# sizeof(pop_cpu_v1) really is the older value.
+file(GLOB POP_FIXTURE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/*.c)
+add_custom_target(mod_fixtures)
+foreach(src ${POP_FIXTURE_SOURCES})
+  get_filename_component(stem ${src} NAME_WE)
+  set(first "")
+  if(stem STREQUAL "old_cpu")
+    set(first INCLUDE_FIRST ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old_header)
+  endif()
+  pop_add_plugin(fixture_${stem} SOURCE ${src} OUTPUT_DIR ${POP_OUT}/mods-fixtures
+    OUTPUT_NAME ${stem} ${first} OPTIONS -g)
+  add_dependencies(mod_fixtures fixture_${stem})
+endforeach()
+
+# The roots resolver, run from a relocated app-shaped directory by roots_tests.sh.
+add_executable(roots_probe roots.cpp ${POP_ROOT}/mods/core/tests/roots_probe.cpp)
+target_include_directories(roots_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+pop_optimize(roots_probe 1)
+pop_test_binary(roots_probe)
+if(NOT WIN32)
+  add_test(NAME roots_tests
+    COMMAND sh ${POP_ROOT}/mods/core/tests/roots_tests.sh $<TARGET_FILE:roots_probe>
+    WORKING_DIRECTORY ${POP_ROOT})
+  set_tests_properties(roots_tests PROPERTIES LABELS nogame)
+endif()

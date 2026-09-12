@@ -1,0 +1,93 @@
+"""The core-mod installer: staging, atomic swap, failure behavior and byte-identical rebuilds."""
+
+import hashlib
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+spec = importlib.util.spec_from_file_location("build_core", Path(__file__).parents[1] / "build_core.py")
+build_core = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(build_core)
+ROOT = Path(__file__).resolve().parents[3]
+CC = os.environ.get("POP_CC") or shutil.which("clang") or shutil.which("cc")
+PROBE_C = "int core_packaging_probe(void) { return 12; }\n"
+PROBE_TOML = 'id = "core.packaging.probe"\n[plugin]\npath = "probe.dylib"\n'
+
+
+def tree_digest(root):
+    """Names and bytes of every file under root, in sorted order; mtimes are not part of it."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in Path(root).rglob("*") if p.is_file()):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH; set POP_CC")
+class BuildCoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pop-core-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.source = self.tmp / "mods/core"
+        probe = self.source / "probe"
+        (probe / "assets").mkdir(parents=True)
+        (probe / "probe.c").write_text(PROBE_C)
+        (probe / "mod.toml").write_text(PROBE_TOML)
+        (probe / "assets/payload").write_text("asset payload\n")
+        self.dest = self.tmp / "build/recomp/mods/core"
+
+    def install(self):
+        return build_core.install(self.source, self.dest, CC, ROOT / "src/recomp/mods")
+
+    def plugin(self):
+        return self.dest / "probe" / ("probe" + build_core.plugin_extension())
+
+    def test_compiles_plugin_copies_assets_and_leaves_source_clean(self):
+        self.assertEqual(self.install(), 1)
+        self.assertGreater(self.plugin().stat().st_size, 0)
+        self.assertEqual((self.dest / "probe/assets/payload").read_text(), "asset payload\n")
+        self.assertEqual(sorted(p.name for p in (self.source / "probe").iterdir()),
+                         ["assets", "mod.toml", "probe.c"])
+        self.assertFalse(list(self.dest.parent.glob("core.stage.*")))
+
+    def test_compile_failure_preserves_previous_install(self):
+        self.install()
+        before = self.plugin().read_bytes()
+        (self.source / "probe/probe.c").write_text("not valid C\n")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.install()
+        self.assertEqual(self.plugin().read_bytes(), before)
+        self.assertFalse(list(self.dest.parent.glob("core.stage.*")))
+
+    def test_missing_plugin_preserves_previous_install(self):
+        self.install()
+        before = self.plugin().read_bytes()
+        (self.source / "probe/probe.c").unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.install()
+        self.assertEqual(self.plugin().read_bytes(), before)
+
+    def test_two_builds_are_byte_identical(self):
+        self.install()
+        first = tree_digest(self.dest)
+        for path in self.source.rglob("*.c"):
+            st = path.stat()
+            os.utime(path, (st.st_atime, st.st_mtime + 10))
+        self.install()
+        self.assertEqual(tree_digest(self.dest), first)
+
+    def test_cli_refuses_an_install_root_outside_build(self):
+        result = subprocess.run([sys.executable, str(ROOT / "tools/recomp/build_core.py"),
+                                 "--dest", str(self.tmp / "elsewhere"), "--cc", CC],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unsupported install root", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
