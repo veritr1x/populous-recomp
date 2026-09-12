@@ -48,9 +48,12 @@ class SdlSink final : public AudioSink {
             return;
         SDL_DestroyAudioStream(stream_);
         stream_ = nullptr;
-        // Evidence for crackle reports: a pull that arrives later than 1.5
-        // device periods after the previous one is a gap the device filled
-        // with silence (or stale data) before we could render.
+        report();
+    }
+    // Evidence for crackle reports: a pull that arrives later than 1.5 device
+    // periods after the previous one is a gap the device filled with silence
+    // (or stale data) before we could render.
+    void report() {
         printf("[host] audio sink: %llu pulls, %llu late (>1.5 periods), max gap %.1f ms, "
                "max render %.1f ms, period %.1f ms\n",
                (unsigned long long)pulls_, (unsigned long long)late_, max_gap_ms_, max_render_ms_,
@@ -77,6 +80,14 @@ class SdlSink final : public AudioSink {
         }
         self->last_pull_ms_ = now;
         ++self->pulls_;
+        // A line every 30 s as well as at exit, so a run that is killed or a
+        // player's console still shows the numbers.
+        if (self->report_ms_ == 0)
+            self->report_ms_ = now;
+        else if (now - self->report_ms_ >= 30000.0) {
+            self->report_ms_ = now;
+            self->report();
+        }
         struct RenderTimer {
             SdlSink *s;
             double t0;
@@ -99,6 +110,7 @@ class SdlSink final : public AudioSink {
     SDL_AudioStream *stream_ = nullptr;
     double period_ms_ = 0, last_pull_ms_ = 0, max_gap_ms_ = 0, max_render_ms_ = 0;
     uint64_t pulls_ = 0, late_ = 0;
+    double report_ms_ = 0;
     std::function<void(float *, float *, uint32_t)> render_;
     std::vector<float> left_, right_, interleaved_;
 };

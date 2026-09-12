@@ -7707,6 +7707,17 @@ static void test_qmixer_channels() {
             distinct = false;
     CHECK(distinct);
 
+    // A paused channel is reused by the game without RestartChannel: it
+    // pauses, then later SetVolume, ConfigureChannel, EnableChannel and PlayEx
+    // on the same channel (traced from the front end, channel 1 at 37.7 s and
+    // 38.3 s). The play has to be heard; dropping it as "channel paused" lost
+    // menu clicks and unit sounds.
+    CHECK_EQ(call_shim(tramp("QMIXER.dll", "QSWaveMixPauseChannel"), {hmix, 1, 0}), 0u);
+    CHECK_EQ(call_shim(tramp("QMIXER.dll", "QSWaveMixEnableChannel"), {hmix, 1, 8, 0x11}), 0u);
+    g_plays.clear();
+    CHECK_EQ(call_shim(play, {hmix, 1, 0x20, hwave, 0, 0}), 0u);
+    CHECK_EQ(g_plays.size(), 1u);
+
     // Opening all of them is the other documented mode.
     qmixer_reset();
     hmix = call_shim(tramp("QMIXER.dll", "QSWaveMixInitEx"), {0});
