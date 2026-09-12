@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include <vector>
 #include <functional>
@@ -23,6 +24,12 @@ class SdlSink final : public AudioSink {
             return false;
         }
         render_ = std::move(render);
+        // POP_AUDIO_FRAMES asks the device for that many frames per period
+        // (SDL's default is the backend's: 480 on WASAPI, 1024 on Core Audio).
+        // A diagnostic for crackle reports: a larger period gives the render
+        // thread more slack at the cost of latency.
+        if (const char *frames = getenv("POP_AUDIO_FRAMES"); frames && *frames)
+            SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
         SDL_AudioSpec spec;
         spec.format = SDL_AUDIO_F32;
         spec.channels = 2;
