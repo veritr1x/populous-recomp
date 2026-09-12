@@ -77,7 +77,7 @@ class MetalDevice final : public Device {
     void destroy(Swapchain s) override;
     double now_seconds() override;
 
-    // --- native access for the bridge and the swapchain ---
+    // --- native access for the swapchain ---
     id<MTLDevice> native() const {
         return device_;
     }
@@ -86,9 +86,6 @@ class MetalDevice final : public Device {
     }
     Texture import_texture(id<MTLTexture> t);
     id<MTLTexture> native_texture(Texture t);
-    id<MTLCommandBuffer> native_command(CommandBuffer cb);
-    CommandBuffer import_command(id<MTLCommandBuffer> cb);
-    void forget_command(CommandBuffer cb);
 
   private:
     struct Tex {

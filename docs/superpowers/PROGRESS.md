@@ -23,7 +23,7 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 - Branch: `host-abstraction` (forked from `main` at 920de70).
 - Plan: `plans/2026-09-12-host-abstraction.md` (10 tasks, written and committed).
-- Executing inline (superpowers:executing-plans). Tasks 1-6 done (dependencies; gpu.h + fake backend; Metal backend; presenter/compositor/overlay over gpu.h; D3D renderer over gpu.h; SDL3 window host `sdl/main.cpp` replacing main.mm). **Manual checklist for the SDL host is pending** (launch `build/PopRecomp.app`: front end renders, mouse and keyboard reach the game, Escape releases capture, window modes 0/1/2 via the settings page, resize, focus loss, Cmd-Q quits with the close report). Next Task 7 (delete the Metal bridge).
+- Executing inline (superpowers:executing-plans). Tasks 1-6 done (dependencies; gpu.h + fake backend; Metal backend; presenter/compositor/overlay over gpu.h; D3D renderer over gpu.h; SDL3 window host `sdl/main.cpp` replacing main.mm). **Manual checklist for the SDL host is pending** (launch `build/PopRecomp.app`: front end renders, mouse and keyboard reach the game, Escape releases capture, window modes 0/1/2 via the settings page, resize, focus loss, Cmd-Q quits with the close report). Task 7 done (Metal bridge deleted; nothing outside gpu/metal/ names Metal except main.mm's successor already being SDL). Next Task 8 (portable mixer + SDL audio).
 
 ## Environment gotcha found during Task 4
 
