@@ -1820,3 +1820,12 @@ Expected: only the pre-existing failures from `PROGRESS.md`. Commit `"Finish the
   header; AppKit's fullscreen presentation options have no SDL counterpart (SDL owns
   the fullscreen chrome). The menu-bar Settings item is gone, as the spec accepted.
   Not yet done by a person: the manual window checklist.
+- Tasks 8-9: the audio tests stayed in `host_tests.cpp` (renamed from .mm) rather
+  than moving to a new `audio_tests` binary; they run offline and need no device,
+  so `host_tests` is labelled `gpu` (for its renderer half) and no `device` label
+  remains. The mixer resamples with a six-tap Lanczos kernel, which reproduces the
+  overshoot the clipper test depends on. The SoundFont fixture generator was not
+  needed: the MIDI test uses the game's own bank when the game is present. The
+  music is a render callback the mixer sums before the clipper
+  (`host_audio_set_music_source`), so `host_audio_engine()` is now only a
+  "there is audio" token.

@@ -8687,7 +8687,7 @@ int main(int argc, char **argv) {
         return g_failures ? 1 : 0;
     }
     if (argc > 1 && !strcmp(argv[1], "--presenter-gpu")) {
-        @autoreleasepool {
+        {
             g_gpu = gpu::create_default_device();
             if (!g_gpu) {
                 printf("no Metal device: presenter offscreen pixel test did not run\n");
@@ -8808,7 +8808,7 @@ int main(int argc, char **argv) {
         printf("%-26s %s\n", t.name, g_failures == before ? "ok" : "FAILED");
     }
 
-    @autoreleasepool {
+    {
         g_gpu = gpu::create_default_device();
         if (!g_gpu) {
             printf("\nno Metal device: the renderer tests did not run\n");

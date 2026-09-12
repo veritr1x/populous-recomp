@@ -23,7 +23,6 @@ endif()
 set(FW_FOUNDATION "-framework Foundation")
 set(FW_METAL "-framework Metal" "-framework MetalKit" "-framework CoreText"
              "-framework CoreVideo" "-framework CoreGraphics" "-framework QuartzCore")
-set(FW_AUDIO "-framework AVFoundation" "-framework AudioToolbox")
 
 # pop_host(<target> [GEN] [UI_LAYER] [OPT <n>] SOURCES ... LIBS ... FRAMEWORKS ...):
 # a host or a test binary over the runtime, shims, mods and Lua.
@@ -46,6 +45,9 @@ function(pop_host target)
   endif()
 endfunction()
 
+# The mixer, its output device and the synth: portable, over SDL audio.
+set(POP_AUDIO_SOURCES ${HOST}/audio/mixer.cpp ${HOST}/audio/sdl_sink.cpp ${HOST}/audio/midi_synth.cpp
+                      ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp)
 set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common gpu_metal)
 set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.cpp ${HOST}/compositor.cpp
                         ${HOST}/ui_layer.cpp ${HOST}/performance_overlay.cpp ${HOST}/d3d_render.cpp
@@ -53,14 +55,14 @@ set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.cpp ${
 
 if(TARGET recomp_gen)
   pop_host(pop_headless GEN
-    SOURCES ${HOST}/headless_main.cpp ${HOST}/page_overlay.cpp
-            ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp
+    SOURCES ${HOST}/headless_main.cpp ${HOST}/page_overlay.cpp ${POP_AUDIO_SOURCES}
     LIBS ${POP_CORE_LIBS}
-    FRAMEWORKS ${FW_FOUNDATION} ${FW_AUDIO})
+    FRAMEWORKS ${FW_FOUNDATION})
+  pop_link_sdl(pop_headless)
   add_dependencies(pop_headless core_mods)
 
   pop_host(pop_smoke GEN UI_LAYER
-    SOURCES ${HOST}/smoke_main.mm ${HOST}/script.cpp ${HOST}/input.mm ${HOST}/input_gate.cpp
+    SOURCES ${HOST}/smoke_main.cpp ${HOST}/script.cpp ${HOST}/input.cpp ${HOST}/input_gate.cpp
             ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/audio_math.cpp
     LIBS ${POP_CORE_LIBS}
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
@@ -69,42 +71,41 @@ if(TARGET recomp_gen)
   pop_host(PopRecomp GEN UI_LAYER OPT 2
     SOURCES ${HOST}/sdl/main.cpp ${HOST}/sdl/keymap.cpp ${HOST}/present.cpp ${HOST}/page_overlay.cpp
             ${POP_PRESENT_SOURCES}
-            ${HOST}/input.mm ${HOST}/input_gate.cpp
-            ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp ${HOST}/midi.mm
+            ${HOST}/input.cpp ${HOST}/input_gate.cpp ${POP_AUDIO_SOURCES}
     LIBS ${POP_CORE_LIBS}
-    FRAMEWORKS ${FW_METAL} ${FW_AUDIO})
+    FRAMEWORKS ${FW_METAL})
   pop_link_sdl(PopRecomp)
   pop_mac_bundle(PopRecomp)
 
   # Real loader, hooks and DirectDraw seal/service with fake GPU acks.
   pop_host(present_events_tests GEN UI_LAYER
     SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
-            ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.mm ${HOST}/input_gate.cpp
+            ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
     LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_metal
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
   set_tests_properties(present_events_tests PROPERTIES LABELS mods)
 endif()
 
-# Headless host tests: offscreen Metal and the real audio engine rendered
-# offline, no window. Labelled `device`: a hosted CI runner has no audio
-# device and its offline render does not reach the levels the suite asserts.
+# Host tests: offscreen GPU work and the mixer rendered offline, no window and
+# no audio device. Labelled `gpu`: the renderer tests need a device.
 # report_lock.cpp is a source here rather than host_common, because the script
 # never linked boot.cpp into this suite.
 pop_host(host_tests UI_LAYER
-  SOURCES ${HOST}/tests/host_tests.mm ${HOST}/tests/test_frame_builder.cpp
+  SOURCES ${HOST}/tests/host_tests.cpp ${HOST}/tests/test_frame_builder.cpp
           ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp
-          ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/midi.mm ${HOST}/present.cpp
+          ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/present.cpp
           ${POP_ROOT}/src/recomp/mods/font6x8.cpp
-          ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.mm ${HOST}/input_gate.cpp
-          ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp
+          ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
+          ${POP_AUDIO_SOURCES}
           ${POP_ROOT}/src/recomp/dx/com.cpp ${POP_ROOT}/src/recomp/dx/host_api.cpp
           ${POP_ROOT}/src/recomp/dx/display_stubs.cpp ${POP_ROOT}/src/recomp/dx/dinput.cpp
   LIBS recomp_platform recomp_runtime gpu_metal gpu_fake
-  FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL} ${FW_AUDIO})
+  FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
+pop_link_sdl(host_tests)
 pop_test_binary(host_tests)
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})
-set_tests_properties(host_tests PROPERTIES LABELS device)
+set_tests_properties(host_tests PROPERTIES LABELS gpu)
 
 add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
 target_include_directories(compositor_tests PRIVATE ${POP_ROOT} ${HOST})

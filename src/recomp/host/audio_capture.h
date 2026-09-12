@@ -16,7 +16,7 @@
 //   * the longest unbroken stretch of sound, which is what a run that is
 //     mostly working looks like from a distance.
 //
-// The writer is arithmetic and a file handle, with no AVFoundation in it, so
+// The writer is arithmetic and a file handle, with no audio API in it, so
 // the measurements can be tested against samples a test makes up.
 #pragma once
 #include <stdint.h>

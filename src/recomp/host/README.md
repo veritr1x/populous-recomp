@@ -25,7 +25,7 @@ startup and never runs `WinMain`.
 | `present.{h,mm}` | `host_present`: 8-bit and 5-6-5 expansion, the letterbox, the drawable |
 | `d3d_render.{h,mm}` | the Metal renderer behind `host_d3d_draw` |
 | `input.{h,cpp}` | host key codes to DirectInput scan codes, Win32 messages and `GetAsyncKeyState`, and waking the guest's input threads |
-| `audio.{h,mm}` | `host_audio_play` on AVAudioEngine, and the lock order that keeps it out of a deadlock |
+| `audio.h`, `audio/mixer.cpp` | `host_audio_play` on the software mixer (SDL audio output, TinySoundFont music), and the lock order that keeps it out of a deadlock |
 | `Info.plist` | the app bundle's |
 | `tests/host_tests.mm` | the headless tests |
 | CMake targets `host_tests`, `compositor_tests`, `ui_layer_tests` | built by `tools/test.py --compile-only`, run by `--native` |
@@ -283,25 +283,22 @@ accounting.
 
 ## The audio lock order
 
-AVFoundation drains a player node's completion handlers from inside
-`[node stop]`, synchronously, on its own queue. The first live run deadlocked on
-exactly that: `host_audio_play` held the channel mutex, called `stop` to
-interrupt the previous sound, and `Stop` waited for the completion queue, which
-was waiting for the mutex. The guest's audio thread never returned, so it never
-handed the cooperative baton back, so the main thread never rendered and the
-intro was blank.
+The mixer has three locks in a fixed order: the API mutex that serialises the
+`host_audio_*` calls, the channel-data lock over the channel table, and the
+render lock over the players that the render thread holds for a block. The
+shape comes from the AVFoundation version this replaced, where the first live
+run deadlocked with `host_audio_play` holding the channel mutex while `stop`
+waited for a completion queue that was waiting for the mutex - and the rules
+that fixed it still hold, checked rather than remembered:
 
-Two rules now, and both are checked rather than remembered:
-
-- **No node or engine call is made while the channel-data lock is held.**
+- **No player call is made while the channel-data lock is held.**
   Everything a call needs is prepared under the lock, the lock is dropped, and
-  only then does the node hear about it. `audio_check_unlocked` counts and
-  asserts on any breach; a breach is a certain deadlock, so failing loudly is
-  the kinder outcome.
-- **The completion handler takes no lock at all.** It stores the generation
-  that finished into a lock-free array and returns. The guest side reconciles
-  the next time it asks whether a channel is playing, and a generation that
-  names a sound already replaced is ignored.
+  only then does the player hear about it. `audio_check_unlocked` counts and
+  asserts on any breach.
+- **The completion path takes no lock at all.** The render loop stores the
+  generation that finished into a lock-free array and returns. The guest side
+  reconciles the next time it asks whether a channel is playing, and a
+  generation that names a sound already replaced is ignored.
 
 `host_audio_set_node_ops` puts stand-ins in place of the three node calls, which
 is how `audio stop re-entry` drives the same re-entrant path with no audio

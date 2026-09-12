@@ -1,8 +1,8 @@
-// audio.h - the parts of the mixer that are arithmetic rather than AVFoundation.
+// audio.h - the host mixer: the arithmetic, the test seams and the engine.
 //
 // DirectSound and QMixer both describe a channel with numbers the host has to
-// convert before AVAudioEngine can use them, and every one of those
-// conversions is testable without opening an audio device.
+// convert before the mixer can use them, and every one of those conversions
+// is testable without opening an audio device.
 #pragma once
 #include <stdint.h>
 
@@ -62,15 +62,13 @@ uint32_t host_audio_position_bytes(uint64_t frames_rendered, uint32_t start_offs
 // ---------------------------------------------------------------------------
 // The test seam, and the lock-order rule it exists to check.
 //
-// AVFoundation drains a node's completion handlers from inside [node stop], on
-// its own queue, synchronously. So a completion handler that takes the mutex
-// the stopper is holding deadlocks the process - which is exactly what happened
-// on the first live run, with the guest's audio thread stuck in Stop and the
-// completion queue stuck on the lock.
+// The mixer keeps the lock discipline the AVFoundation version needed, where
+// a completion handler that took the mutex the stopper was holding deadlocked
+// the first live run: player calls and channel data stay on separate locks.
 //
 // Two rules follow, and both are checkable:
-//   * No node or engine method is ever called while the channel-data lock is
-//     held. host_audio_lock_violations() counts breaches of that.
+//   * No player call is ever made while the channel-data lock is held.
+//     host_audio_lock_violations() counts breaches of that.
 //   * host_audio_completed takes no lock at all. It stores a generation into
 //     an atomic and the guest side reconciles when it next asks.
 // ---------------------------------------------------------------------------
@@ -121,13 +119,20 @@ double host_audio_output_bus_rate(void);
 // ---------------------------------------------------------------------------
 // The engine itself, for the other thing that makes sound.
 //
-// The music is MIDI through a SoundFont, and a synth is an audio unit rather
-// than a player node, so it has to hang off this engine rather than one of its
-// own: two engines is two output devices competing for the same hardware, and
-// the loser is silent without saying so. Returns the AVAudioEngine as an
-// opaque pointer, or null when there is no audio at all.
+// The music is MIDI through a SoundFont, rendered by a synth the mixer sums
+// in after the voices and before the clipper: one output, so the music and
+// the effects never compete for the device. host_audio_engine returns an
+// opaque non-null token when there is audio at all, and null when there is
+// none; host_audio_engine_run starts the output device if it is not running.
 void *host_audio_engine(void);
 void host_audio_engine_run(void);
+// The music source. `render` ADDS `frames` of stereo audio at the mixer's
+// rate into `left`/`right`; it runs on the render thread with the mixer's
+// render lock held, so it must not call back into the mixer. Null clears it.
+typedef void (*HostAudioMusicRender)(void *context, float *left, float *right, uint32_t frames);
+void host_audio_set_music_source(HostAudioMusicRender render, void *context);
+// The rate the mixer renders at, which is what a music source must produce.
+double host_audio_render_rate(void);
 
 // Offline rendering, which is the only way a test can hear anything. Manual
 // rendering mode runs the same graph into a buffer instead of into a device,

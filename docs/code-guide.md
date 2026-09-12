@@ -16,7 +16,7 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Frame lifetime and pacing | [present_thread.cpp](../src/recomp/host/present_thread.cpp) | `acquire`, `host_frame_seal`, `sweep` |
 | World rendering, materials | [d3d_render.cpp](../src/recomp/host/d3d_render.cpp) | `host_d3d_expand`, `uploadTexture`, `drawSnapshot`, `d3d_fragment` |
 | UI separation and final composition | [ui_layer.cpp](../src/recomp/host/ui_layer.cpp), [compositor.cpp](../src/recomp/host/compositor.cpp) | `ui_layer_extract`, `replay`, `compositor_compose` |
-| Audio streaming or gaps | [audio.mm](../src/recomp/host/audio.mm) | `ensure_engine`, `host_audio_stream`, `host_audio_queue`, `host_audio_queued_bytes` |
+| Audio streaming or gaps | [audio/mixer.cpp](../src/recomp/host/audio/mixer.cpp) | `ensure_engine`, `host_audio_stream`, `host_audio_queue`, `host_audio_queued_bytes` |
 | Sound evidence | [audio_capture.cpp](../src/recomp/host/audio_capture.cpp) | `host_capture_write`, `host_capture_stats` |
 | Original graphics API behavior | [DirectX adapters](../src/recomp/dx/README.md) | `Surface_Lock`, `Surface_Unlock`, `Surface_Blt`, `Surface_Flip`, `d3d_upload_texture` |
 | Imports, startup, memory | [Guest runtime](../src/recomp/runtime/README.md) | `loader_load`, `patch_iat`, `imports_dispatch`, `heap_realloc` |
@@ -65,7 +65,7 @@ gameplay meaning or replace a routine without a behavior comparison.
   let it read mutable guest pointers after sealing.
 - A surface revision is a content version. Preserve leased bytes before writes;
   changing palette colors can also change resolved texture content.
-- Audio node operations follow the documented lock order in `audio.mm`. Its
+- Audio player operations follow the documented lock order in `audio/mixer.cpp`. Its
   completion callbacks and playback clock have different timing guarantees.
 - Mod teardown revokes entry before unloading code. A callback still on a worker's
   stack must finish or unwind before that module's resources are reclaimed.

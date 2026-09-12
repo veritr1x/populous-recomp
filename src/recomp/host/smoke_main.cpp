@@ -44,8 +44,6 @@
 #include "../mods/display_settings.h"
 #include "../mods/mods_internal.h"
 
-#import <Metal/Metal.h>
-
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2245,7 +2243,7 @@ int main(int argc, char **argv) {
     }
     printf("[smoke] %s: %d steps\n", script_path, g_step_count);
 
-    @autoreleasepool {
+    {
         auto gpu_device = gpu::create_default_device();
         if (!gpu_device) {
             fprintf(stderr, "smoke: no GPU device\n");
