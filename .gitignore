@@ -7,6 +7,7 @@
 /.omx/
 /.claude/
 /.codex/
+CMakeUserPresets.json
 __pycache__/
 *.pyc
 *.o

@@ -1,0 +1,49 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {"major": 3, "minor": 24, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "base", "hidden": true, "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/cmake/${presetName}",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}
+    },
+    {
+      "name": "macos", "inherits": "base",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}
+    },
+    {
+      "name": "linux", "inherits": "base",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "cacheVariables": {"CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++"}
+    },
+    {
+      "name": "windows", "inherits": "base",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_MODULE_LINKER_FLAGS": "-fuse-ld=lld"
+      }
+    },
+    {"name": "macos-debug", "inherits": "macos", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
+    {"name": "linux-debug", "inherits": "linux", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}},
+    {"name": "windows-debug", "inherits": "windows", "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}}
+  ],
+  "buildPresets": [
+    {"name": "macos", "configurePreset": "macos"},
+    {"name": "linux", "configurePreset": "linux"},
+    {"name": "windows", "configurePreset": "windows"},
+    {"name": "macos-debug", "configurePreset": "macos-debug"},
+    {"name": "linux-debug", "configurePreset": "linux-debug"},
+    {"name": "windows-debug", "configurePreset": "windows-debug"}
+  ],
+  "testPresets": [
+    {"name": "macos", "configurePreset": "macos", "output": {"outputOnFailure": true}},
+    {"name": "linux", "configurePreset": "linux", "output": {"outputOnFailure": true}},
+    {"name": "windows", "configurePreset": "windows", "output": {"outputOnFailure": true}},
+    {"name": "macos-debug", "configurePreset": "macos-debug", "output": {"outputOnFailure": true}},
+    {"name": "linux-debug", "configurePreset": "linux-debug", "output": {"outputOnFailure": true}},
+    {"name": "windows-debug", "configurePreset": "windows-debug", "output": {"outputOnFailure": true}}
+  ]
+}
