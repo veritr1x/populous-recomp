@@ -37,6 +37,20 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
   readback); click through the picker and the mismatch box once on macOS; run
   the Linux archive on Linux hardware; consider tagging `v0.1.0`.
 - All four sub-projects of the multi-platform port are then complete.
+- Known issue: a macOS `PopRecomp` stopped with SIGTERM (`pkill`) prints its
+  close report and then logs `SIGSEGV in guest thread 1: EIP=0055d64c` during
+  teardown. Present in runs from before the audio work; scripted quits and
+  in-game exits are clean. Not yet investigated.
+- Audio (2026-09-12): the QMixer shim dropped plays on paused channels (the game
+  reuses paused channels with EnableChannel + PlayEx, never RestartChannel);
+  fixed. Crackle: under CrossOver the 10 ms WASAPI period saw ~100 late audio
+  wake-ups a minute; the sink now keeps a 2048-frame backlog queued
+  (`POP_AUDIO_AHEAD`, 0 disables) and reports `audio sink:` counters every
+  30 s. Real-Windows confirmation pending.
+- Frame cap: Vulkan presented with FIFO (vsync). Branch `vulkan-present-mode`
+  picks mailbox when offered; the presenter's pacer is still one wake per
+  display refresh, so above-refresh presentation needs a presenter change the
+  user has not yet asked for.
 
 ## Environment gotcha found during Task 4
 
