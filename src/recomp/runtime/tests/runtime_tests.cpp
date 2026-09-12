@@ -8,15 +8,12 @@
 #include "../loader.h"
 #include "../memory.h"
 #include "../win32.h"
+#include "../../platform/os.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <stdarg.h>
 #include <map>
 #include <string>
@@ -90,6 +87,44 @@ static uint32_t put_str(const char *s) {
     scratch += (n + 15) & ~15u;
     return a;
 }
+// Portable stand-ins for `rm -rf` and `mkdir -p` over the platform layer.
+static int remove_tree_entry(const char *name, void *user) {
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return 0;
+    std::string path = *static_cast<const std::string *>(user) + "/" + name;
+    OsStat st{};
+    if (os_lstat(path.c_str(), &st) == 0 && st.is_dir && !st.is_symlink) {
+        os_listdir(path.c_str(), remove_tree_entry, &path);
+        os_rmdir(path.c_str());
+    } else {
+        os_unlink(path.c_str());
+    }
+    return 0;
+}
+static void remove_tree(const std::string &root) {
+    OsStat st{};
+    if (os_lstat(root.c_str(), &st) != 0)
+        return;
+    if (st.is_dir && !st.is_symlink) {
+        std::string r = root;
+        os_listdir(root.c_str(), remove_tree_entry, &r);
+        os_rmdir(root.c_str());
+    } else {
+        os_unlink(root.c_str());
+    }
+}
+static void mkdir_p(const std::string &path) {
+    std::string acc;
+    for (size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (!acc.empty())
+                os_mkdir(acc.c_str());
+        }
+        if (i < path.size())
+            acc.push_back(path[i]);
+    }
+}
+
 static uint32_t scratch_block(uint32_t bytes) {
     uint32_t a = scratch;
     memset(g_mem + a, 0, bytes);
@@ -106,8 +141,15 @@ struct ExpectedSection {
 };
 
 static bool pefile_sections(std::vector<ExpectedSection> &out, std::string &err) {
-    const char *cmd =
-        ".venv/bin/python -c \""
+#ifdef _WIN32
+#define popen _popen
+#define pclose _pclose
+#define POP_VENV_PYTHON ".venv/Scripts/python.exe"
+#else
+#define POP_VENV_PYTHON ".venv/bin/python"
+#endif
+    const char *cmd = POP_VENV_PYTHON
+        " -c \""
         "import pefile;pe=pefile.PE('original/gog/D3DPopTB.exe');b=pe.OPTIONAL_HEADER.ImageBase;"
         "print('IMAGE %x %x %x' % (b, pe.OPTIONAL_HEADER.SizeOfImage, "
         "b+pe.OPTIONAL_HEADER.AddressOfEntryPoint));"
@@ -456,11 +498,11 @@ static void test_files(X86 *c) {
         call_import(c, "KERNEL32.dll", "CreateFileA", {name, 0x80000000u, 1, 0, 3, 0x80, 0});
     check(h != 0xffffffffu, "CreateFileA(\"DaTa\\\\VcOnFiG0.dat\") -> handle %08x", h);
 
-    struct stat st{};
-    stat("original/gog/data/VCONFIG0.DAT", &st);
+    OsStat st{};
+    os_stat("original/gog/data/VCONFIG0.DAT", &st);
     uint32_t size = call_import(c, "KERNEL32.dll", "GetFileSize", {h, 0});
-    check(size == (uint32_t)st.st_size, "GetFileSize reports %u, host file is %lld", size,
-          (long long)st.st_size);
+    check(size == (uint32_t)st.size, "GetFileSize reports %u, host file is %lld", size,
+          (long long)st.size);
 
     uint32_t buf = scratch_block(256), read_count = scratch_block(4);
     check(call_import(c, "KERNEL32.dll", "ReadFile", {h, buf, 64, read_count, 0}) == 1,
@@ -699,7 +741,7 @@ static void test_pinned_clock(X86 *c) {
 static void test_cadence_trace(X86 *c) {
     section("cadence trace");
     const char *path = "build/recomp/cadence-test.log";
-    unlink(path);
+    os_unlink(path);
     host_set_cadence_trace(path);
 
     // Two reads of the clock with a known gap between them, and the gap is
@@ -822,12 +864,13 @@ static void test_cadence_trace(X86 *c) {
     host_note_cadence("GetTickCount");
     check(host_millis() >= before_clock,
           "the clock still runs after a trace that could not be opened");
-    check(access("build/recomp/no-such-dir/cadence.log", F_OK) != 0,
+    OsStat no_such{};
+    check(os_stat("build/recomp/no-such-dir/cadence.log", &no_such) != 0,
           "and no trace file appeared where one could not be created");
     host_set_cadence_trace(nullptr);
     host_clear_time_source();
     check(!host_time_source_is_pinned(), "and this test leaves no pin behind either");
-    unlink(path);
+    os_unlink(path);
 }
 
 static void test_misc_shims(X86 *c) {
@@ -940,12 +983,12 @@ static void test_native_draw_waits(X86 *c) {
               rd32(0x98e7e0) == 1025 && c->r[R_EDI] == 60,
           "unrelated clock calls cannot alter draw pacing");
     for (const char *pin : {"POP_RECOMP_PIN_CLOCK", "POPM_PIN_CLOCK"}) {
-        setenv(pin, "1000,8", 1);
+        os_setenv(pin, "1000,8");
         g_fake_ret = 0x4a47a4;
         call_import(c, "KERNEL32.dll", "GetTickCount", {});
         check(rd32(0x98e7cc) == 1016 && c->r[R_EDI] == 60, "%s retains original fixture behavior",
               pin);
-        unsetenv(pin);
+        os_unsetenv(pin);
     }
     g_display_fps = 0;
     g_fake_ret = 0x4a45a3;
@@ -1248,9 +1291,7 @@ static void fake_tls_thread(X86 *c) {
 }
 
 static double wall_seconds() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return (double)os_monotonic_ns() * 1e-9;
 }
 
 // Takes a critical section, records the order, holds it across a Sleep so the
@@ -1413,7 +1454,7 @@ static void fake_host_waiter_thread(X86 *c) {
 // Signals the event from a genuine host thread, the way an AppKit event
 // handler would, while the guest is running.
 static void *host_signal_thread(void *arg) {
-    usleep(30 * 1000);
+    os_sleep_us(30 * 1000);
     guest_event_signal_from_host((uint32_t)(uintptr_t)arg);
     return nullptr;
 }
@@ -1426,7 +1467,7 @@ static double g_idle_total = 0.0;
 static int test_idle_waiter(double seconds) {
     ++g_idle_calls;
     g_idle_total += seconds;
-    usleep((useconds_t)(seconds * 1e6));
+    os_sleep_us((uint64_t)(seconds * 1e6));
     return 0;
 }
 
@@ -2056,23 +2097,16 @@ static void test_intrinsics(X86 *c) {
     // The single-call form must not silently work: it has to abort, because a
     // host setjmp taken there would belong to a frame that has already
     // returned. Checked in a child so this process survives.
-    uint32_t buf2 = scratch_block(64);
-    sp = esp0 - 4;
-    wr32(sp, buf2);
-    sp -= 4;
-    wr32(sp, g_fake_ret);
-    c->r[R_ESP] = sp;
+    // The child re-runs this binary with --child-setjmp-abort (see main), which
+    // builds the same frame and calls recomp_setjmp; an abort reads as 134.
     fflush(stdout);
-    pid_t pid = fork();
-    if (pid == 0) {
-        freopen("/dev/null", "w", stderr);
-        recomp_setjmp(c);
-        _exit(0); // reached only if it failed to abort
-    }
-    int status = 0;
-    waitpid(pid, &status, 0);
-    check(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT,
-          "the single-call _setjmp intrinsic aborts instead of pretending to work");
+    char exe[4096];
+    check(os_exe_path(exe, sizeof exe) == 0, "the test knows its own path");
+    const char *child_argv[] = {exe, "--child-setjmp-abort", nullptr};
+    int64_t pid = 0;
+    int code = -1;
+    check(os_spawn(child_argv, &pid) == 0 && os_wait(pid, &code) == 0 && code == 134,
+          "the single-call _setjmp intrinsic aborts instead of pretending to work (exit %d)", code);
 
     c->r[R_ESP] = esp0;
 }
@@ -2110,7 +2144,7 @@ static void test_undeliverable_calls(X86 *c) {
 static void test_registry(X86 *c) {
     section("registry round trip");
     printf("  using %s\n", registry_path().c_str());
-    unlink(registry_path().c_str());
+    os_unlink(registry_path().c_str());
     registry_load();
 
     uint32_t sub = put_str("Software\\Bullfrog\\Populous");
@@ -2132,9 +2166,9 @@ static void test_registry(X86 *c) {
           "RegSetValueExA(REG_DWORD)");
     check(call_import(c, "ADVAPI32.dll", "RegCloseKey", {hk}) == 0, "RegCloseKey");
 
-    struct stat st{};
-    check(stat(registry_path().c_str(), &st) == 0 && st.st_size > 0, "%s was written (%lld bytes)",
-          registry_path().c_str(), (long long)st.st_size);
+    OsStat st{};
+    check(os_stat(registry_path().c_str(), &st) == 0 && st.size > 0, "%s was written (%lld bytes)",
+          registry_path().c_str(), (long long)st.size);
 
     // Reload from disk and read the values back.
     registry_load();
@@ -2221,8 +2255,8 @@ static int test_resolver(const char *relative, int op, char *out, size_t out_len
                                                                        : g_seam_root + "/write";
     std::string full = dir + "/" + relative;
     if (op == WIN32_FILE_READ) {
-        struct stat st;
-        if (stat(full.c_str(), &st) != 0)
+        OsStat st;
+        if (os_stat(full.c_str(), &st) != 0)
             return 0;
     }
     if (full.size() + 1 > out_len)
@@ -2279,11 +2313,9 @@ static void test_mod_seams(X86 *c) {
     // The file seam classifies each operation, and a write never resolves
     // through the read tier.
     g_seam_root = "build/recomp/seam-test";
-    if (system(("rm -rf " + g_seam_root).c_str()) != 0) {
-    }
-    if (system(("mkdir -p " + g_seam_root + "/read/data " + g_seam_root + "/write/data").c_str()) !=
-        0) {
-    }
+    remove_tree(g_seam_root);
+    mkdir_p(g_seam_root + "/read/data");
+    mkdir_p(g_seam_root + "/write/data");
     FILE *f = fopen((g_seam_root + "/read/data/shared.txt").c_str(), "wb");
     fputs("read tier", f);
     fclose(f);
@@ -2343,26 +2375,26 @@ static void test_mod_seams(X86 *c) {
             fclose(sf);
         }
         win32_invalidate_dir_cache();
-        unlink((dir + "/seam-copy.tmp").c_str());
-        unlink((dir + "/seam-moved.tmp").c_str());
+        os_unlink((dir + "/seam-copy.tmp").c_str());
+        os_unlink((dir + "/seam-moved.tmp").c_str());
 
         uint32_t from = put_str("seam-src.tmp");
         uint32_t cto = put_str("seam-copy.tmp");
         check(call_import(c, "KERNEL32.dll", "CopyFileA", {from, cto, 0}) == 1,
               "unmodded CopyFileA creates a destination that did not exist");
-        struct stat st{};
-        check(stat((dir + "/seam-copy.tmp").c_str(), &st) == 0, "and the copy is really there");
+        OsStat st{};
+        check(os_stat((dir + "/seam-copy.tmp").c_str(), &st) == 0, "and the copy is really there");
 
         win32_invalidate_dir_cache();
         uint32_t mto = put_str("seam-moved.tmp");
         check(call_import(c, "KERNEL32.dll", "MoveFileA", {from, mto}) == 1,
               "unmodded MoveFileA renames to a destination that did not exist");
-        check(stat((dir + "/seam-moved.tmp").c_str(), &st) == 0,
+        check(os_stat((dir + "/seam-moved.tmp").c_str(), &st) == 0,
               "and the renamed file is really there");
 
-        unlink((dir + "/seam-copy.tmp").c_str());
-        unlink((dir + "/seam-moved.tmp").c_str());
-        unlink((dir + "/seam-src.tmp").c_str());
+        os_unlink((dir + "/seam-copy.tmp").c_str());
+        os_unlink((dir + "/seam-moved.tmp").c_str());
+        os_unlink((dir + "/seam-src.tmp").c_str());
         win32_invalidate_dir_cache();
     }
 
@@ -2576,7 +2608,7 @@ static void solo_worker(X86 *c) {
         if (!mine)
             ++g_solo_violations;
         ++g_solo_slices;
-        usleep(200);
+        os_sleep_us(200);
     }
     g_solo_running = 0;
     set_eax(c, 0x5010);
@@ -2612,7 +2644,7 @@ static void test_run_thread_finished(X86 *c) {
     sched_run_thread_finished();
     bool stopped = false;
     for (int i = 0; i < 1000 && !stopped; ++i) {
-        usleep(1000);
+        os_sleep_us(1000);
         stopped = sched_guest_threads_stopped();
     }
     check(stopped, "the worker finished once the run thread handed the baton on");
@@ -2759,7 +2791,7 @@ static void test_input_wakes_a_parked_thread(X86 *c) {
     // A host thread that queues input a little after this thread has parked.
     double queued_at = 0.0;
     std::thread announcer([&] {
-        usleep(80000); // long enough to be parked
+        os_sleep_us(80000); // long enough to be parked
         queued_at = wall_seconds();
         g_late_input_queued = 1;
         sched_input_arrived();
@@ -2785,13 +2817,33 @@ static void test_input_wakes_a_parked_thread(X86 *c) {
     sched_set_guest_thread(false);
 }
 
-int main() {
-    setenv("POPM_REGISTRY", "build/recomp/registry-test.json", 1);
+static void child_setjmp_abort(X86 *c) {
+    // The single-call _setjmp form: a jmp_buf pushed, a fake return address,
+    // no enclosing call. It has to abort.
+    uint32_t buf2 = scratch_block(64);
+    uint32_t sp = c->r[R_ESP] - 4;
+    wr32(sp, buf2);
+    sp -= 4;
+    wr32(sp, g_fake_ret);
+    c->r[R_ESP] = sp;
+    recomp_setjmp(c);
+    os_exit_immediately(0); // reached only if it failed to abort
+}
+
+int main(int argc, char **argv) {
+    const bool child = argc > 1 && strcmp(argv[1], "--child-setjmp-abort") == 0;
+    if (child) {
+        freopen(os_null_device(), "w", stdout);
+        freopen(os_null_device(), "w", stderr);
+    }
+    os_setenv("POPM_REGISTRY", "build/recomp/registry-test.json");
     if (!getenv("POPM_LOG"))
-        setenv("POPM_LOG", "1", 1);
+        os_setenv("POPM_LOG", "1");
 
     test_loader();
     X86 *c = loader_context();
+    if (child)
+        child_setjmp_abort(c);
     scratch = 0x0ee00000; // scratch area below the stack, inside the arena
 
     test_allocator();

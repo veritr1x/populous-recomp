@@ -25,16 +25,14 @@ target_link_libraries(recomp_snapshot PUBLIC recomp_runtime)
 target_compile_options(recomp_snapshot PRIVATE ${POP_WARN_HOST})
 pop_optimize(recomp_snapshot 2)
 
-if(NOT WIN32)
-  # The suite forks and waits; it is POSIX-only until sub-project 3.
-  add_executable(runtime_tests tests/runtime_tests.cpp tests/stub_recomp_call.cpp)
-  target_link_libraries(runtime_tests PRIVATE recomp_platform recomp_runtime)
-  target_compile_options(runtime_tests PRIVATE ${POP_WARN_HOST})
-  pop_optimize(runtime_tests 1)
-  pop_test_binary(runtime_tests)
-  add_test(NAME runtime_tests COMMAND runtime_tests WORKING_DIRECTORY ${POP_ROOT})
-  set_tests_properties(runtime_tests PROPERTIES LABELS game)
-endif()
+# The suite spawns itself for the abort check; portable since sub-project 3.
+add_executable(runtime_tests tests/runtime_tests.cpp tests/stub_recomp_call.cpp)
+target_link_libraries(runtime_tests PRIVATE recomp_platform recomp_runtime)
+target_compile_options(runtime_tests PRIVATE ${POP_WARN_HOST})
+pop_optimize(runtime_tests 1)
+pop_test_binary(runtime_tests)
+add_test(NAME runtime_tests COMMAND runtime_tests WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(runtime_tests PROPERTIES LABELS game)
 
 if(TARGET recomp_gen)
   # The headless parity fixture: null host, real generated code, core mods installed.

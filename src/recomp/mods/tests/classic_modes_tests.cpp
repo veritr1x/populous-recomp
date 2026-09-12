@@ -1,19 +1,20 @@
 #include "mods_tests.h"
+#include "../../platform/os.h"
 #include "../mods_internal.h"
 #include "../display_settings.h"
 #include <fstream>
-#include <unistd.h>
 
 MOD_TEST_SUITE(classic_page_lists_exactly_survivors) {
     mods_settings_reset();
     mods_display_reset();
     mods_host_set_main_thread();
-    char path[] = "/tmp/pop-classic-list-XXXXXX";
-    int fd = mkstemp(path);
+    char path[512];
+    snprintf(path, sizeof path, "%s/pop-classic-list-XXXXXX", os_temp_dir());
+    int fd = os_mkstemp(path);
     MOD_CHECK(fd >= 0);
     if (fd < 0)
         return;
-    close(fd);
+    os_fd_close(fd);
     {
         std::ofstream f(path);
         f << R"({"modes":[
@@ -56,7 +57,7 @@ MOD_TEST_SUITE(classic_page_lists_exactly_survivors) {
     mods_input_remove_all(MODS_OWNER_RUNTIME);
     mods_settings_reset();
     mods_display_reset();
-    unlink(path);
+    os_unlink(path);
 }
 
 MOD_TEST_SUITE(classic_page_committed_survivors) {

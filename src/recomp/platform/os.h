@@ -70,6 +70,17 @@ int os_listdir(const char *dir, OsListDirFn fn, void *user);
 // The trailing XXXXXX of `template_path` is replaced in place; returns an open
 // read-write descriptor for the new file, or -1.
 int os_mkstemp(char *template_path);
+// mkdtemp: replaces the trailing XXXXXX and creates the directory; 0 or -1.
+int os_mkdtemp(char *template_path);
+// A writable temporary directory without a trailing separator ("/tmp", %TEMP%).
+const char *os_temp_dir(void);
+// "/dev/null" or "NUL".
+const char *os_null_device(void);
+// Runs argv[0] with argv (NULL-terminated), inheriting stdio; 0 and a pid, or -1.
+int os_spawn(const char *const argv[], int64_t *pid_out);
+// Waits for the child. exit_code receives the exit status, or 128 + signal on
+// POSIX when it died by a signal (so an abort reads as 134 everywhere); 0 or -1.
+int os_wait(int64_t pid, int *exit_code);
 
 // ---------------------------------------------------------------------------
 // Descriptors. Binary mode always; created files are mode 0644.

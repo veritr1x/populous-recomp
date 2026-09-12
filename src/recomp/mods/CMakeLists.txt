@@ -52,18 +52,16 @@ foreach(src ${POP_FIXTURE_SOURCES})
   add_dependencies(mod_fixtures fixture_${stem})
 endforeach()
 
-# The roots resolver, run from a relocated app-shaped directory by roots_tests.sh.
+# The roots resolver, run from a relocated app-shaped directory by roots_tests.py.
 add_executable(roots_probe roots.cpp ${POP_ROOT}/mods/core/tests/roots_probe.cpp)
 target_include_directories(roots_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(roots_probe PRIVATE recomp_platform)
 pop_optimize(roots_probe 1)
 pop_test_binary(roots_probe)
-if(NOT WIN32)
-  add_test(NAME roots_tests
-    COMMAND sh ${POP_ROOT}/mods/core/tests/roots_tests.sh $<TARGET_FILE:roots_probe>
-    WORKING_DIRECTORY ${POP_ROOT})
-  set_tests_properties(roots_tests PROPERTIES LABELS nogame)
-endif()
+add_test(NAME roots_tests
+  COMMAND ${Python3_EXECUTABLE} ${POP_ROOT}/mods/core/tests/roots_tests.py $<TARGET_FILE:roots_probe>
+  WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(roots_tests PROPERTIES LABELS nogame)
 
 if(TARGET recomp_gen)
   add_library(mods_api_header_test OBJECT tests/api_header_test.c)

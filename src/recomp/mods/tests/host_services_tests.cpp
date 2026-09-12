@@ -1,6 +1,7 @@
 // host_services_tests.cpp - main-thread rules, the menu registry and the
 // content-hashed texture provider.
 #include "mods_tests.h"
+#include "../../platform/os.h"
 #include "../mods_internal.h"
 #include <string>
 #include <thread>
@@ -239,7 +240,6 @@ MOD_TEST_SUITE(texture_provider_is_content_keyed) {
 #include "../../dx/host_api.h"
 #include <cmath>
 #include <fstream>
-#include <unistd.h>
 namespace {
 int anchor_calls = 0, last_h = 0, last_v = 0;
 uint64_t last_anchor = 0;
@@ -347,18 +347,19 @@ MOD_TEST_SUITE(enhanced_preserves_selected_resolution) {
 }
 MOD_TEST_SUITE(display_page_and_passing_mode_list) {
     setup();
-    char path[] = "/tmp/pop-display-modes-XXXXXX";
-    int fd = mkstemp(path);
+    char path[512];
+    snprintf(path, sizeof path, "%s/pop-display-modes-XXXXXX", os_temp_dir());
+    int fd = os_mkstemp(path);
     MOD_CHECK(fd >= 0);
     if (fd < 0)
         return;
-    close(fd);
+    os_fd_close(fd);
     {
         std::ofstream f(path);
         f << R"({"modes":[{"w":640,"h":480,"bpp":16,"passed":true},{"w":800,"h":600,"bpp":16,"passed":false},{"width":1920,"height":1080,"bpp":16,"status":"pass"}]})";
     }
     MOD_CHECK(mods_display_load_modes(path));
-    unlink(path);
+    os_unlink(path);
     mods_page_init();
     mods_page_open(nullptr);
     MOD_CHECK(std::string(mods_page_line(0)).find("Rendering: Enhanced") != std::string::npos);
@@ -455,10 +456,11 @@ MOD_TEST_SUITE(higher_resolution_provider_validates_layout_and_keeps_legacy_api)
 }
 
 MOD_TEST_SUITE(hd_controls_persist_across_restart) {
-    char dir[] = "/tmp/pop-hd-settings-XXXXXX";
-    char *profile = mkdtemp(dir);
-    MOD_CHECK(profile != nullptr);
-    if (!profile)
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/pop-hd-settings-XXXXXX", os_temp_dir());
+    const bool made = os_mkdtemp(dir) == 0;
+    MOD_CHECK(made);
+    if (!made)
         return;
     const std::string previous_profile = mods_overlay_profile_dir();
     mods_overlay_set_profile_dir(dir);
@@ -483,6 +485,6 @@ MOD_TEST_SUITE(hd_controls_persist_across_restart) {
     MOD_CHECK_EQ(mods_display_filtering(), 4);
     mods_settings_reset();
     mods_overlay_set_profile_dir(previous_profile.c_str());
-    unlink(path.c_str());
-    rmdir(dir);
+    os_unlink(path.c_str());
+    os_rmdir(dir);
 }

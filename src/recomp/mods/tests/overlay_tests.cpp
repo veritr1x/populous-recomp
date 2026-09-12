@@ -4,6 +4,10 @@
 // Every check goes through the file shim the game itself uses, because a
 // precedence rule that only holds in a unit test is a rule the game never sees.
 #include "mods_tests.h"
+#include "../../platform/os.h"
+#ifndef _WIN32
+#include <unistd.h> // symlink, POSIX-only check
+#endif
 #include "shim_call.h"
 #include "../mods_internal.h"
 #include "../../runtime/imports.h"
@@ -16,8 +20,6 @@
 #include <filesystem>
 #include <thread>
 #include <string>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace {
 
@@ -29,7 +31,7 @@ void write_file(const std::string &path, const std::string &text) {
     for (size_t i = 0; i < dir.size(); ++i) {
         acc.push_back(dir[i]);
         if (dir[i] == '/' || i + 1 == dir.size())
-            mkdir(acc.c_str(), 0755);
+            os_mkdir(acc.c_str());
     }
     FILE *f = fopen(path.c_str(), "wb");
     MOD_CHECK(f != nullptr);
@@ -78,7 +80,7 @@ void layers() {
 MOD_TEST_SUITE(overlay_read_precedence) {
     layers();
     MOD_CHECK(read_file(win32_host_path_op("data\\shared.txt", WIN32_FILE_READ)) == "profile");
-    unlink((std::string(ROOT) + "/profile/data/shared.txt").c_str());
+    os_unlink((std::string(ROOT) + "/profile/data/shared.txt").c_str());
     win32_invalidate_dir_cache();
     // A later-loaded mod's file wins over an earlier one's.
     MOD_CHECK(read_file(win32_host_path_op("data\\shared.txt", WIN32_FILE_READ)) == "mod-b");
@@ -148,7 +150,7 @@ MOD_TEST_SUITE(overlay_deletes_reach_the_profile_only) {
     win32_invalidate_dir_cache();
     std::string mine = win32_host_path_op("data\\fromb.txt", WIN32_FILE_DELETE);
     MOD_CHECK(mine.find(mods_overlay_profile_dir()) == 0);
-    unlink(mine.c_str());
+    os_unlink(mine.c_str());
     win32_invalidate_dir_cache();
     MOD_CHECK(read_file(win32_host_path_op("data\\fromb.txt", WIN32_FILE_READ)) == "b");
     // A rename destination is a write, so it lands in the profile too.
@@ -210,7 +212,7 @@ MOD_TEST_SUITE(overlay_push_window_is_owner_scoped) {
 
     // Rollback drops a mod's layer and the tier below it comes back.
     layers();
-    unlink((std::string(ROOT) + "/profile/data/shared.txt").c_str());
+    os_unlink((std::string(ROOT) + "/profile/data/shared.txt").c_str());
     win32_invalidate_dir_cache();
     MOD_CHECK(read_file(win32_host_path_op("data\\shared.txt", WIN32_FILE_READ)) == "mod-b");
     mods_overlay_remove_all(3);
@@ -278,7 +280,12 @@ MOD_TEST_SUITE(overlay_root_and_failure_paths) {
     MOD_CHECK(!mods_cpp_overlay_resolve("data/froma.txt", 999, &unused));
     std::string link = std::string(ROOT) + "/profile/escape";
     std::string target = std::filesystem::absolute(std::string(ROOT) + "/moda").string();
+#ifndef _WIN32
     MOD_CHECK_EQ(symlink(target.c_str(), link.c_str()), 0);
+#else
+    printf("symlink check skipped on Windows\n");
+    return;
+#endif
     MOD_CHECK(win32_host_path_op("escape\\data\\froma.txt", WIN32_FILE_WRITE).empty());
     MOD_CHECK(win32_host_path_op("escape\\data\\froma.txt", WIN32_FILE_DELETE).empty());
     PopModApi api{};

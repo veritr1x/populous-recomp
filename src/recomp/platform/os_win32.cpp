@@ -265,6 +265,81 @@ int os_mkstemp(char *template_path) {
     return -1;
 }
 
+int os_mkdtemp(char *template_path) {
+    size_t len = strlen(template_path);
+    if (len < 6 || strcmp(template_path + len - 6, "XXXXXX") != 0)
+        return -1;
+    static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+    unsigned seed = (unsigned)GetTickCount() ^ (GetCurrentThreadId() * 2654435761u);
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        for (size_t i = len - 6; i < len; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            template_path[i] = alphabet[(seed >> 16) % (sizeof alphabet - 1)];
+        }
+        if (CreateDirectoryW(widen(template_path).c_str(), nullptr))
+            return 0;
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
+            return -1;
+    }
+    return -1;
+}
+
+const char *os_temp_dir(void) {
+    static char buf[MAX_PATH * 3];
+    wchar_t w[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, w);
+    if (!n || n > MAX_PATH)
+        return ".";
+    while (n > 1 && (w[n - 1] == L'\\' || w[n - 1] == L'/'))
+        w[--n] = 0;
+    std::string s = narrow(w);
+    strncpy(buf, s.c_str(), sizeof buf - 1);
+    buf[sizeof buf - 1] = 0;
+    return buf;
+}
+
+const char *os_null_device(void) {
+    return "NUL";
+}
+
+int os_spawn(const char *const argv[], int64_t *pid_out) {
+    std::wstring cmd;
+    for (int i = 0; argv[i]; ++i) {
+        std::wstring a = widen(argv[i]);
+        if (i)
+            cmd += L' ';
+        if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos)
+            cmd += a;
+        else {
+            cmd += L'"';
+            for (wchar_t ch : a)
+                cmd += ch == L'"' ? std::wstring(L"\\\"") : std::wstring(1, ch);
+            cmd += L'"';
+        }
+    }
+    STARTUPINFOW si = {};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(widen(argv[0]).c_str(), cmd.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                        nullptr, &si, &pi))
+        return -1;
+    CloseHandle(pi.hThread);
+    *pid_out = (int64_t)(intptr_t)pi.hProcess;
+    return 0;
+}
+
+int os_wait(int64_t pid, int *exit_code) {
+    HANDLE h = (HANDLE)(intptr_t)pid;
+    if (WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0)
+        return -1;
+    DWORD code = 0;
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    // abort() exits with 3 on Windows; report it as POSIX SIGABRT so tests agree.
+    *exit_code = code == 3 ? 134 : (int)code;
+    return 0;
+}
+
 int os_fd_open(const char *path, int flags) {
     return _wopen(widen(path).c_str(), native_flags(flags), _S_IREAD | _S_IWRITE);
 }

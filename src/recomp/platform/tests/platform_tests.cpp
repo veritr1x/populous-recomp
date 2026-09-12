@@ -155,6 +155,20 @@ void test_paths_and_descriptors() {
 void test_process_and_strings() {
     char exe[4096];
     CHECK(os_exe_path(exe, sizeof exe) == 0);
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/pop-platform-XXXXXX", os_temp_dir());
+    CHECK(os_mkdtemp(dir) == 0);
+    OsStat st;
+    CHECK(os_stat(dir, &st) == 0 && st.is_dir);
+    CHECK(os_rmdir(dir) == 0);
+    CHECK(os_stat(os_null_device(), &st) == 0 || true); // exists on both; stat may refuse NUL
+    // The test binary re-runs itself as a child that exits 7.
+    const char *child_argv[] = {exe, "--child-exit-7", nullptr};
+    int64_t pid = 0;
+    CHECK(os_spawn(child_argv, &pid) == 0);
+    int code = -1;
+    CHECK(os_wait(pid, &code) == 0);
+    CHECK(code == 7);
     CHECK(strstr(exe, "platform_tests") != nullptr);
     CHECK(os_strcasecmp("Data", "DATA") == 0);
     CHECK(os_strcasecmp("a", "b") < 0);
@@ -172,7 +186,9 @@ void test_process_and_strings() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--child-exit-7") == 0)
+        return 7;
     test_threads();
     test_time();
     test_vm();

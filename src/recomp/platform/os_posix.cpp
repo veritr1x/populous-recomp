@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,6 +155,51 @@ int os_listdir(const char *dir, OsListDirFn fn, void *user) {
 }
 int os_mkstemp(char *template_path) {
     return mkstemp(template_path);
+}
+
+int os_mkdtemp(char *template_path) {
+    return mkdtemp(template_path) ? 0 : -1;
+}
+
+const char *os_temp_dir(void) {
+    const char *t = getenv("TMPDIR");
+    static char buf[4096];
+    if (!t || !*t)
+        return "/tmp";
+    size_t n = strlen(t);
+    if (n >= sizeof buf)
+        return "/tmp";
+    memcpy(buf, t, n + 1);
+    while (n > 1 && buf[n - 1] == '/')
+        buf[--n] = 0;
+    return buf;
+}
+
+const char *os_null_device(void) {
+    return "/dev/null";
+}
+
+extern "C" char **environ;
+
+int os_spawn(const char *const argv[], int64_t *pid_out) {
+    pid_t pid;
+    if (posix_spawn(&pid, argv[0], NULL, NULL, (char *const *)argv, environ) != 0)
+        return -1;
+    *pid_out = pid;
+    return 0;
+}
+
+int os_wait(int64_t pid, int *exit_code) {
+    int status = 0;
+    if (waitpid((pid_t)pid, &status, 0) < 0)
+        return -1;
+    if (WIFEXITED(status))
+        *exit_code = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        *exit_code = 128 + WTERMSIG(status);
+    else
+        *exit_code = -1;
+    return 0;
 }
 
 static int native_flags(int flags) {

@@ -8,10 +8,12 @@
 // directories in it. Each of the cases below took the process down or hung it
 // before, and each is silent about it in a record that never gets written.
 #include "mods_tests.h"
+#include "../../platform/os.h"
+#ifndef _WIN32
+#include <unistd.h> // symlink, POSIX-only check
+#endif
 #include "../mods_internal.h"
 
-#include <sys/stat.h>
-#include <unistd.h>
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
@@ -23,7 +25,7 @@ namespace {
 
 std::string make_dir(const char *suite, const char *leaf) {
     std::string p = std::string(mod_test_dir(suite)) + "/" + leaf;
-    mkdir(p.c_str(), 0755);
+    os_mkdir(p.c_str());
     return p;
 }
 
@@ -81,7 +83,7 @@ MOD_TEST_SUITE(run_record_capture) {
     {
         std::string d = make_dir(suite, "ordinary");
         write_file(d + "/mod.toml", "[mod]\nid=\"probe\"\n");
-        mkdir((d + "/assets").c_str(), 0755);
+        os_mkdir((d + "/assets").c_str());
         write_file(d + "/assets/data.bin", "bytes");
         MOD_CHECK(finishes_within(10, capture, d));
     }
@@ -103,7 +105,11 @@ MOD_TEST_SUITE(run_record_capture) {
     {
         std::string d = make_dir(suite, "cycle");
         write_file(d + "/mod.toml", "[mod]\nid=\"cycle\"\n");
+#ifndef _WIN32
         MOD_CHECK(symlink("..", (d + "/up").c_str()) == 0);
+#else
+        printf("symlink check skipped on Windows\n");
+#endif
         MOD_CHECK(finishes_within(10, capture, d));
     }
 
@@ -114,7 +120,7 @@ MOD_TEST_SUITE(run_record_capture) {
         std::string p = d;
         for (int i = 0; i < 80; ++i) {
             p += "/d";
-            mkdir(p.c_str(), 0755);
+            os_mkdir(p.c_str());
         }
         write_file(p + "/leaf", "x");
         MOD_CHECK(finishes_within(10, capture, d));
@@ -148,7 +154,7 @@ MOD_TEST_SUITE(run_record_capture) {
         std::string p = d;
         for (int i = 0; i < 20; ++i) {
             p += "/d";
-            mkdir(p.c_str(), 0755);
+            os_mkdir(p.c_str());
         }
         write_file(p + "/leaf", "x");
         pthread_attr_t attr;

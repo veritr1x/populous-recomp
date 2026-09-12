@@ -34,6 +34,7 @@
 #include "../landmark.h"
 #include <filesystem>
 #include <fstream>
+#include "../../platform/os.h"
 #include "../audio.h"
 #include "../d3d_render.h"
 #include "../../dx/host_api.h"
@@ -46,7 +47,6 @@
 #include "../../runtime/mods_seam.h"
 
 #include "../gpu/fake/fake_device.h"
-#include <unistd.h>
 #include "../gpu/gpu_factory.h"
 
 #include <math.h>
@@ -3224,7 +3224,7 @@ static void test_readback_kernel_parity(D3DRenderer *original) {
     bool had = saved != nullptr;
     original->discard();
     for (const char *mode : {"fused", "tiled"}) {
-        setenv("POP_HOST_READBACK_KERNEL", mode, 1);
+        os_setenv("POP_HOST_READBACK_KERNEL", mode);
         D3DRenderer *r = make_renderer();
         CHECK(r != nullptr);
         if (!r)
@@ -3234,9 +3234,9 @@ static void test_readback_kernel_parity(D3DRenderer *original) {
         r->discard();
     }
     if (had)
-        setenv("POP_HOST_READBACK_KERNEL", old.c_str(), 1);
+        os_setenv("POP_HOST_READBACK_KERNEL", old.c_str());
     else
-        unsetenv("POP_HOST_READBACK_KERNEL");
+        os_unsetenv("POP_HOST_READBACK_KERNEL");
     D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
@@ -3253,7 +3253,7 @@ static void test_surface_upload_pixels(D3DRenderer *original) {
         for (bool wide : {false, true}) {
             Readback reference;
             for (const char *mode : {"cpu", "gpu"}) {
-                setenv("POP_HOST_SURFACE_UPLOAD", mode, 1);
+                os_setenv("POP_HOST_SURFACE_UPLOAD", mode);
                 auto r = make_renderer();
                 CHECK(r != nullptr);
                 if (!r)
@@ -3330,9 +3330,9 @@ static void test_surface_upload_pixels(D3DRenderer *original) {
             }
         }
     if (had)
-        setenv("POP_HOST_SURFACE_UPLOAD", old.c_str(), 1);
+        os_setenv("POP_HOST_SURFACE_UPLOAD", old.c_str());
     else
-        unsetenv("POP_HOST_SURFACE_UPLOAD");
+        os_unsetenv("POP_HOST_SURFACE_UPLOAD");
     D3DRenderer::setShared(original);
 }
 
@@ -3347,7 +3347,7 @@ static void test_bounded_submission_pixels(D3DRenderer *original) {
         Readback reference;
         std::vector<uint8_t> guest;
         for (int interval : {0, 1, 256}) {
-            setenv("POP_HOST_D3D_SUBMIT_DRAWS", std::to_string(interval).c_str(), 1);
+            os_setenv("POP_HOST_D3D_SUBMIT_DRAWS", std::to_string(interval).c_str());
             D3DRenderer *r = make_renderer();
             CHECK(r != nullptr);
             if (!r)
@@ -3404,9 +3404,9 @@ static void test_bounded_submission_pixels(D3DRenderer *original) {
         }
     }
     if (had)
-        setenv("POP_HOST_D3D_SUBMIT_DRAWS", old.c_str(), 1);
+        os_setenv("POP_HOST_D3D_SUBMIT_DRAWS", old.c_str());
     else
-        unsetenv("POP_HOST_D3D_SUBMIT_DRAWS");
+        os_unsetenv("POP_HOST_D3D_SUBMIT_DRAWS");
     D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
@@ -3419,7 +3419,7 @@ static void test_parallel_readback_pixels(D3DRenderer *original) {
     for (int bpp : {8, 16}) {
         std::vector<uint8_t> partial_reference, full_reference;
         for (int workers : {1, 4}) {
-            setenv("POP_HOST_READBACK_WORKERS", std::to_string(workers).c_str(), 1);
+            os_setenv("POP_HOST_READBACK_WORKERS", std::to_string(workers).c_str());
             D3DRenderer *r = make_renderer();
             CHECK(r != nullptr);
             if (!r)
@@ -3474,9 +3474,9 @@ static void test_parallel_readback_pixels(D3DRenderer *original) {
         }
     }
     if (had)
-        setenv("POP_HOST_READBACK_WORKERS", old.c_str(), 1);
+        os_setenv("POP_HOST_READBACK_WORKERS", old.c_str());
     else
-        unsetenv("POP_HOST_READBACK_WORKERS");
+        os_unsetenv("POP_HOST_READBACK_WORKERS");
     D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
@@ -3639,9 +3639,9 @@ static void test_same_frame_legacy_pixels(D3DRenderer *renderer) {
         renderer->discard();
         host_d3d_reset_coherence();
         if (legacy)
-            setenv("POPM_LEGACY_WRITEBACK", "1", 1);
+            os_setenv("POPM_LEGACY_WRITEBACK", "1");
         else
-            unsetenv("POPM_LEGACY_WRITEBACK");
+            os_unsetenv("POPM_LEGACY_WRITEBACK");
         renderer->setSceneWidth(legacy ? 0 : 256, legacy ? 0 : 192);
         Surface surface(805, 128, 96);
         host_d3d_bind_generation(&surface.desc, 1, 8005);
@@ -3733,7 +3733,7 @@ static void test_same_frame_legacy_pixels(D3DRenderer *renderer) {
         CHECK_EQ(pixels[90 * 128 + 100], 0xffff);
     }
     g_t5_legacy_frame = 0;
-    unsetenv("POPM_LEGACY_WRITEBACK");
+    os_unsetenv("POPM_LEGACY_WRITEBACK");
     renderer->setSceneWidth(0, 0);
     renderer->discard();
 }
@@ -4948,7 +4948,7 @@ static void test_windowed_duration_pacing_selector() {
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
     for (bool paced : {false, true}) {
-        setenv("POP_HOST_PRESENT_PACING", paced ? "duration" : "immediate", 1);
+        os_setenv("POP_HOST_PRESENT_PACING", paced ? "duration" : "immediate");
         PresentFake fake;
         host_present_test_begin(false, false);
         host_present_test_seal(1, HOST_SCREEN_MENU, false);
@@ -4968,9 +4968,9 @@ static void test_windowed_duration_pacing_selector() {
         host_present_stop();
     }
     if (had)
-        setenv("POP_HOST_PRESENT_PACING", old.c_str(), 1);
+        os_setenv("POP_HOST_PRESENT_PACING", old.c_str());
     else
-        unsetenv("POP_HOST_PRESENT_PACING");
+        os_unsetenv("POP_HOST_PRESENT_PACING");
 }
 static void test_windowed_drawable_handler_and_completion_fallback() {
     for (bool missing : {false, true}) {
@@ -5559,8 +5559,9 @@ static void test_wide_scene_pixels(D3DRenderer *renderer) {
     }
 }
 static void test_hd_pack_and_classic_isolation(D3DRenderer *original) {
-    char dir[] = "/tmp/pop-hd-test-XXXXXX";
-    CHECK(mkdtemp(dir) != nullptr);
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/pop-hd-test-XXXXXX", os_temp_dir());
+    CHECK(os_mkdtemp(dir) == 0);
     const auto file = std::filesystem::path(dir) / "0000000000001234.popt";
     uint8_t header[32]{};
     memcpy(header, "POPRGBA1", 8);
@@ -5609,8 +5610,8 @@ static void test_hd_pack_and_classic_isolation(D3DRenderer *original) {
     const char *limit = getenv("POPM_TEXTURE_BUDGET_MB");
     bool hadLimit = limit;
     std::string savedLimit = limit ? limit : "";
-    setenv("POPM_TEXTURE_BUDGET_MB", "32", 1);
-    setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
+    os_setenv("POPM_TEXTURE_BUDGET_MB", "32");
+    os_setenv("POPM_TEXTURE_PACK_DIR", dir);
     auto r = make_renderer();
     CHECK(r != nullptr);
     D3DRenderer::setShared(r);
@@ -5662,19 +5663,20 @@ static void test_hd_pack_and_classic_isolation(D3DRenderer *original) {
     g_t5_legacy_frame = 0;
     D3DRenderer::setShared(original);
     if (had)
-        setenv("POPM_TEXTURE_PACK_DIR", saved.c_str(), 1);
+        os_setenv("POPM_TEXTURE_PACK_DIR", saved.c_str());
     else
-        unsetenv("POPM_TEXTURE_PACK_DIR");
+        os_unsetenv("POPM_TEXTURE_PACK_DIR");
     if (hadLimit)
-        setenv("POPM_TEXTURE_BUDGET_MB", savedLimit.c_str(), 1);
+        os_setenv("POPM_TEXTURE_BUDGET_MB", savedLimit.c_str());
     else
-        unsetenv("POPM_TEXTURE_BUDGET_MB");
+        os_unsetenv("POPM_TEXTURE_BUDGET_MB");
     std::filesystem::remove_all(dir);
 }
 
 static void test_terrain_material_detail(D3DRenderer *original) {
-    char dir[] = "/tmp/pop-terrain-detail-XXXXXX";
-    CHECK(mkdtemp(dir) != nullptr);
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/pop-terrain-detail-XXXXXX", os_temp_dir());
+    CHECK(os_mkdtemp(dir) == 0);
     const auto file = std::filesystem::path(dir) / "terrain-detail.popt";
     uint8_t header[32]{};
     memcpy(header, "POPRGBA1", 8);
@@ -5705,7 +5707,7 @@ static void test_terrain_material_detail(D3DRenderer *original) {
     const char *env = getenv("POPM_TEXTURE_PACK_DIR");
     bool had = env;
     std::string saved = env ? env : "";
-    setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
+    os_setenv("POPM_TEXTURE_PACK_DIR", dir);
     auto renderer = make_renderer();
     CHECK(renderer != nullptr);
     D3DRenderer::setShared(renderer);
@@ -5774,9 +5776,9 @@ static void test_terrain_material_detail(D3DRenderer *original) {
     g_t5_legacy_frame = 0;
     D3DRenderer::setShared(original);
     if (had)
-        setenv("POPM_TEXTURE_PACK_DIR", saved.c_str(), 1);
+        os_setenv("POPM_TEXTURE_PACK_DIR", saved.c_str());
     else
-        unsetenv("POPM_TEXTURE_PACK_DIR");
+        os_unsetenv("POPM_TEXTURE_PACK_DIR");
     std::filesystem::remove_all(dir);
 }
 
@@ -6735,8 +6737,9 @@ static void test_landmark_hidden_evidence() {
     draw.screen_max_y = 250;
     LandmarkDrawEvidence record(1828, 1904, draw);
     draw = {};
-    char path[] = "/tmp/pop-landmark-evidence.XXXXXX";
-    int fd = mkstemp(path);
+    char path[512];
+    snprintf(path, sizeof path, "%s/pop-landmark-evidence.XXXXXX", os_temp_dir());
+    int fd = os_mkstemp(path);
     CHECK(fd >= 0);
     FILE *file = fd >= 0 ? fdopen(fd, "w+") : nullptr;
     CHECK(file != nullptr);
@@ -6749,9 +6752,9 @@ static void test_landmark_hidden_evidence() {
                            "\"seq\":376,\"bounds\":[190,220,210,250]}") == 0);
         fclose(file);
     } else if (fd >= 0)
-        close(fd);
+        os_fd_close(fd);
     if (fd >= 0)
-        unlink(path);
+        os_unlink(path);
     LandmarkSpriteEvidence no_sprite{31, 1815, 0, 0, true};
     CHECK(landmark_visibility(true, 1815, 31, true, -80.5f, 230.375f, 540, 480, no_sprite, nullptr,
                               0) == LandmarkVisibility::hidden);
@@ -6881,8 +6884,9 @@ static std::string dumpat_read(const std::string &path) {
 // A late turn await passes without a present. The explicit fired await must
 // keep the second request unarmed until the first has actually been captured.
 static void test_reference_dump_serialization() {
-    char tmp[] = "/private/tmp/pop-reference-dump-test-XXXXXX";
-    const char *dir = mkdtemp(tmp);
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s/pop-reference-dump-test-XXXXXX", os_temp_dir());
+    const char *dir = os_mkdtemp(tmp) == 0 ? tmp : nullptr;
     CHECK(dir != nullptr);
     if (!dir)
         return;
@@ -6951,8 +6955,9 @@ static void test_reference_dump_serialization() {
 }
 
 static void test_dumpat_present_and_seal() {
-    char tmp[] = "/private/tmp/pop-dumpat-test-XXXXXX";
-    const char *dir = mkdtemp(tmp);
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s/pop-dumpat-test-XXXXXX", os_temp_dir());
+    const char *dir = os_mkdtemp(tmp) == 0 ? tmp : nullptr;
     CHECK(dir != nullptr);
     if (!dir)
         return;
