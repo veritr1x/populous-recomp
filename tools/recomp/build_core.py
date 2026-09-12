@@ -54,7 +54,7 @@ def compile_flags(cc, name, scratch, env, system=None):
         if linker_accepts(cc, "-Wl,-reproducible", scratch, env):
             flags.append("-Wl,-reproducible")
     elif system == "Windows":
-        flags += ["-shared", "-fuse-ld=lld", "-Wl,/Brepro"]
+        flags += ["-shared", "-fuse-ld=lld", "-Wl,/Brepro", "-Wl,/timestamp:0"]
     else:
         flags += ["-shared", "-Wl,--build-id=none"]
     return flags
@@ -92,6 +92,12 @@ def install(source, dest, cc, api_include, system=None):
             command += ["-I", str(api_include), str(src), "-o", str(out)]
             subprocess.run(command, check=True, env=env, cwd=stage)
             built += 1
+            # A Windows link also writes an import library and an exports
+            # file beside the DLL. Nothing loads them and their archive
+            # timestamps vary, so they are not part of the installed identity.
+            for sidecar in (out.with_suffix(".lib"), out.with_suffix(".exp"), out.with_suffix(".pdb")):
+                if sidecar.exists():
+                    sidecar.unlink()
         for toml in sorted(stage.glob("*/mod.toml")):
             plugin = manifest_plugin(toml)
             if plugin is None:

@@ -20,12 +20,10 @@ PROBE_TOML = 'id = "core.packaging.probe"\n[plugin]\npath = "probe.dylib"\n'
 
 
 def tree_digest(root):
-    """Names and bytes of every file under root, in sorted order; mtimes are not part of it."""
-    digest = hashlib.sha256()
-    for path in sorted(p for p in Path(root).rglob("*") if p.is_file()):
-        digest.update(str(path.relative_to(root)).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
+    """Per-file digests under root, keyed by relative path; mtimes are not part of it.
+    A dict rather than one hash, so a failure names the file that changed."""
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(Path(root).rglob("*")) if p.is_file()}
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH; set POP_CC")
