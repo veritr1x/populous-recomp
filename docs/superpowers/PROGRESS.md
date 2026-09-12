@@ -22,8 +22,9 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 ## Now
 
 - Branch: `host-abstraction` (forked from `main` at 920de70).
-- Step: writing the implementation plan for sub-project 2 (superpowers:writing-plans).
-- Nothing implemented yet for sub-project 2.
+- Plan: `plans/2026-09-12-host-abstraction.md` (10 tasks, written and committed).
+- Step: awaiting the user's choice of execution mode (subagent-driven or inline). Nothing implemented yet.
+- Next task to execute: Task 1 (SDL3 FetchContent + vendored TinySoundFont).
 
 ## How to resume
 
