@@ -463,6 +463,13 @@ const char *loader_exe_sha256() {
     return g_exe_sha.c_str();
 }
 
+std::string loader_hash_file(const char *path) {
+    std::vector<uint8_t> file;
+    if (!path || !read_file(path, file))
+        return "";
+    return sha256_hex(file);
+}
+
 void run_entry(X86 *c) {
     if (!g_entry) {
         LOGW("run_entry: no image loaded");

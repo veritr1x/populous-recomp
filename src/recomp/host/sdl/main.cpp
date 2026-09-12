@@ -24,6 +24,7 @@
 #include "../audio_capture.h"
 #include "../boot.h"
 #include "../d3d_render.h"
+#include "../game_path.h"
 #include "../gpu/gpu_factory.h"
 #include "../input.h"
 #include "../input_gate.h"
@@ -946,36 +947,69 @@ void report(FILE *out, bool abnormal) {
 // The .app can be started from anywhere, and the guest's file system is rooted
 // at the directory holding the EXE. Walking up from the executable finds the
 // checkout whichever way the app was launched.
-std::string find_exe_relative_to_bundle() {
-    if (const char *env = getenv("POP_RECOMP_EXE"))
-        return env;
-    char path[4096];
-    if (os_exe_path(path, sizeof path) != 0)
-        return "";
-    std::string dir(path);
-    for (int depth = 0; depth < 12; ++depth) {
-        size_t slash = dir.find_last_of('/');
-        if (slash == std::string::npos)
-            break;
-        dir = dir.substr(0, slash);
-        std::string candidate = dir + "/original/gog/D3DPopTB.exe";
-        FILE *f = fopen(candidate.c_str(), "rb");
-        if (f) {
-            fclose(f);
-            // The runtime resolves the guest's relative paths against the
-            // process's working directory, so the checkout root becomes it.
-            if (os_chdir(dir.c_str()) != 0)
-                fprintf(stderr, "[host] could not enter %s\n", dir.c_str());
-            return candidate;
-        }
-    }
-    return "";
-}
-
-// The bundled classic-modes table when this is an app bundle, else the checkout's.
 std::string classic_modes_path() {
     std::string p = host_resource("classic-modes.json");
     return p.empty() ? "tools/recomp/baseline/classic-modes.json" : p;
+}
+
+struct DialogResult {
+    bool done = false;
+    std::string path; // empty: cancelled or failed
+};
+
+void SDLCALL on_dialog(void *userdata, const char *const *files, int) {
+    auto *r = static_cast<DialogResult *>(userdata);
+    if (files && files[0])
+        r->path = files[0];
+    else if (!files)
+        fprintf(stderr, "PopRecomp: file dialog failed: %s\n", SDL_GetError());
+    r->done = true;
+}
+
+// The picker: a native dialog for D3DPopTB.exe, the hash check, and the
+// saved path. Loops on a wrong file until the player quits.
+bool pick_game_exe(std::string *out) {
+    for (;;) {
+        DialogResult r;
+        const SDL_DialogFileFilter filters[] = {{"Populous executable (D3DPopTB.exe)", "exe"}};
+        SDL_ShowOpenFileDialog(on_dialog, &r, g_window, filters, 1, nullptr, false);
+        while (!r.done) {
+            SDL_Event e;
+            while (SDL_PollEvent(&e))
+                if (e.type == SDL_EVENT_QUIT)
+                    return false;
+            SDL_Delay(10);
+        }
+        if (r.path.empty()) {
+            fprintf(stderr, "PopRecomp: no game selected. Pass --exe <path to D3DPopTB.exe> "
+                            "to skip the dialog.\n");
+            return false;
+        }
+        std::string digest;
+        if (game_path_is_supported(r.path, &digest)) {
+            if (!game_path_save(r.path))
+                fprintf(stderr, "PopRecomp: could not remember the game path\n");
+            *out = r.path;
+            return true;
+        }
+        const SDL_MessageBoxButtonData buttons[] = {
+            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Choose again"},
+            {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Quit"}};
+        std::string text = "This is not the supported GOG build of D3DPopTB.exe.\n\nExpected "
+                           "SHA-256:\n" +
+                           std::string(LOADER_EXPECTED_SHA256) + "\n\nThis file:\n" +
+                           (digest.empty() ? std::string("(unreadable)") : digest);
+        SDL_MessageBoxData box{SDL_MESSAGEBOX_ERROR,
+                               g_window,
+                               "Populous: The Beginning",
+                               text.c_str(),
+                               2,
+                               buttons,
+                               nullptr};
+        int choice = 0;
+        if (!SDL_ShowMessageBox(&box, &choice) || choice == 0)
+            return false;
+    }
 }
 
 void post_drawable_size() {
@@ -1019,15 +1053,10 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (exe_flag)
-        os_setenv("POP_RECOMP_EXE", exe_flag); // until game_path_resolve takes it directly
-    std::string exe = find_exe_relative_to_bundle();
-    if (exe.empty()) {
-        fprintf(stderr, "PopRecomp: original/gog/D3DPopTB.exe was not found above this "
-                        "executable.\nRun the binary from the checkout, or set "
-                        "POP_RECOMP_EXE to the image.\n");
-        return 2;
-    }
+    GamePath game = game_path_resolve(exe_flag);
+    if (game.source == GamePathSource::Checkout &&
+        os_chdir(host_layout().checkout_root.c_str()) != 0)
+        fprintf(stderr, "[host] could not enter %s\n", host_layout().checkout_root.c_str());
 
     // A click that brings the window forward reaches the game in the same
     // event, rather than being swallowed as the activating click.
@@ -1066,6 +1095,9 @@ int main(int argc, char **argv) {
         return 3;
     }
     fprintf(stderr, "GPU backend: %s\n", gpu::default_backend_name());
+    if (game.exe.empty() && !pick_game_exe(&game.exe))
+        return 2;
+    std::string exe = game.exe;
 
     // The renderer first: the presenter shares its device, so a present
     // cannot run ahead of the scene it is showing.

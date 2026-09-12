@@ -112,7 +112,8 @@ if(TARGET recomp_gen)
   add_dependencies(pop_smoke core_mods smoke_probe)
 
   pop_host(PopRecomp GEN UI_LAYER OPT 2
-    SOURCES ${HOST}/sdl/main.cpp ${HOST}/sdl/keymap.cpp ${HOST}/present.cpp ${HOST}/page_overlay.cpp
+    SOURCES ${HOST}/sdl/main.cpp ${HOST}/sdl/keymap.cpp ${HOST}/game_path.cpp ${HOST}/present.cpp
+            ${HOST}/page_overlay.cpp
             ${POP_PRESENT_SOURCES}
             ${HOST}/input.cpp ${HOST}/input_gate.cpp ${POP_AUDIO_SOURCES}
     LIBS ${POP_CORE_LIBS}
@@ -143,6 +144,7 @@ pop_host(host_tests UI_LAYER
           ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp
           ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/present.cpp
           ${POP_ROOT}/src/recomp/mods/font6x8.cpp ${POP_ROOT}/src/recomp/mods/layout.cpp
+          ${HOST}/game_path.cpp
           ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
           ${POP_AUDIO_SOURCES}
           ${POP_ROOT}/src/recomp/dx/com.cpp ${POP_ROOT}/src/recomp/dx/host_api.cpp

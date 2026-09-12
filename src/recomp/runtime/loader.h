@@ -20,6 +20,8 @@ extern const char *const LOADER_EXPECTED_SHA256;
 // "" before a load. Equal to LOADER_EXPECTED_SHA256 on a successful load; kept
 // separate because it is a fact about this run rather than a build constant.
 const char *loader_exe_sha256();
+// The SHA-256 of the file at `path` as lowercase hex, or "" when unreadable.
+std::string loader_hash_file(const char *path);
 static const uint32_t LOADER_EXPECTED_ENTRY = 0x0055d6c0u;
 
 // Maps the PE at `exe_path` (nullptr => LOADER_DEFAULT_EXE) into a freshly

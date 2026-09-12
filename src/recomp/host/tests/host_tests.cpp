@@ -36,6 +36,8 @@
 #include <fstream>
 #include "../../platform/os.h"
 #include "../audio.h"
+#include "../game_path.h"
+#include "../../mods/layout.h"
 #include "../d3d_render.h"
 #include "../../dx/host_api.h"
 #include "../../runtime/memory.h"
@@ -999,6 +1001,39 @@ static void test_message_translation() {
 // ===========================================================================
 // audio.mm
 // ===========================================================================
+static void test_game_path() {
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s/pop-gamepath-XXXXXX", os_temp_dir());
+    CHECK(os_mkdtemp(dir) == 0);
+    os_setenv("POPM_PROFILE_DIR", dir);
+    os_unsetenv("POP_RECOMP_EXE");
+    host_layout_set_exe_path_for_test((std::string(dir) + "/nowhere/exe").c_str()); // no checkout
+    // Nothing saved: None.
+    CHECK(game_path_resolve(nullptr).source == GamePathSource::None);
+    // A flag wins without any check.
+    CHECK(game_path_resolve("/x/D3DPopTB.exe").source == GamePathSource::Flag);
+    // A saved path to a wrong file is ignored.
+    std::string wrong = std::string(dir) + "/wrong.exe";
+    FILE *f = fopen(wrong.c_str(), "wb");
+    fputs("not the game", f);
+    fclose(f);
+    std::string digest;
+    CHECK(!game_path_is_supported(wrong, &digest));
+    CHECK(digest.size() == 64);
+    CHECK(game_path_save(wrong));
+    CHECK(game_path_resolve(nullptr).source == GamePathSource::None);
+    // The real game, when present, is accepted and remembered.
+    OsStat st;
+    if (os_stat("original/gog/D3DPopTB.exe", &st) == 0) {
+        CHECK(game_path_is_supported("original/gog/D3DPopTB.exe", nullptr));
+        CHECK(game_path_save("original/gog/D3DPopTB.exe"));
+        GamePath g = game_path_resolve(nullptr);
+        CHECK(g.source == GamePathSource::Saved && g.exe == "original/gog/D3DPopTB.exe");
+    }
+    os_unsetenv("POPM_PROFILE_DIR");
+    host_layout_set_exe_path_for_test(nullptr);
+}
+
 static void test_audio_maths() {
     CHECK_NEAR(host_audio_gain_from_millibels(0), 1.0, 1e-6);
     CHECK_NEAR(host_audio_gain_from_millibels(-10000), 0.0, 1e-6);
@@ -8757,6 +8792,7 @@ int main(int argc, char **argv) {
         const char *name;
         void (*fn)();
     } plain[] = {
+        {"game path", test_game_path},
         {"display settings bridge", test_display_settings_bridge},
         {"presentation service", test_presentation_service},
         {"palette expansion", test_palette_expansion},
