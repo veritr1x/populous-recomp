@@ -28,7 +28,7 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
   window checklist (front end renders; mouse and keyboard reach the game;
   Escape releases capture; window modes 0/1/2 from the settings page; resize;
   focus loss; Cmd-Q quits with the close report). Then decide merge vs PR.
-- CI: `gh workflow run checks.yml --ref host-abstraction`, confirm `headSha`.
+- CI: green on macOS, Ubuntu and Windows at 39bb72d (run 34692907811). The Linux job now installs SDL3's documented build dependencies.
 - Next sub-project: 3 (Vulkan backend behind `gpu/gpu.h`, Windows/Linux hosts
   over the same SDL host, presets and CI labels). Start with brainstorming.
 
