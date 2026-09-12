@@ -4,7 +4,7 @@
 // host_tests.mm - headless tests for the macOS host.
 //
 // No window is ever created and no audio device is ever opened. The Direct3D
-// tests do run on the real GPU, into an MTLTexture the test allocates and
+// tests do run on the real GPU, into a GPU texture the test allocates and
 // reads back: offscreen work needs no window, no drawable and no application
 // object, and it is the only way to check that a command list turns into the
 // pixels it should.
@@ -45,10 +45,8 @@
 #include "../../runtime/win32.h"
 #include "../../runtime/mods_seam.h"
 
-#import <Metal/Metal.h>
 #include "../gpu/fake/fake_device.h"
 #include "../gpu/gpu_factory.h"
-#include "../gpu/metal/metal_bridge.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -62,12 +60,15 @@ static int g_checks = 0, g_failures = 0;
 
 // The host's GPU device: the renderer and the presenter share its queue.
 static std::unique_ptr<gpu::Device> g_gpu;
-static PopD3DRenderer *make_renderer() {
-    return [[PopD3DRenderer alloc] initWithDevice:gpu::metal::device(g_gpu.get())
-                                            queue:gpu::metal::queue(g_gpu.get())];
+static D3DRenderer *make_renderer() {
+    auto *renderer = new D3DRenderer(g_gpu.get());
+    if (renderer->ok())
+        return renderer;
+    delete renderer;
+    return nullptr;
 }
-static id<MTLTexture> present_native(gpu::Texture t) {
-    return gpu::metal::export_texture(g_gpu.get(), t);
+static gpu::TextureDesc target_desc(D3DRenderer *renderer) {
+    return renderer->device()->describe(renderer->colorTarget());
 }
 static void check(bool ok, const char *what, const char *file, int line) {
     ++g_checks;
@@ -2328,11 +2329,12 @@ struct Readback {
     }
 };
 
-Readback read_target(PopD3DRenderer *renderer) {
+Readback read_target(D3DRenderer *renderer) {
     Readback out;
     int w = 0, h = 0;
-    out.bgra.resize((size_t)renderer.colorTarget.width * renderer.colorTarget.height * 4);
-    if (![renderer readPixels:out.bgra.data() width:&w height:&h])
+    const gpu::TextureDesc target = target_desc(renderer);
+    out.bgra.resize((size_t)target.width * target.height * 4);
+    if (!renderer->readPixels(out.bgra.data(), &w, &h))
         return out;
     out.w = w;
     out.h = h;
@@ -2352,9 +2354,9 @@ struct Surface {
     // it. Without it a test that leaves the mirror dirty writes into the next
     // test's heap.
     ~Surface() {
-        PopD3DRenderer *renderer = [PopD3DRenderer shared];
-        [renderer flushSurface:&desc why:"test"];
-        [renderer setRenderTarget:nullptr];
+        D3DRenderer *renderer = D3DRenderer::shared();
+        renderer->flushSurface(&desc, "test");
+        renderer->setRenderTarget(nullptr);
     }
     Surface(uint32_t id, int w, int h) : pixels((size_t)w * h * 2, 0) {
         memset(&desc, 0, sizeof desc);
@@ -2526,13 +2528,13 @@ static void test_primitive_expansion() {
     CHECK_NEAR(out[0].sa, 128.0 / 255.0, 1e-5);
 }
 
-static void test_render_clear_and_triangle(PopD3DRenderer *renderer) {
+static void test_render_clear_and_triangle(D3DRenderer *renderer) {
     Surface surface(1, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff0000ffu depth:1.0f];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff0000ffu, 1.0f);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     CHECK_EQ(rb.w, 64);
     int r, g, b, a;
@@ -2546,9 +2548,9 @@ static void test_render_clear_and_triangle(PopD3DRenderer *renderer) {
     // A red triangle over the top-left half, on top of that clear.
     Command tri;
     tri.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(r, 255);
@@ -2567,10 +2569,10 @@ static void test_render_clear_and_triangle(PopD3DRenderer *renderer) {
     gouraud.tlvertex(0, 0, 0.5f, 0xffff0000);
     gouraud.tlvertex(64, 0, 0.5f, 0xff00ff00);
     gouraud.tlvertex(0, 64, 0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&gouraud.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&gouraud.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(31, 1, &r, &g, &b, &a);
     CHECK(r > 60 && r < 200);
@@ -2581,19 +2583,19 @@ static void test_render_clear_and_triangle(PopD3DRenderer *renderer) {
 // The ruling the review made: the device rasterizes into its render-target
 // surface, so software drawing and Direct3D drawing have to interleave in that
 // surface's own memory, in the order the guest produced them.
-static void test_render_target_write_back(PopD3DRenderer *renderer) {
+static void test_render_target_write_back(D3DRenderer *renderer) {
     Surface surface(2, 64, 64);
     surface.fill(k565_blue);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // --- draw, then flip. The triangle lands in the surface; the blue the
     // guest had already put there survives outside it.
     Command tri;
     tri.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&surface.desc, "test");
     int r, g, b;
     surface.rgb(2, 2, &r, &g, &b);
     CHECK(r > 200);
@@ -2605,7 +2607,7 @@ static void test_render_target_write_back(PopD3DRenderer *renderer) {
     // --- draw, then blit, then flip. The blit happens after the flush the
     // shim makes before it, so nothing may overwrite it afterwards.
     surface.block(40, 40, 56, 56, k565_green);
-    [renderer flushSurface:&surface.desc why:"test"]; // nothing new was drawn
+    renderer->flushSurface(&surface.desc, "test"); // nothing new was drawn
     surface.rgb(48, 48, &r, &g, &b);
     CHECK(g > 200);
     CHECK(r < 40);
@@ -2617,10 +2619,10 @@ static void test_render_target_write_back(PopD3DRenderer *renderer) {
     second.tlvertex(0, 0, 0.5f, 0xff0000ff);
     second.tlvertex(20, 0, 0.5f, 0xff0000ff);
     second.tlvertex(0, 20, 0.5f, 0xff0000ff);
-    [renderer beginScene];
-    [renderer draw:&second.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&second.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&surface.desc, "test");
     // The new triangle is there.
     surface.rgb(2, 2, &r, &g, &b);
     CHECK(b > 200);
@@ -2638,20 +2640,20 @@ static void test_render_target_write_back(PopD3DRenderer *renderer) {
     // which is what makes the Lock/Blt/Flip calls that happen constantly cheap
     // and safe.
     uint32_t before = host_d3d_total_flushes();
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
     CHECK_EQ(host_d3d_total_flushes(), before);
 
     // A surface that is not the render target is never written to.
     Surface other(3, 64, 64);
     other.fill(k565_red);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&other.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&other.desc, "test");
     other.rgb(2, 2, &r, &g, &b);
     CHECK(r > 200);
     CHECK(b < 40);
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
 }
 
 // Flip swaps the memory behind a surface, so the host must never be holding a
@@ -2659,7 +2661,7 @@ static void test_render_target_write_back(PopD3DRenderer *renderer) {
 // The write-back must touch only what the device rasterized. A pixel the guest
 // wrote and the device never covered has to come out of a flush with the exact
 // bytes it went in with - not the bytes a trip through RGB would return.
-static void test_render_target_lossless(PopD3DRenderer *renderer) {
+static void test_render_target_lossless(D3DRenderer *renderer) {
     Surface surface(20, 64, 64);
     // Values chosen because a round trip through 8-bit RGB does not return
     // them: a 5-bit channel of 1 scales to 8 and back to 0, and a 6-bit green
@@ -2670,16 +2672,16 @@ static void test_render_target_lossless(PopD3DRenderer *renderer) {
             surface.block(x, y, x + 1, y + 1, kFragile[(x + y) & 3]);
     std::vector<uint8_t> before = surface.pixels;
 
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
     // A small triangle in the top-left corner, nowhere near most of the frame.
     Command tri;
     tri.tlvertex(0, 0, 0.5f, 0xffff0000);
     tri.tlvertex(16, 0, 0.5f, 0xffff0000);
     tri.tlvertex(0, 16, 0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&surface.desc, "test");
 
     // Everything outside the triangle is bit-identical to what the guest wrote.
     int changed_outside = 0, changed_inside = 0;
@@ -2708,43 +2710,43 @@ static void test_render_target_lossless(PopD3DRenderer *renderer) {
 // A Clear that is still only a pending load action has not happened yet, and a
 // Lock or a Blt before EndScene must not read the pixels it was about to
 // replace.
-static void test_render_clear_before_end_scene(PopD3DRenderer *renderer) {
+static void test_render_clear_before_end_scene(D3DRenderer *renderer) {
     Surface surface(21, 64, 64);
     surface.fill(k565_red);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff00ff00u depth:1.0f];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff00ff00u, 1.0f);
     // No endScene: this is the guest locking the surface mid-scene.
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
     int r, g, b;
     surface.rgb(32, 32, &r, &g, &b);
     CHECK(g > 200);
     CHECK(r < 40);
-    [renderer endScene];
+    renderer->endScene();
 }
 
 // A scene drawn into one target and then abandoned for another belongs to the
 // surface it was drawn for. Losing it because the device moved on is what the
 // re-review called out: the flush has to happen when the target changes, and a
 // later flush naming the old surface has to still find those pixels.
-static void test_render_target_switch(PopD3DRenderer *renderer) {
+static void test_render_target_switch(D3DRenderer *renderer) {
     Surface a(30, 64, 64);
     Surface b(31, 64, 64);
     a.fill(k565_blue);
     b.fill(k565_blue);
 
-    [renderer setRenderTarget:&a.desc];
+    renderer->setRenderTarget(&a.desc);
     Command red;
     red.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&red.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&red.cmd);
+    renderer->endScene();
 
     // No flush: the device simply starts pointing somewhere else, which is
     // what CreateDevice and SetRenderTarget do.
     uint32_t before = host_d3d_total_flushes();
-    [renderer setRenderTarget:&b.desc];
+    renderer->setRenderTarget(&b.desc);
     CHECK_EQ(host_d3d_total_flushes(), before + 1);
 
     int r, g, bl;
@@ -2759,13 +2761,13 @@ static void test_render_target_switch(PopD3DRenderer *renderer) {
     // nothing to the old one: its pixels were already accounted for.
     Command green;
     green.triangle(0.5f, 0xff00ff00);
-    [renderer beginScene];
-    [renderer draw:&green.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&green.cmd);
+    renderer->endScene();
     std::vector<uint8_t> a_before = a.pixels;
-    [renderer flushSurface:&a.desc why:"test"];
+    renderer->flushSurface(&a.desc, "test");
     CHECK(a_before == a.pixels);
-    [renderer flushSurface:&b.desc why:"test"];
+    renderer->flushSurface(&b.desc, "test");
     b.rgb(2, 2, &r, &g, &bl);
     CHECK(g > 200);
 }
@@ -2774,17 +2776,17 @@ static void test_render_target_switch(PopD3DRenderer *renderer) {
 // pointer the renderer holds names memory that is not there. A pending scene
 // must be dropped, not written: writing it would put pixels through a dangling
 // guest address, into whatever the arena's memory has become.
-static void test_render_discard_on_reset(PopD3DRenderer *renderer) {
+static void test_render_discard_on_reset(D3DRenderer *renderer) {
     Surface surface(50, 64, 64);
     surface.fill(k565_blue);
     std::vector<uint8_t> before = surface.pixels;
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     Command tri;
     tri.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
 
     // The arena goes. This is host_d3d_discard, which is what d3d_reset calls
     // in place of naming a null render target.
@@ -2795,9 +2797,9 @@ static void test_render_discard_on_reset(PopD3DRenderer *renderer) {
 
     // Nothing left pointing at the old surface: a later flush or target change
     // writes nothing to it either, however it is asked.
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
     CHECK(before == surface.pixels);
-    [renderer setRenderTarget:nullptr];
+    renderer->setRenderTarget(nullptr);
     CHECK(before == surface.pixels);
     CHECK_EQ(host_d3d_total_flushes(), flushes);
 
@@ -2806,15 +2808,15 @@ static void test_render_discard_on_reset(PopD3DRenderer *renderer) {
     // surface's own pixels rather than from whatever the mirror still held.
     Surface fresh(51, 64, 64);
     fresh.fill(k565_green);
-    [renderer setRenderTarget:&fresh.desc];
+    renderer->setRenderTarget(&fresh.desc);
     Command blue;
     blue.tlvertex(0, 0, 0.5f, 0xff0000ff);
     blue.tlvertex(16, 0, 0.5f, 0xff0000ff);
     blue.tlvertex(0, 16, 0.5f, 0xff0000ff);
-    [renderer beginScene];
-    [renderer draw:&blue.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&fresh.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&blue.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&fresh.desc, "test");
     int r, g, b;
     fresh.rgb(2, 2, &r, &g, &b);
     CHECK(b > 200);
@@ -2829,21 +2831,21 @@ static void test_render_discard_on_reset(PopD3DRenderer *renderer) {
 // If the device has been rendering into it, the host is holding a scene for the
 // buffer that is about to go away: it has to be asked for it back first, and
 // told the new pointer afterwards, or a later scene lands in freed storage.
-static void test_render_target_surface_desc(PopD3DRenderer *renderer) {
+static void test_render_target_surface_desc(D3DRenderer *renderer) {
     Surface surface(60, 64, 64);
     surface.fill(k565_blue);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     Command red;
     red.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&red.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&red.cmd);
+    renderer->endScene();
 
     // What the shim now does around the replacement: flush, swap, retarget.
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
     std::vector<uint8_t> freed = surface.replaceStorage(k565_green);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // The scene reached the storage it was drawn for, before that storage went.
     uint16_t old_corner = surface.value_at(freed, 2, 2);
@@ -2858,11 +2860,11 @@ static void test_render_target_surface_desc(PopD3DRenderer *renderer) {
     blue.tlvertex(0, 0, 0.5f, 0xff0000ff);
     blue.tlvertex(16, 0, 0.5f, 0xff0000ff);
     blue.tlvertex(0, 16, 0.5f, 0xff0000ff);
-    [renderer beginScene];
-    [renderer draw:&blue.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&blue.cmd);
+    renderer->endScene();
     std::vector<uint8_t> freed_after = freed;
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->flushSurface(&surface.desc, "test");
     int r, g, b;
     surface.rgb(2, 2, &r, &g, &b);
     CHECK(b > 200);
@@ -2876,9 +2878,9 @@ static void test_render_target_surface_desc(PopD3DRenderer *renderer) {
 // Nothing may darken on the way to the surface. A scene that renders correctly
 // and arrives dim is a conversion bug, and the 5-6-5 round trip is where one
 // would live: an earlier review found a channel of 1 becoming 8 becoming 0.
-static void test_render_no_darkening(PopD3DRenderer *renderer) {
+static void test_render_no_darkening(D3DRenderer *renderer) {
     Surface surface(70, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // White, mid grey and a few exact 5-6-5 values, drawn untextured so the
     // vertex colour is the only thing deciding the pixel.
@@ -2892,11 +2894,11 @@ static void test_render_no_darkening(PopD3DRenderer *renderer) {
     for (const auto &c : cases) {
         Command tri;
         tri.triangle(0.5f, c.argb);
-        [renderer beginScene];
-        [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-        [renderer draw:&tri.cmd];
-        [renderer endScene];
-        [renderer flushSurface:&surface.desc why:"test"];
+        renderer->beginScene();
+        renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+        renderer->draw(&tri.cmd);
+        renderer->endScene();
+        renderer->flushSurface(&surface.desc, "test");
         int r, g, b;
         surface.rgb(2, 2, &r, &g, &b);
         // 5-6-5 cannot hold every 8-bit value, so the bar is that nothing is
@@ -2910,11 +2912,11 @@ static void test_render_no_darkening(PopD3DRenderer *renderer) {
     // every frame is a few per cent dark looks exactly like a lighting bug.
     Command white;
     white.triangle(0.5f, 0xffffffff);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&white.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&surface.desc why:"test"];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&white.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&surface.desc, "test");
     CHECK_EQ(surface.at(2, 2), 0xffff); // every bit set
     int r, g, b;
     surface.rgb(2, 2, &r, &g, &b);
@@ -2926,18 +2928,18 @@ static void test_render_no_darkening(PopD3DRenderer *renderer) {
 // An untextured draw, and one naming a texture that was never uploaded, must
 // both render the vertex colour. Rendering black instead is a dark scene with
 // no other symptom.
-static void test_render_untextured_uses_vertex_colour(PopD3DRenderer *renderer) {
+static void test_render_untextured_uses_vertex_colour(D3DRenderer *renderer) {
     Surface surface(71, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // No texture handle at all.
     Command plain;
     plain.state[21] = 2; // TEXTUREMAPBLEND = MODULATE
     plain.triangle(0.5f, 0xff40c080);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&plain.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&plain.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(2, 2, &r, &g, &b, &a);
@@ -2952,10 +2954,10 @@ static void test_render_untextured_uses_vertex_colour(PopD3DRenderer *renderer) 
     missing.state[1] = 4242;
     missing.state[21] = 2;
     missing.triangle(0.5f, 0xff40c080);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&missing.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&missing.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK(r > 50 && r < 80);
@@ -2966,9 +2968,9 @@ static void test_render_untextured_uses_vertex_colour(PopD3DRenderer *renderer) 
 // the vertex otherwise, which is the documented cascade. The half that was
 // missing is the first: with a colour-keyed texture and no alpha test, keyed
 // texels were drawn opaque because the vertex alpha won.
-static void test_render_modulate_alpha_source(PopD3DRenderer *renderer) {
+static void test_render_modulate_alpha_source(D3DRenderer *renderer) {
     Surface surface(72, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // An opaque texture with no colour key and no alpha mask.
     uint16_t white565[1] = {0xffff};
@@ -2983,7 +2985,7 @@ static void test_render_modulate_alpha_source(PopD3DRenderer *renderer) {
     opaque.rmask = 0xf800;
     opaque.gmask = 0x07e0;
     opaque.bmask = 0x001f;
-    [renderer uploadTexture:&opaque];
+    renderer->uploadTexture(&opaque);
 
     // A texture with no alpha of its own: the vertex's alpha governs, which is
     // the second half of the cascade and what a fade relies on.
@@ -2995,10 +2997,10 @@ static void test_render_modulate_alpha_source(PopD3DRenderer *renderer) {
     quad.state[19] = 5;              // SRCBLEND = SRCALPHA
     quad.state[20] = 6;              // DESTBLEND = INVSRCALPHA
     quad.triangle(0.5f, 0xffff0000); // opaque red
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(2, 2, &r, &g, &b, &a);
@@ -3006,10 +3008,10 @@ static void test_render_modulate_alpha_source(PopD3DRenderer *renderer) {
     // Half alpha on the vertex halves it, because the texture has none.
     quad.vertices.clear();
     quad.triangle(0.5f, 0x80ff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK(r > 110 && r < 145);
@@ -3030,32 +3032,32 @@ static void test_render_modulate_alpha_source(PopD3DRenderer *renderer) {
     clear_tex.palette = palette;
     clear_tex.has_colorkey = 1;
     clear_tex.colorkey_lo = clear_tex.colorkey_hi = 0;
-    [renderer uploadTexture:&clear_tex];
+    renderer->uploadTexture(&clear_tex);
 
     quad.cmd.texture_handle = 22;
     quad.state[1] = 22;
     quad.vertices.clear();
     quad.triangle(0.5f, 0xffff0000); // opaque red vertex this time
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff0000ffu depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff0000ffu, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(b, 255); // the clear, through a transparent texel
     CHECK_EQ(r, 0);
-    [renderer destroyTexture:21];
-    [renderer destroyTexture:22];
+    renderer->destroyTexture(21);
+    renderer->destroyTexture(22);
 }
 
 // The game's own frame, in the order the Wine trace shows it: draw the scene,
 // end it, blit the interface panels onto the back buffer, flip. The panels are
 // software blits into the surface, and nothing the renderer does afterwards may
 // overwrite them - a write-back landing after the blits is a black minimap.
-static void test_render_panels_survive_to_present(PopD3DRenderer *renderer) {
+static void test_render_panels_survive_to_present(D3DRenderer *renderer) {
     Surface surface(80, 64, 64);
     surface.fill(k565_blue);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // The scene: a clear and a triangle over the whole target, as a frame that
     // covers the screen would.
@@ -3066,13 +3068,13 @@ static void test_render_panels_survive_to_present(PopD3DRenderer *renderer) {
     scene.tlvertex(64, 64, 0.5f, 0xffff0000);
     scene.cmd.primitive_type = 5; // strip: the whole target
     scene.finish();
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&scene.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&scene.cmd);
+    renderer->endScene();
 
     // The shim flushes before the blit reads or writes the surface.
-    [renderer flushSurface:&surface.desc why:"Blt dst"];
+    renderer->flushSurface(&surface.desc, "Blt dst");
     int r, g, b;
     surface.rgb(32, 32, &r, &g, &b);
     CHECK(r > 200); // the scene reached the surface
@@ -3084,7 +3086,7 @@ static void test_render_panels_survive_to_present(PopD3DRenderer *renderer) {
     // write anything: nothing has been drawn since the last flush, so the
     // panel is the newest thing in those pixels.
     uint32_t flushes = host_d3d_total_flushes();
-    [renderer flushSurface:&surface.desc why:"Flip front"];
+    renderer->flushSurface(&surface.desc, "Flip front");
     CHECK_EQ(host_d3d_total_flushes(), flushes);
     surface.rgb(4, 4, &r, &g, &b);
     CHECK(g > 200); // the panel survived to the present
@@ -3095,34 +3097,34 @@ static void test_render_panels_survive_to_present(PopD3DRenderer *renderer) {
     // The next frame redraws the scene over everything, which is what the game
     // does, and the panel is blitted again after it. The panel from the last
     // frame is gone by then, and that is correct: it was not drawn this time.
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&scene.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&surface.desc why:"Blt dst"];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&scene.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&surface.desc, "Blt dst");
     surface.rgb(4, 4, &r, &g, &b);
     CHECK(r > 200); // the scene covered where the panel was
     surface.block(0, 0, 16, 16, k565_green);
-    [renderer flushSurface:&surface.desc why:"Flip front"];
+    renderer->flushSurface(&surface.desc, "Flip front");
     surface.rgb(4, 4, &r, &g, &b);
     CHECK(g > 200); // and the new panel survives again
 }
 
-static void test_render_target_flip(PopD3DRenderer *renderer) {
+static void test_render_target_flip(D3DRenderer *renderer) {
     Surface front(4, 64, 64);
     Surface back(4, 64, 64); // the same surface id, new memory
     front.fill(k565_blue);
     back.fill(k565_blue);
-    [renderer setRenderTarget:&front.desc];
+    renderer->setRenderTarget(&front.desc);
 
     Command tri;
     tri.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
     // The shim flushes and then re-states the target at its new memory.
-    [renderer flushSurface:&front.desc why:"test"];
-    [renderer setRenderTarget:&back.desc];
+    renderer->flushSurface(&front.desc, "test");
+    renderer->setRenderTarget(&back.desc);
 
     int r, g, b;
     front.rgb(2, 2, &r, &g, &b);
@@ -3132,10 +3134,10 @@ static void test_render_target_flip(PopD3DRenderer *renderer) {
 
     Command green;
     green.triangle(0.5f, 0xff00ff00);
-    [renderer beginScene];
-    [renderer draw:&green.cmd];
-    [renderer endScene];
-    [renderer flushSurface:&back.desc why:"test"];
+    renderer->beginScene();
+    renderer->draw(&green.cmd);
+    renderer->endScene();
+    renderer->flushSurface(&back.desc, "test");
     back.rgb(2, 2, &r, &g, &b);
     CHECK(g > 200);
     // The old memory was not written through a stale pointer.
@@ -3149,12 +3151,12 @@ extern "C" int host_d3d_claim_sealed_frame(uint64_t) {
     return g_t4_claim_frames ? 1 : 0;
 }
 extern "C" void host_d3d_reset_readback_metrics(void);
-static void test_readback_noninteger_scale(PopD3DRenderer *renderer) {
+static void test_readback_noninteger_scale(D3DRenderer *renderer) {
     for (auto size : {std::pair{31, 19}, std::pair{151, 99}, std::pair{3840, 2160}}) {
-        [renderer discard];
+        renderer->discard();
         host_d3d_reset_coherence();
         g_t4_claim_frames = true;
-        [renderer setSceneWidth:size.first height:size.second];
+        renderer->setSceneWidth(size.first, size.second);
         Surface surface(709, 53, 37);
         surface.fill(k565_blue);
         host_d3d_bind_generation(&surface.desc, 1, 7209);
@@ -3165,7 +3167,7 @@ static void test_readback_noninteger_scale(PopD3DRenderer *renderer) {
         tri.tlvertex(0, 37, .5f, 0xff6deb17);
         tri.cmd.viewport[2] = 53;
         tri.cmd.viewport[3] = 37;
-        [renderer draw:&tri.cmd];
+        renderer->draw(&tri.cmd);
         Readback reference = read_target(renderer);
         CHECK_EQ(reference.w, size.first);
         CHECK_EQ(reference.h, size.second);
@@ -3208,44 +3210,44 @@ static void test_readback_noninteger_scale(PopD3DRenderer *renderer) {
                 }
         }
         g_t4_claim_frames = false;
-        [renderer discard];
-        [renderer setSceneWidth:0 height:0];
+        renderer->discard();
+        renderer->setSceneWidth(0, 0);
     }
 }
 
 // Both kernels must match the independent CPU pixel/count oracle, including
 // downscaling, fractional native cells and padded threadgroups at 4K edges.
-static void test_readback_kernel_parity(PopD3DRenderer *original) {
+static void test_readback_kernel_parity(D3DRenderer *original) {
     const char *saved = getenv("POP_HOST_READBACK_KERNEL");
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
-    [original discard];
+    original->discard();
     for (const char *mode : {"fused", "tiled"}) {
         setenv("POP_HOST_READBACK_KERNEL", mode, 1);
-        PopD3DRenderer *r = make_renderer();
+        D3DRenderer *r = make_renderer();
         CHECK(r != nil);
         if (!r)
             continue;
-        [PopD3DRenderer setShared:r];
+        D3DRenderer::setShared(r);
         test_readback_noninteger_scale(r);
-        [r discard];
+        r->discard();
     }
     if (had)
         setenv("POP_HOST_READBACK_KERNEL", old.c_str(), 1);
     else
         unsetenv("POP_HOST_READBACK_KERNEL");
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
 
 // Compare the GPU seed against the retained CPU implementation for every
 // 16-bit value, palette entries, odd pitches and non-integral 4K scaling.
 // Mutate the source before submission to catch a borrowed-buffer upload.
-static void test_surface_upload_pixels(PopD3DRenderer *original) {
+static void test_surface_upload_pixels(D3DRenderer *original) {
     const char *saved = getenv("POP_HOST_SURFACE_UPLOAD");
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
-    [original discard];
+    original->discard();
     for (int format = 0; format < 9; ++format)
         for (bool wide : {false, true}) {
             Readback reference;
@@ -3255,7 +3257,7 @@ static void test_surface_upload_pixels(PopD3DRenderer *original) {
                 CHECK(r != nil);
                 if (!r)
                     continue;
-                [PopD3DRenderer setShared:r];
+                D3DRenderer::setShared(r);
                 const int w = wide ? 53 : 256, h = wide ? 37 : 256;
                 Surface surface(711, w, h);
                 surface.desc.bpp = format >= 6 ? (format == 7 ? 24 : 32) : format >= 4 ? 8 : 16;
@@ -3298,15 +3300,15 @@ static void test_surface_upload_pixels(PopD3DRenderer *original) {
                             pixel[3] = 0;
                         }
                     }
-                [r setSceneWidth:wide ? 3840 : 769 height:wide ? 2160 : 515];
-                [r setRenderTarget:&surface.desc];
+                r->setSceneWidth(wide ? 3840 : 769, wide ? 2160 : 515);
+                r->setRenderTarget(&surface.desc);
                 // A clipped point opens the render pass without touching a pixel.
                 Command d;
                 d.cmd.primitive_type = 1;
                 d.tlvertex(-20, -20, .5f, 0xffffffff);
                 d.finish();
-                [r beginScene];
-                [r draw:&d.cmd];
+                r->beginScene();
+                r->draw(&d.cmd);
                 std::fill(surface.pixels.begin(), surface.pixels.end(), 0);
                 std::fill(std::begin(palette), std::end(palette), 0);
                 auto image = read_target(r);
@@ -3323,41 +3325,41 @@ static void test_surface_upload_pixels(PopD3DRenderer *original) {
                     reference = std::move(image);
                 else
                     CHECK(image.bgra == reference.bgra);
-                [r discard];
+                r->discard();
             }
         }
     if (had)
         setenv("POP_HOST_SURFACE_UPLOAD", old.c_str(), 1);
     else
         unsetenv("POP_HOST_SURFACE_UPLOAD");
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
 }
 
 // Identical ordered draws across automatic submission boundaries must keep
 // native color, depth rejection and guest coverage/writeback byte-for-byte.
-static void test_bounded_submission_pixels(PopD3DRenderer *original) {
+static void test_bounded_submission_pixels(D3DRenderer *original) {
     const char *saved = getenv("POP_HOST_D3D_SUBMIT_DRAWS");
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
-    [original discard];
+    original->discard();
     for (auto size : {std::pair{151, 99}, std::pair{3840, 2160}}) {
         Readback reference;
         std::vector<uint8_t> guest;
         for (int interval : {0, 1, 256}) {
             setenv("POP_HOST_D3D_SUBMIT_DRAWS", std::to_string(interval).c_str(), 1);
-            PopD3DRenderer *r = make_renderer();
+            D3DRenderer *r = make_renderer();
             CHECK(r != nil);
             if (!r)
                 continue;
-            [PopD3DRenderer setShared:r];
+            D3DRenderer::setShared(r);
             host_d3d_reset_coherence();
             g_t4_claim_frames = true;
-            [r setSceneWidth:size.first height:size.second];
+            r->setSceneWidth(size.first, size.second);
             {
                 Surface surface(710, 64, 64);
                 surface.fill(k565_blue);
                 host_d3d_bind_generation(&surface.desc, 1, 7210);
-                [r beginScene];
+                r->beginScene();
                 // Depth clear only: uncovered guest pixels must remain blue.
                 host_d3d_clear(2, nullptr, 0, 0, 1);
                 for (int i = 0; i < 600; ++i) {
@@ -3371,7 +3373,7 @@ static void test_bounded_submission_pixels(PopD3DRenderer *original) {
                     tri.tlvertex(x, y, z, color);
                     tri.tlvertex(x + 12, y, z, color);
                     tri.tlvertex(x, y + 12, z, color);
-                    [r draw:&tri.cmd];
+                    r->draw(&tri.cmd);
                 }
                 // Blending after both automatic prefixes exercises load/store
                 // continuation without depending on a particular sample pixel.
@@ -3380,12 +3382,12 @@ static void test_bounded_submission_pixels(PopD3DRenderer *original) {
                 blend.state[19] = 5;
                 blend.state[20] = 6;
                 blend.triangle(.1f, 0x80c02070);
-                [r draw:&blend.cmd];
-                [r endScene];
+                r->draw(&blend.cmd);
+                r->endScene();
                 Readback actual = read_target(r);
                 host_d3d_mark_dirty(surface.desc.id, 1, {0, 0, 64, 64});
                 CHECK_EQ(host_d3d_make_coherent(&surface.desc, 1, nullptr, HOST_READ_LOCK), 1);
-                CHECK_EQ([r commandStorageStats].early_submissions, interval ? 2u : 0u);
+                CHECK_EQ(r->commandStorageStats().early_submissions, interval ? 2u : 0u);
                 if (!interval) {
                     reference = std::move(actual);
                     guest = surface.pixels;
@@ -3395,7 +3397,7 @@ static void test_bounded_submission_pixels(PopD3DRenderer *original) {
                     CHECK(actual.bgra == reference.bgra);
                     CHECK(surface.pixels == guest);
                 }
-                [r discard];
+                r->discard();
             }
             g_t4_claim_frames = false;
         }
@@ -3404,27 +3406,27 @@ static void test_bounded_submission_pixels(PopD3DRenderer *original) {
         setenv("POP_HOST_D3D_SUBMIT_DRAWS", old.c_str(), 1);
     else
         unsetenv("POP_HOST_D3D_SUBMIT_DRAWS");
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
 
-static void test_parallel_readback_pixels(PopD3DRenderer *original) {
+static void test_parallel_readback_pixels(D3DRenderer *original) {
     const char *saved = getenv("POP_HOST_READBACK_WORKERS");
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
-    [original discard];
+    original->discard();
     for (int bpp : {8, 16}) {
         std::vector<uint8_t> partial_reference, full_reference;
         for (int workers : {1, 4}) {
             setenv("POP_HOST_READBACK_WORKERS", std::to_string(workers).c_str(), 1);
-            PopD3DRenderer *r = make_renderer();
+            D3DRenderer *r = make_renderer();
             CHECK(r != nil);
             if (!r)
                 continue;
-            [PopD3DRenderer setShared:r];
+            D3DRenderer::setShared(r);
             host_d3d_reset_coherence();
             g_t4_claim_frames = true;
-            [r setSceneWidth:3840 height:2160];
+            r->setSceneWidth(3840, 2160);
             {
                 Surface surface(711, 640, 480);
                 uint32_t palette[256];
@@ -3439,7 +3441,7 @@ static void test_parallel_readback_pixels(PopD3DRenderer *original) {
                 for (size_t i = 0; i < surface.pixels.size(); ++i)
                     surface.pixels[i] = uint8_t(i % 251);
                 host_d3d_bind_generation(&surface.desc, 1, 7211);
-                [r beginScene];
+                r->beginScene();
                 host_d3d_clear(2, nullptr, 0, 0, 1);
                 Command tri;
                 tri.cmd.viewport[2] = 640;
@@ -3447,12 +3449,12 @@ static void test_parallel_readback_pixels(PopD3DRenderer *original) {
                 tri.tlvertex(0, 0, .5f, 0xffe17423);
                 tri.tlvertex(640, 0, .5f, 0xff26dd54);
                 tri.tlvertex(0, 480, .5f, 0xff613bc1);
-                [r draw:&tri.cmd];
-                [r endScene];
+                r->draw(&tri.cmd);
+                r->endScene();
                 host_d3d_mark_dirty(surface.desc.id, 1, {0, 0, 640, 480});
                 HostDirtyRect partial{13, 7, 301, 231};
                 CHECK_EQ(host_d3d_make_coherent(&surface.desc, 1, &partial, HOST_READ_LOCK), 1);
-                CHECK_EQ([r commandStorageStats].parallel_readbacks, 0u);
+                CHECK_EQ(r->commandStorageStats().parallel_readbacks, 0u);
                 if (workers == 1)
                     partial_reference = surface.pixels;
                 else
@@ -3460,12 +3462,12 @@ static void test_parallel_readback_pixels(PopD3DRenderer *original) {
                 // The remaining dirty islands are large enough for worker
                 // dispatch. Compare every byte, including uncovered pixels.
                 CHECK_EQ(host_d3d_make_coherent(&surface.desc, 1, nullptr, HOST_READ_LOCK), 1);
-                CHECK_EQ([r commandStorageStats].parallel_readbacks, workers == 4 ? 1u : 0u);
+                CHECK_EQ(r->commandStorageStats().parallel_readbacks, workers == 4 ? 1u : 0u);
                 if (workers == 1)
                     full_reference = surface.pixels;
                 else
                     CHECK(surface.pixels == full_reference);
-                [r discard];
+                r->discard();
             }
             g_t4_claim_frames = false;
         }
@@ -3474,14 +3476,14 @@ static void test_parallel_readback_pixels(PopD3DRenderer *original) {
         setenv("POP_HOST_READBACK_WORKERS", old.c_str(), 1);
     else
         unsetenv("POP_HOST_READBACK_WORKERS");
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
     host_d3d_reset_coherence();
 }
 
-static void test_incremental_scene_readback(PopD3DRenderer *renderer) {
+static void test_incremental_scene_readback(D3DRenderer *renderer) {
     // Reset must isolate this observation from earlier renderer/presenter
     // reads, including the fully coloured world/overlay integration test.
-    [renderer discard];
+    renderer->discard();
     host_d3d_reset_coherence();
     Surface surface(707, 64, 64);
     g_t4_claim_frames = true;
@@ -3543,7 +3545,7 @@ static void test_incremental_scene_readback(PopD3DRenderer *renderer) {
     // A newer leased target is read directly without a guest coherence read.
     // Its larger green triangle must raise the metric from readPixels itself.
     host_d3d_bind_generation(&surface.desc, 1, 7202);
-    CHECK(renderer.colorTarget != [renderer colorTargetForFrame:7201]);
+    CHECK(renderer->colorTarget() != renderer->colorTargetForFrame(7201));
     Command green;
     green.tlvertex(-64, 0, 0.5f, 0xff00ff00);
     green.tlvertex(128, 0, 0.5f, 0xff00ff00);
@@ -3568,63 +3570,44 @@ static void test_incremental_scene_readback(PopD3DRenderer *renderer) {
     host_d3d_retire_frame(7201);
     host_d3d_retire_frame(7202);
     g_t4_claim_frames = false;
-    [renderer discard];
+    renderer->discard();
     host_d3d_reset_coherence();
     CHECK_EQ(host_d3d_peak_nonblack(), 0.0);
 }
 
-static void test_frame_targets_are_leased(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_frame_targets_are_leased(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
     Surface surface(706, 64, 64);
     g_t4_claim_frames = true;
-    id<MTLTexture> textures[4];
+    gpu::Texture textures[4];
     for (int i = 0; i < 4; ++i) {
         uint64_t frame = 7100 + i;
         host_d3d_bind_generation(&surface.desc, 1, frame);
-        [renderer clearFlags:3
-                       rects:nullptr
-                       count:0
-                       color:0xff000000u | ((40u + i * 40u) << 16)
-                       depth:1];
+        renderer->clearFlags(3, nullptr, 0, 0xff000000u | ((40u + i * 40u) << 16), 1);
         host_d3d_mark_dirty(706, 1, {0, 0, 64, 64});
         host_d3d_seal_frame(frame);
-        textures[i] = [renderer colorTargetForFrame:frame];
-        CHECK(textures[i] != nil);
-        CHECK([renderer completionForFrame:frame] != nil);
+        textures[i] = renderer->colorTargetForFrame(frame);
+        CHECK(bool(textures[i]));
+        CHECK(bool(renderer->completionForFrame(frame)));
         for (int j = 0; j < i; ++j)
             CHECK(textures[i] != textures[j]);
     }
     CHECK_EQ(host_readback_count_for_test(), 0u);
     // Every sealed frame still has its own colour, including the dropped
     // frames, although three later clears targeted the same guest generation.
-    id<MTLCommandQueue> queue = renderer.commandQueue;
     for (int i = 0; i < 4; ++i) {
-        id<MTLBuffer> pixels = [queue.device newBufferWithLength:64 * 64 * 4
-                                                         options:MTLResourceStorageModeShared];
-        id<MTLCommandBuffer> cb = [queue commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit copyFromTexture:textures[i]
-                         sourceSlice:0
-                         sourceLevel:0
-                        sourceOrigin:MTLOriginMake(0, 0, 0)
-                          sourceSize:MTLSizeMake(64, 64, 1)
-                            toBuffer:pixels
-                   destinationOffset:0
-              destinationBytesPerRow:256
-            destinationBytesPerImage:64 * 256];
-        [blit endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-        const uint8_t *p = (const uint8_t *)pixels.contents;
+        // readback waits for the frame's GPU work before copying.
+        uint8_t p[4] = {0, 0, 0, 0};
+        CHECK(g_gpu->readback(textures[i], {0, 0, 1, 1}, p, 4));
         CHECK_EQ(p[2], 40 + i * 40);
         CHECK_EQ(p[1], 0);
         CHECK_EQ(p[0], 0);
         host_d3d_retire_frame(7100 + i);
-        CHECK([renderer colorTargetForFrame:7100 + i] == nil);
+        CHECK(!renderer->colorTargetForFrame(7100 + i));
     }
     g_t4_claim_frames = false;
-    [renderer discard];
+    renderer->discard();
 }
 
 static uint64_t g_t5_legacy_frame = 0;
@@ -3649,16 +3632,16 @@ static void t5_snapshot(const Command &c, HostD3DDrawSnapshot &d, uint32_t seq) 
     memcpy(d.state.viewport, c.cmd.viewport, sizeof d.state.viewport);
     d.state.viewport_maxz = 1;
 }
-static void test_same_frame_legacy_pixels(PopD3DRenderer *renderer) {
+static void test_same_frame_legacy_pixels(D3DRenderer *renderer) {
     std::vector<uint16_t> reference;
     for (bool legacy : {true, false}) {
-        [renderer discard];
+        renderer->discard();
         host_d3d_reset_coherence();
         if (legacy)
             setenv("POPM_LEGACY_WRITEBACK", "1", 1);
         else
             unsetenv("POPM_LEGACY_WRITEBACK");
-        [renderer setSceneWidth:legacy ? 0 : 256 height:legacy ? 0 : 192];
+        renderer->setSceneWidth(legacy ? 0 : 256, legacy ? 0 : 192);
         Surface surface(805, 128, 96);
         host_d3d_bind_generation(&surface.desc, 1, 8005);
         Command world;
@@ -3733,8 +3716,8 @@ static void test_same_frame_legacy_pixels(PopD3DRenderer *renderer) {
             host_d3d_seal_frame(8005); // the production automatic fallback
             CHECK(host_render_legacy_frame_for_test({8005}));
             CHECK(host_render_legacy_frame_for_test({8005})); // idempotent
-            CHECK_EQ(renderer.colorTarget.width, 128u);
-            CHECK_EQ(renderer.colorTarget.height, 96u);
+            CHECK_EQ(target_desc(renderer).width, 128);
+            CHECK_EQ(target_desc(renderer).height, 96);
         }
         const auto *pixels = (const uint16_t *)surface.desc.pixels;
         if (legacy)
@@ -3750,16 +3733,16 @@ static void test_same_frame_legacy_pixels(PopD3DRenderer *renderer) {
     }
     g_t5_legacy_frame = 0;
     unsetenv("POPM_LEGACY_WRITEBACK");
-    [renderer setSceneWidth:0 height:0];
-    [renderer discard];
+    renderer->setSceneWidth(0, 0);
+    renderer->discard();
 }
 
-static void test_legacy_checkpoint_and_baked_mapping(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_legacy_checkpoint_and_baked_mapping(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
     Surface surface(806, 64, 64);
     g_t4_claim_frames = true;
-    [renderer setSceneWidth:128 height:128];
+    renderer->setSceneWidth(128, 128);
     host_d3d_bind_generation(&surface.desc, 1, 8100);
     HostD3DDrawSnapshot clear{};
     clear.kind = HOST_DRAW_CLEAR;
@@ -3789,7 +3772,7 @@ static void test_legacy_checkpoint_and_baked_mapping(PopD3DRenderer *renderer) {
     host_d3d_replay_barrier(&surface.desc, 1, 1);
     CHECK_EQ(host_d3d_make_coherent(&surface.desc, 1, nullptr, HOST_READ_LOCK), 1);
     CHECK_EQ(surface.at(2, 2), 0xf800);
-    CHECK_EQ(renderer.colorTarget.width, 64u);
+    CHECK_EQ(target_desc(renderer).width, 64);
     draw.seq = 1;
     host_d3d_draw(&draw);
     host_d3d_mark_dirty(806, 1, {0, 0, 64, 64});
@@ -3803,12 +3786,12 @@ static void test_legacy_checkpoint_and_baked_mapping(PopD3DRenderer *renderer) {
     CHECK_EQ(host_render_draw_mapping_for_test({8101}, 0), HOST_MAPPING_SCENE);
     g_t4_claim_frames = false;
     g_t5_legacy_frame = 0;
-    [renderer setSceneWidth:0 height:0];
-    [renderer discard];
+    renderer->setSceneWidth(0, 0);
+    renderer->discard();
 }
 
-static void test_prefix_submit_then_continue_keeps_depth_and_content(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_prefix_submit_then_continue_keeps_depth_and_content(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
     Surface surface(704, 64, 64);
     host_d3d_bind_generation(&surface.desc, 1, 7004);
@@ -3819,8 +3802,8 @@ static void test_prefix_submit_then_continue_keeps_depth_and_content(PopD3DRende
     a.tlvertex(0, 0, 0.2f, 0xffff0000);
     a.tlvertex(32, 0, 0.2f, 0xffff0000);
     a.tlvertex(0, 32, 0.2f, 0xffff0000);
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-    [renderer draw:&a.cmd];
+    renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
+    renderer->draw(&a.cmd);
     host_d3d_mark_dirty(surface.desc.id, 1, {0, 0, 64, 64});
     CHECK_EQ(host_d3d_make_coherent(&surface.desc, 1, nullptr, HOST_READ_LOCK), 1);
     CHECK_EQ(surface.at(2, 2), 0xf800);
@@ -3829,7 +3812,7 @@ static void test_prefix_submit_then_continue_keeps_depth_and_content(PopD3DRende
     b.state[14] = 1;
     b.state[23] = 4;
     b.triangle(0.8f, 0xff00ff00);
-    [renderer draw:&b.cmd];
+    renderer->draw(&b.cmd);
     Readback rb = read_target(renderer);
     int r, g, blue, alpha;
     rb.rgb(2, 2, &r, &g, &blue, &alpha);
@@ -3838,18 +3821,18 @@ static void test_prefix_submit_then_continue_keeps_depth_and_content(PopD3DRende
     rb.rgb(40, 2, &r, &g, &blue, &alpha);
     CHECK_EQ(r, 0);
     CHECK_EQ(g, 255);
-    [renderer discard];
+    renderer->discard();
 }
 
-static void test_cpu_write_applied_partially(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_cpu_write_applied_partially(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
-    [renderer setSceneWidth:1280 height:960];
+    renderer->setSceneWidth(1280, 960);
     Surface surface(705, 640, 480);
     host_d3d_bind_generation(&surface.desc, 1, 7005);
     // A colour outside RGB565's exact values catches accidental full-surface
     // conversion at a prefix, as well as a misplaced upload.
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff172b3f depth:1];
+    renderer->clearFlags(3, nullptr, 0, 0xff172b3f, 1);
     std::vector<uint8_t> pixels(32, 0), coverage(16, 1);
     for (size_t i = 0; i < pixels.size(); i += 2) {
         pixels[i] = 0xe0;
@@ -3878,12 +3861,12 @@ static void test_cpu_write_applied_partially(PopD3DRenderer *renderer) {
             CHECK_EQ(g, block ? 255 : 0x2b);
             CHECK_EQ(b, block ? 0 : 0x3f);
         }
-    [renderer discard];
-    [renderer setSceneWidth:0 height:0];
+    renderer->discard();
+    renderer->setSceneWidth(0, 0);
 }
 
-static void test_full_color_surface_readback(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_full_color_surface_readback(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
     g_t4_claim_frames = true;
     Surface surface(887, 64, 64);
@@ -3894,9 +3877,9 @@ static void test_full_color_surface_readback(PopD3DRenderer *renderer) {
     surface.desc.bmask = 0xff;
     surface.pixels.assign(surface.desc.pitch * 64, 0xab);
     surface.desc.pixels = surface.pixels.data();
-    [renderer setSceneWidth:128 height:128];
+    renderer->setSceneWidth(128, 128);
     host_d3d_bind_generation(&surface.desc, 1, 9887);
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff13498d depth:1];
+    renderer->clearFlags(3, nullptr, 0, 0xff13498d, 1);
     HostDirtyRect rect{2, 3, 3, 4};
     CHECK(host_d3d_readback_rects(&surface.desc, 1, &rect, 1));
     const size_t at = 3 * surface.desc.pitch + 2 * 4;
@@ -3929,21 +3912,21 @@ static void test_full_color_surface_readback(PopD3DRenderer *renderer) {
     CHECK_EQ(r, 19);
     CHECK_EQ(g, 73);
     CHECK_EQ(b, 141);
-    [renderer discard];
-    [renderer setSceneWidth:0 height:0];
-    [renderer setRenderTarget:&surface.desc];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff13498d depth:1];
-    [renderer flushSurface:&surface.desc why:"32-bit compatibility readback"];
+    renderer->discard();
+    renderer->setSceneWidth(0, 0);
+    renderer->setRenderTarget(&surface.desc);
+    renderer->clearFlags(3, nullptr, 0, 0xff13498d, 1);
+    renderer->flushSurface(&surface.desc, "32-bit compatibility readback");
     CHECK_EQ(surface.pixels[0], 141);
     CHECK_EQ(surface.pixels[1], 73);
     CHECK_EQ(surface.pixels[2], 19);
     CHECK_EQ(surface.pixels[256], 0xab);
-    [renderer discard];
+    renderer->discard();
 }
 
-static void test_render_depth(PopD3DRenderer *renderer) {
+static void test_render_depth(D3DRenderer *renderer) {
     Surface surface(5, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // A far green triangle drawn after a near red one must not overwrite it
     // when the depth test is on, and must when it is off.
@@ -3957,11 +3940,11 @@ static void test_render_depth(PopD3DRenderer *renderer) {
     far_green.vertices.clear();
     far_green.triangle(0.8f, 0xff00ff00);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&near_red.cmd];
-    [renderer draw:&far_green.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&near_red.cmd);
+    renderer->draw(&far_green.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(2, 2, &r, &g, &b, &a);
@@ -3972,11 +3955,11 @@ static void test_render_depth(PopD3DRenderer *renderer) {
     // doing the work above and not the draw order.
     far_green.state[7] = 0;
     far_green.finish();
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&near_red.cmd];
-    [renderer draw:&far_green.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&near_red.cmd);
+    renderer->draw(&far_green.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(g, 255);
@@ -3995,11 +3978,11 @@ static void test_render_depth(PopD3DRenderer *renderer) {
     later.state[23] = 2; // ZFUNC = LESS
     later.triangle(0.5f, 0xff00ff00);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&unbuffered.cmd];
-    [renderer draw:&later.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&unbuffered.cmd);
+    renderer->draw(&later.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(g, 255); // 0.5 < 1.0, because 0.2 was not written
@@ -4016,18 +3999,18 @@ static void test_render_depth(PopD3DRenderer *renderer) {
     ranged.cmd.viewport_minz = 0.5f;
     ranged.cmd.viewport_maxz = 1.0f;
     ranged.triangle(0.2f, 0xffff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:0.4f];
-    [renderer draw:&ranged.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 0.4f);
+    renderer->draw(&ranged.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(r, 255);
 }
 
-static void test_render_blend_and_alpha_test(PopD3DRenderer *renderer) {
+static void test_render_blend_and_alpha_test(D3DRenderer *renderer) {
     Surface surface(6, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // Half-alpha white over black with SRCALPHA / INVSRCALPHA is mid grey.
     Command blended;
@@ -4035,10 +4018,10 @@ static void test_render_blend_and_alpha_test(PopD3DRenderer *renderer) {
     blended.state[19] = 5; // SRCBLEND = SRCALPHA
     blended.state[20] = 6; // DESTBLEND = INVSRCALPHA
     blended.triangle(0.5f, 0x80ffffff);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&blended.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&blended.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(2, 2, &r, &g, &b, &a);
@@ -4050,10 +4033,10 @@ static void test_render_blend_and_alpha_test(PopD3DRenderer *renderer) {
     tested.state[25] = 5;    // ALPHAFUNC = GREATER
     tested.state[24] = 0x80; // ALPHAREF
     tested.triangle(0.5f, 0x40ff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff0000ffu depth:1.0f];
-    [renderer draw:&tested.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff0000ffu, 1.0f);
+    renderer->draw(&tested.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(b, 255); // the clear survived: nothing drew
@@ -4062,18 +4045,18 @@ static void test_render_blend_and_alpha_test(PopD3DRenderer *renderer) {
     // The same draw with a passing alpha does reach the target.
     tested.vertices.clear();
     tested.triangle(0.5f, 0xc0ff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff0000ffu depth:1.0f];
-    [renderer draw:&tested.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff0000ffu, 1.0f);
+    renderer->draw(&tested.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(r, 255);
 }
 
-static void test_render_fog(PopD3DRenderer *renderer) {
+static void test_render_fog(D3DRenderer *renderer) {
     Surface surface(7, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // Vertex fog: the factor rides in the specular alpha, and 0 means the
     // fragment is entirely fog. The device advertises FOGVERTEX, so this has
@@ -4083,10 +4066,10 @@ static void test_render_fog(PopD3DRenderer *renderer) {
     fogged.state[35] = 0;                           // FOGTABLEMODE = NONE: vertex fog
     fogged.state[34] = 0xff00ff00u;                 // FOGCOLOR = green
     fogged.triangle(0.5f, 0xffff0000, 0x00000000u); // specular alpha 0
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&fogged.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&fogged.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(2, 2, &r, &g, &b, &a);
@@ -4096,10 +4079,10 @@ static void test_render_fog(PopD3DRenderer *renderer) {
     // A factor of 1 is no fog at all.
     fogged.vertices.clear();
     fogged.triangle(0.5f, 0xffff0000, 0xff000000u); // specular alpha 255
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&fogged.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&fogged.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK_EQ(r, 255);
@@ -4118,19 +4101,19 @@ static void test_render_fog(PopD3DRenderer *renderer) {
     table.state[36] = start_bits;
     table.state[37] = end_bits;
     table.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&table.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&table.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK(r > 100 && r < 160);
     CHECK(b > 100 && b < 160);
 }
 
-static void test_render_texture(PopD3DRenderer *renderer) {
+static void test_render_texture(D3DRenderer *renderer) {
     Surface surface(8, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // An 8-bit palettised 2x2 texture with a colour key, which is how this
     // game's sprites carry their transparency.
@@ -4151,7 +4134,7 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     tex.palette = palette;
     tex.has_colorkey = 1;
     tex.colorkey_lo = tex.colorkey_hi = 3;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
 
     // A quad over the whole target, sampled with the texture's own colours.
     Command quad;
@@ -4167,10 +4150,10 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     quad.tlvertex(0, 64, 0.5f, 0xffffffff, 0.0f, 1.0f);
     quad.tlvertex(64, 64, 0.5f, 0xffffffff, 1.0f, 1.0f);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     // Texel (0,0) is red, (1,0) green, (0,1) blue, (1,1) the colour key.
@@ -4199,10 +4182,10 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     quad.tlvertex(64, 0, 0.5f, 0xff808080, 1.0f, 0.0f);
     quad.tlvertex(0, 64, 0.5f, 0xff808080, 0.0f, 1.0f);
     quad.tlvertex(64, 64, 0.5f, 0xff808080, 1.0f, 1.0f);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(8, 8, &r, &g, &b, &a);
     CHECK(r > 110 && r < 145);
@@ -4221,7 +4204,7 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     wide.rmask = 0xf800;
     wide.gmask = 0x07e0;
     wide.bmask = 0x001f;
-    [renderer uploadTexture:&wide];
+    renderer->uploadTexture(&wide);
 
     quad.cmd.texture_handle = 8;
     quad.state[1] = 8;
@@ -4231,10 +4214,10 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     quad.tlvertex(64, 0, 0.5f, 0xffffffff, 1.0f, 0.0f);
     quad.tlvertex(0, 64, 0.5f, 0xffffffff, 0.0f, 1.0f);
     quad.tlvertex(64, 64, 0.5f, 0xffffffff, 1.0f, 1.0f);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(8, 8, &r, &g, &b, &a);
     CHECK_EQ(r, 255);
@@ -4244,8 +4227,8 @@ static void test_render_texture(PopD3DRenderer *renderer) {
     CHECK_EQ(g, 255);
     CHECK_EQ(b, 255);
 
-    [renderer destroyTexture:7];
-    [renderer destroyTexture:8];
+    renderer->destroyTexture(7);
+    renderer->destroyTexture(8);
 }
 
 // A texture that is re-uploaded while draws using the old contents are still
@@ -4264,9 +4247,9 @@ static void test_render_texture(PopD3DRenderer *renderer) {
 // and it was reading the transform slots at 0, 1, 2 while the shim writes them
 // at the D3DTRANSFORMSTATE indices - so every untransformed draw arrived with
 // no world matrix and its view and projection shifted by one.
-static void test_draw_snapshot_entry_point(PopD3DRenderer *renderer) {
+static void test_draw_snapshot_entry_point(D3DRenderer *renderer) {
     Surface surface(22, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
     host_render_reset_for_test();
 
     // D3DVT_LVERTEX: x y z, reserved, diffuse, specular, tu tv. It carries its
@@ -4308,10 +4291,10 @@ static void test_draw_snapshot_entry_point(PopD3DRenderer *renderer) {
     d.state.transform_set[HOST_D3D_TRANSFORM_VIEW] = 1;
     d.state.transform_set[HOST_D3D_TRANSFORM_PROJECTION] = 1;
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
     host_d3d_draw(&d);
-    [renderer endScene];
+    renderer->endScene();
 
     Readback rb = read_target(renderer);
     int r, g, b, a;
@@ -4339,17 +4322,17 @@ static void test_draw_snapshot_entry_point(PopD3DRenderer *renderer) {
     c.clear_flags = 3;
     c.clear_color = 0xff00ff00u;
     c.clear_z = 1.0f;
-    [renderer beginScene];
+    renderer->beginScene();
     host_d3d_draw(&c);
-    [renderer endScene];
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(32, 32, &r, &g, &b, &a);
     CHECK_EQ(g, 255);
     CHECK_EQ(r, 0);
 }
 
-static void test_unchanged_uploads_and_command_pool(PopD3DRenderer *renderer) {
-    [renderer discard];
+static void test_unchanged_uploads_and_command_pool(D3DRenderer *renderer) {
+    renderer->discard();
     host_d3d_reset_coherence();
     host_render_reset_for_test();
     g_t4_claim_frames = true;
@@ -4370,7 +4353,7 @@ static void test_unchanged_uploads_and_command_pool(PopD3DRenderer *renderer) {
         t.gmask = 0x07e0;
         t.bmask = 0x001f;
         host_d3d_texture(&t);
-        CHECK([renderer hasTexture:t.handle revision:t.revision]);
+        CHECK(renderer->hasTexture(t.handle, t.revision));
     }
     Command draws[3];
     // >4096 bytes exercises GPU-consumed arguments as well as CPU expansion.
@@ -4390,41 +4373,41 @@ static void test_unchanged_uploads_and_command_pool(PopD3DRenderer *renderer) {
     }
     uint32_t uploads = host_d3d_total_textures();
     HostCommandStorageStats warmed{};
-    id<MTLTexture> warmed_targets[4];
+    gpu::Texture warmed_targets[4];
     for (int batch = 0; batch < 26; ++batch) {
-        id<MTLTexture> targets[4];
+        gpu::Texture targets[4];
         for (int i = 0; i < 4; ++i) {
             uint64_t f = 17000 + batch * 4 + i;
             // Distinct generations force slot selection, rather than the
             // standalone renderer's same-surface fast path.
             host_d3d_bind_generation(&surface.desc, batch * 4 + i + 1, f);
-            targets[i] = renderer.colorTarget;
+            targets[i] = renderer->colorTarget();
             if (!batch)
                 warmed_targets[i] = targets[i];
             else
                 CHECK(targets[i] == warmed_targets[i]);
             for (int j = 0; j < i; ++j)
                 CHECK(targets[i] != targets[j]);
-            [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
+            renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
             for (int t = 0; t < 3; ++t) {
                 host_d3d_texture(&textures[t]);
-                CHECK([renderer retainTexture:textures[t].handle revision:textures[t].revision]);
-                [renderer draw:&draws[t].cmd revision:textures[t].revision];
+                CHECK(renderer->retainTexture(textures[t].handle, textures[t].revision));
+                renderer->draw(&draws[t].cmd, textures[t].revision);
             }
             host_d3d_seal_frame(f);
         }
         for (int i = 0; i < 4; ++i) {
             uint64_t f = 17000 + batch * 4 + i;
-            [[renderer completionForFrame:f] waitUntilCompleted];
-            CHECK_EQ([renderer completionForFrame:f].status, MTLCommandBufferStatusCompleted);
+            g_gpu->wait(renderer->completionForFrame(f));
+            CHECK(g_gpu->status(renderer->completionForFrame(f)) == gpu::CommandStatus::Completed);
             host_d3d_retire_frame(f);
             for (auto &t : textures)
-                [renderer releaseTexture:t.handle revision:t.revision];
+                renderer->releaseTexture(t.handle, t.revision);
         }
         if (!batch)
-            warmed = [renderer commandStorageStats];
+            warmed = renderer->commandStorageStats();
         else {
-            auto now = [renderer commandStorageStats];
+            auto now = renderer->commandStorageStats();
             CHECK_EQ(now.cpu_growths, warmed.cpu_growths);
             CHECK_EQ(now.argument_buffers, warmed.argument_buffers);
             CHECK_EQ(now.scene_textures, warmed.scene_textures);
@@ -4449,44 +4432,44 @@ static void test_unchanged_uploads_and_command_pool(PopD3DRenderer *renderer) {
     CHECK(r < 40);
     CHECK(g < 40);
     // A changed revision uploads once and keeps the prior leased revision.
-    CHECK([renderer retainTexture:textures[0].handle revision:textures[0].revision]);
+    CHECK(renderer->retainTexture(textures[0].handle, textures[0].revision));
     ++textures[0].revision;
     textures[0].pixels = &colors[2];
     host_d3d_texture(&textures[0]);
     CHECK_EQ(host_d3d_total_textures(), uploads + 1);
-    CHECK([renderer hasTexture:textures[0].handle revision:textures[0].revision - 1]);
-    [renderer releaseTexture:textures[0].handle revision:textures[0].revision - 1];
-    CHECK(![renderer hasTexture:textures[0].handle revision:textures[0].revision - 1]);
+    CHECK(renderer->hasTexture(textures[0].handle, textures[0].revision - 1));
+    renderer->releaseTexture(textures[0].handle, textures[0].revision - 1);
+    CHECK(!renderer->hasTexture(textures[0].handle, textures[0].revision - 1));
     host_d3d_texture(&textures[0]);
     CHECK_EQ(host_d3d_total_textures(), uploads + 1);
     // A real size change allocates once; returning to a free slot of that
     // size reuses its resources and does not carry the old depth contents.
-    [renderer setSceneWidth:1280 height:960];
+    renderer->setSceneWidth(1280, 960);
     host_d3d_bind_generation(&surface.desc, 999, 18000);
-    CHECK_EQ(renderer.colorTarget.width, 1280u);
-    CHECK_EQ(renderer.colorTarget.height, 960u);
-    auto resized = [renderer commandStorageStats];
+    CHECK_EQ(target_desc(renderer).width, 1280);
+    CHECK_EQ(target_desc(renderer).height, 960);
+    auto resized = renderer->commandStorageStats();
     CHECK(resized.scene_textures > warmed.scene_textures);
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff00ff00 depth:1];
+    renderer->clearFlags(3, nullptr, 0, 0xff00ff00, 1);
     host_d3d_seal_frame(18000);
     host_d3d_retire_frame(18000);
     host_d3d_bind_generation(&surface.desc, 1000, 18001);
-    CHECK_EQ([renderer commandStorageStats].scene_textures, resized.scene_textures);
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff0000ff depth:1];
+    CHECK_EQ(renderer->commandStorageStats().scene_textures, resized.scene_textures);
+    renderer->clearFlags(3, nullptr, 0, 0xff0000ff, 1);
     host_d3d_seal_frame(18001);
     host_d3d_retire_frame(18001);
     rb = read_target(renderer);
     rb.rgb(2, 2, &r, &g, &b, &a);
     CHECK(b > 200);
     CHECK(g < 40);
-    [renderer setSceneWidth:0 height:0];
+    renderer->setSceneWidth(0, 0);
     g_t4_claim_frames = false;
-    [renderer discard];
+    renderer->discard();
 }
 
-static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer) {
+static void test_texture_revision_leased_through_frame(D3DRenderer *renderer) {
     Surface surface(21, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
     host_render_reset_for_test();
 
     uint16_t red[1] = {0xf800};
@@ -4504,12 +4487,12 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
 
     tex.revision = 1;
     tex.pixels = red;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
     CHECK(host_render_texture_revision_alive_for_test(7, 1));
 
     // The frame takes its lease at submission, before the guest can upload
     // again.
-    [renderer retainTexture:7 revision:1];
+    renderer->retainTexture(7, 1);
 
     Command quad;
     quad.cmd.texture_handle = 7;
@@ -4526,13 +4509,13 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
     // alone would paint this one.
     tex.revision = 2;
     tex.pixels = blue;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
     CHECK(host_render_texture_revision_alive_for_test(7, 2));
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd revision:1];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd, 1);
+    renderer->endScene();
 
     Readback rb = read_target(renderer);
     int r, g, b, a;
@@ -4542,10 +4525,10 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
 
     // A draw naming the newer revision gets the newer pixels, so this is a
     // choice the renderer is making rather than a stale table.
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd revision:2];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd, 2);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(10, 10, &r, &g, &b, &a);
     CHECK(b > 200);
@@ -4554,7 +4537,7 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
     // The old revision is alive because the frame holds it, not because the
     // renderer kept every upload: releasing is what drops it.
     CHECK(host_render_texture_revision_alive_for_test(7, 1));
-    [renderer releaseTexture:7 revision:1];
+    renderer->releaseTexture(7, 1);
     CHECK(!host_render_texture_revision_alive_for_test(7, 1));
     // The current revision stays, held by nothing: it is what the next draw
     // that names no revision will sample.
@@ -4564,12 +4547,12 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
     // level of texture animation does not accumulate one texture per frame.
     tex.revision = 3;
     tex.pixels = red;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
     CHECK(!host_render_texture_revision_alive_for_test(7, 2));
     CHECK(host_render_texture_revision_alive_for_test(7, 3));
 
     // And destroying the handle takes everything that is not held with it.
-    [renderer destroyTexture:7];
+    renderer->destroyTexture(7);
     CHECK(!host_render_texture_revision_alive_for_test(7, 3));
 
     // An upload cannot replace a revision a frame is holding. The shim bumps
@@ -4578,10 +4561,10 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
     // would put new pixels under a frame that has not been composited.
     tex.revision = 9;
     tex.pixels = red;
-    [renderer uploadTexture:&tex];
-    CHECK([renderer retainTexture:7 revision:9]);
+    renderer->uploadTexture(&tex);
+    CHECK(renderer->retainTexture(7, 9));
     tex.pixels = blue;
-    [renderer uploadTexture:&tex]; // same key, while it is held
+    renderer->uploadTexture(&tex); // same key, while it is held
     Command probe;
     probe.cmd.texture_handle = 7;
     probe.state[1] = 7;
@@ -4591,25 +4574,25 @@ static void test_texture_revision_leased_through_frame(PopD3DRenderer *renderer)
     probe.tlvertex(64, 0, 0.5f, 0xffffffff, 1, 0);
     probe.tlvertex(0, 64, 0.5f, 0xffffffff, 0, 1);
     probe.tlvertex(64, 64, 0.5f, 0xffffffff, 1, 1);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&probe.cmd revision:9];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&probe.cmd, 9);
+    renderer->endScene();
     rb = read_target(renderer);
     rb.rgb(10, 10, &r, &g, &b, &a);
     CHECK(r > 200); // still what the frame holds
     CHECK(b < 60);
-    [renderer releaseTexture:7 revision:9];
+    renderer->releaseTexture(7, 9);
 
     // Asking to hold a revision the renderer never received says so, rather
     // than passing silently and leaving a draw naming pixels it does not have.
-    CHECK(![renderer retainTexture:7 revision:99]);
+    CHECK(!renderer->retainTexture(7, 99));
 }
 
 // Exercise real GPU output with channels that cannot survive RGB565.
-static void test_render_rgba32(PopD3DRenderer *renderer) {
+static void test_render_rgba32(D3DRenderer *renderer) {
     Surface surface(811, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
     uint8_t pixels[24] = {19, 73, 141, 255, 93,  157, 211, 255, 0, 0, 0, 0,
                           31, 83, 151, 255, 101, 163, 223, 255, 0, 0, 0, 0};
     HostD3DTexture t{};
@@ -4633,11 +4616,11 @@ static void test_render_rgba32(PopD3DRenderer *renderer) {
     q.tlvertex(64, 64, .5f, 0xffffffff, 1, 1);
     for (int bpp : {32, 24}) {
         t.bpp = bpp;
-        [renderer uploadTexture:&t];
-        [renderer beginScene];
-        [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-        [renderer draw:&q.cmd];
-        [renderer endScene];
+        renderer->uploadTexture(&t);
+        renderer->beginScene();
+        renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
+        renderer->draw(&q.cmd);
+        renderer->endScene();
         auto rb = read_target(renderer);
         int r, g, b, a;
         rb.rgb(8, 8, &r, &g, &b, &a);
@@ -4654,26 +4637,26 @@ static void test_render_rgba32(PopD3DRenderer *renderer) {
         for (int x = 0; x < 2; ++x)
             pixels[y * 12 + x * 4 + 3] = 128;
     t.bpp = 32;
-    [renderer uploadTexture:&t];
+    renderer->uploadTexture(&t);
     q.state[27] = 1;
     q.state[19] = 5;
     q.state[20] = 6;
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-    [renderer draw:&q.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
+    renderer->draw(&q.cmd);
+    renderer->endScene();
     auto rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(8, 8, &r, &g, &b, &a);
     CHECK(abs(r - 10) <= 1);
     CHECK(abs(g - 37) <= 1);
     CHECK(abs(b - 71) <= 1);
-    [renderer destroyTexture:811];
+    renderer->destroyTexture(811);
 }
 
-static void test_render_texture_versioning(PopD3DRenderer *renderer) {
+static void test_render_texture_versioning(D3DRenderer *renderer) {
     Surface surface(9, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     uint16_t red[1] = {0xf800};
     uint16_t green[1] = {0x07e0};
@@ -4689,7 +4672,7 @@ static void test_render_texture_versioning(PopD3DRenderer *renderer) {
     tex.bmask = 0x001f;
 
     tex.pixels = red;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
 
     Command left;
     left.cmd.texture_handle = 11;
@@ -4708,13 +4691,13 @@ static void test_render_texture_versioning(PopD3DRenderer *renderer) {
     right.tlvertex(32, 64, 0.5f, 0xffffffff, 0, 1);
     right.tlvertex(64, 64, 0.5f, 0xffffffff, 1, 1);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&left.cmd]; // samples red, not yet executed
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&left.cmd); // samples red, not yet executed
     tex.pixels = green;
-    [renderer uploadTexture:&tex]; // the same handle, new contents
-    [renderer draw:&right.cmd];    // samples green
-    [renderer endScene];
+    renderer->uploadTexture(&tex); // the same handle, new contents
+    renderer->draw(&right.cmd);    // samples green
+    renderer->endScene();
 
     Readback rb = read_target(renderer);
     int r, g, b, a;
@@ -4724,14 +4707,14 @@ static void test_render_texture_versioning(PopD3DRenderer *renderer) {
     rb.rgb(56, 32, &r, &g, &b, &a);
     CHECK_EQ(g, 255);
     CHECK_EQ(r, 0);
-    [renderer destroyTexture:11];
+    renderer->destroyTexture(11);
 }
 
 // The device advertises the mip filters, so the levels have to exist: a
 // heavily minified checkerboard has to average rather than pick one texel.
-static void test_render_mipmaps(PopD3DRenderer *renderer) {
+static void test_render_mipmaps(D3DRenderer *renderer) {
     Surface surface(10, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     std::vector<uint16_t> checker(64 * 64);
     for (int y = 0; y < 64; ++y)
@@ -4748,7 +4731,7 @@ static void test_render_mipmaps(PopD3DRenderer *renderer) {
     tex.rmask = 0xf800;
     tex.gmask = 0x07e0;
     tex.bmask = 0x001f;
-    [renderer uploadTexture:&tex];
+    renderer->uploadTexture(&tex);
 
     // The whole texture squeezed into 2x2 pixels, with a mip filter.
     Command quad;
@@ -4762,31 +4745,31 @@ static void test_render_mipmaps(PopD3DRenderer *renderer) {
     quad.tlvertex(0, 2, 0.5f, 0xffffffff, 0, 1);
     quad.tlvertex(2, 2, 0.5f, 0xffffffff, 1, 1);
 
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&quad.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&quad.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(0, 0, &r, &g, &b, &a);
     // Half red and half blue averaged: both channels present, neither full.
     CHECK(r > 60 && r < 200);
     CHECK(b > 60 && b < 200);
-    [renderer destroyTexture:12];
+    renderer->destroyTexture(12);
 }
 
-static void test_render_lines_and_points(PopD3DRenderer *renderer) {
+static void test_render_lines_and_points(D3DRenderer *renderer) {
     Surface surface(13, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     Command line;
     line.cmd.primitive_type = 2; // D3DPT_LINELIST
     line.tlvertex(0.5f, 32.5f, 0.5f, 0xffffffff);
     line.tlvertex(63.5f, 32.5f, 0.5f, 0xffffffff);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&line.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&line.cmd);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     int lit = 0;
@@ -4802,10 +4785,10 @@ static void test_render_lines_and_points(PopD3DRenderer *renderer) {
     Command point;
     point.cmd.primitive_type = 1; // D3DPT_POINTLIST
     point.tlvertex(32.5f, 32.5f, 0.5f, 0xff00ff00);
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer draw:&point.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->draw(&point.cmd);
+    renderer->endScene();
     rb = read_target(renderer);
     lit = 0;
     for (int y = 31; y <= 33; ++y)
@@ -4817,16 +4800,16 @@ static void test_render_lines_and_points(PopD3DRenderer *renderer) {
     CHECK(lit >= 1);
 }
 
-static void test_render_rect_clear(PopD3DRenderer *renderer) {
+static void test_render_rect_clear(D3DRenderer *renderer) {
     Surface surface(14, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
 
     // A clear with a rectangle touches that rectangle and nothing else.
     int32_t rect[4] = {0, 0, 32, 32};
-    [renderer beginScene];
-    [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000u depth:1.0f];
-    [renderer clearFlags:1 rects:rect count:1 color:0xff00ff00u depth:1.0f];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->clearFlags(3, nullptr, 0, 0xff000000u, 1.0f);
+    renderer->clearFlags(1, rect, 1, 0xff00ff00u, 1.0f);
+    renderer->endScene();
     Readback rb = read_target(renderer);
     int r, g, b, a;
     rb.rgb(16, 16, &r, &g, &b, &a);
@@ -4839,9 +4822,9 @@ static void test_render_rect_clear(PopD3DRenderer *renderer) {
 // is fed only by frames the Direct3D device drew into. The signal is the draw
 // count since the last present: the front end renders in software and submits
 // none at all.
-static void test_gameplay_signal(PopD3DRenderer *renderer) {
+static void test_gameplay_signal(D3DRenderer *renderer) {
     Surface surface(40, 64, 64);
-    [renderer setRenderTarget:&surface.desc];
+    renderer->setRenderTarget(&surface.desc);
     host_d3d_note_presented();
     CHECK_EQ(host_d3d_draws_since_present(), 0);
 
@@ -4853,9 +4836,9 @@ static void test_gameplay_signal(PopD3DRenderer *renderer) {
 
     Command tri;
     tri.triangle(0.5f, 0xffff0000);
-    [renderer beginScene];
-    [renderer draw:&tri.cmd];
-    [renderer endScene];
+    renderer->beginScene();
+    renderer->draw(&tri.cmd);
+    renderer->endScene();
     CHECK_EQ(host_d3d_draws_since_present(), 1);
 
     // A present consumes the signal: the next frame's draws are the next
@@ -5423,7 +5406,7 @@ static void test_presenter_migration_cancels_old_drawable() {
     host_present_stop();
 }
 
-static void test_presenter_real_offscreen(PopD3DRenderer *renderer) {
+static void test_presenter_real_offscreen(D3DRenderer *renderer) {
     host_present_start_offscreen(4, 4);
     uint8_t rgba[64];
     for (int i = 0; i < 16; ++i) {
@@ -5517,13 +5500,13 @@ static void test_layered_gameplay_skips_unused_compatibility_pixels() {
     g_t5_legacy_frame = 0;
     CHECK_EQ(host_present_needs_legacy_pixels(), 1); // stopped/unknown is conservative
 }
-static void test_wide_scene_pixels(PopD3DRenderer *renderer) {
+static void test_wide_scene_pixels(D3DRenderer *renderer) {
     // Exercise both shipping game modes and return to the first mode. Vertices
     // beyond the selected surface width must survive the real Metal viewport.
     for (int height : {480, 600, 480}) {
         const int width = height * 4 / 3, domain = height == 600 ? 1065 : 852;
-        [renderer discard];
-        [PopD3DRenderer setShared:renderer];
+        renderer->discard();
+        D3DRenderer::setShared(renderer);
         host_d3d_reset_coherence();
         host_present_start_offscreen(domain * 2, height * 2);
         Surface surface(881, width, height);
@@ -5571,10 +5554,10 @@ static void test_wide_scene_pixels(PopD3DRenderer *renderer) {
         host_present_stop();
         host_d3d_retire_frame(9002);
         test_scene_width = 0;
-        [renderer discard];
+        renderer->discard();
     }
 }
-static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
+static void test_hd_pack_and_classic_isolation(D3DRenderer *original) {
     char dir[] = "/tmp/pop-hd-test-XXXXXX";
     CHECK(mkdtemp(dir) != nullptr);
     const auto file = std::filesystem::path(dir) / "0000000000001234.popt";
@@ -5629,9 +5612,9 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
     auto r = make_renderer();
     CHECK(r != nil);
-    [PopD3DRenderer setShared:r];
+    D3DRenderer::setShared(r);
     for (int variant = 0; r && variant < 5; ++variant) {
-        [r discard];
+        r->discard();
         host_d3d_reset_coherence();
         test_hd = variant != 0;
         test_classic = variant == 2;
@@ -5648,7 +5631,7 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
         t.bpp = 16;
         t.pixels = &red;
         t.content_hash = variant == 4 ? 0x5678 : 0x1234;
-        [r uploadTexture:&t];
+        r->uploadTexture(&t);
         Command q;
         q.cmd.primitive_type = 5;
         q.cmd.texture_handle = 991;
@@ -5658,8 +5641,8 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
         q.tlvertex(64, 0, .5f, 0xffffffff, 1, 0);
         q.tlvertex(0, 64, .5f, 0xffffffff, 0, 1);
         q.tlvertex(64, 64, .5f, 0xffffffff, 1, 1);
-        [r clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-        [r draw:&q.cmd revision:variant + 1];
+        r->clearFlags(3, nullptr, 0, 0xff000000, 1);
+        r->draw(&q.cmd, variant + 1);
         auto rb = read_target(r);
         int redc, g, b, a;
         rb.rgb(32, 32, &redc, &g, &b, &a);
@@ -5668,15 +5651,15 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
         CHECK_EQ(b, variant == 1 ? 141 : 0);
         host_present_stop();
         host_d3d_retire_frame(9987);
-        [r discard];
+        r->discard();
     }
-    CHECK(r.hdTextureStats.draws > 0);
-    CHECK_EQ(r.hdTextureStats.loads, 1);
-    CHECK_EQ(r.hdTextureStats.refused, 1);
-    CHECK(r.hdTextureStats.resident_bytes <= r.hdTextureStats.budget_bytes);
+    CHECK(r->hdTextureStats().draws > 0);
+    CHECK_EQ(r->hdTextureStats().loads, 1);
+    CHECK_EQ(r->hdTextureStats().refused, 1);
+    CHECK(r->hdTextureStats().resident_bytes <= r->hdTextureStats().budget_bytes);
     test_hd = test_classic = 0;
     g_t5_legacy_frame = 0;
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
     if (had)
         setenv("POPM_TEXTURE_PACK_DIR", saved.c_str(), 1);
     else
@@ -5688,7 +5671,7 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
     std::filesystem::remove_all(dir);
 }
 
-static void test_terrain_material_detail(PopD3DRenderer *original) {
+static void test_terrain_material_detail(D3DRenderer *original) {
     char dir[] = "/tmp/pop-terrain-detail-XXXXXX";
     CHECK(mkdtemp(dir) != nullptr);
     const auto file = std::filesystem::path(dir) / "terrain-detail.popt";
@@ -5724,9 +5707,9 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
     auto renderer = make_renderer();
     CHECK(renderer != nil);
-    [PopD3DRenderer setShared:renderer];
+    D3DRenderer::setShared(renderer);
     for (int variant = 0; renderer && variant < 8; ++variant) {
-        [renderer discard];
+        renderer->discard();
         host_d3d_reset_coherence();
         test_hd = variant != 1;
         test_classic = variant == 2;
@@ -5750,7 +5733,7 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
             t.content_hash = 0x3456;
         if (variant == 6)
             t.amask = 0x8000; // a sprite format must remain untouched
-        [renderer uploadTexture:&t];
+        renderer->uploadTexture(&t);
         Command q;
         q.cmd.primitive_type = 5;
         q.cmd.texture_handle = 992;
@@ -5762,8 +5745,8 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
         q.tlvertex(64, 0, .5f, 0xffffffff, hi, 0);
         q.tlvertex(0, 64, .5f, 0xffffffff, 0, hi);
         q.tlvertex(64, 64, .5f, 0xffffffff, hi, hi);
-        [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-        [renderer draw:&q.cmd revision:variant + 1];
+        renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
+        renderer->draw(&q.cmd, variant + 1);
         auto rb = read_target(renderer);
         int r, g, b, a;
         rb.rgb(32, 32, &r, &g, &b, &a);
@@ -5774,14 +5757,14 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
             CHECK_NEAR(g, expected_g, 1);
         host_present_stop();
         host_d3d_retire_frame(9988);
-        [renderer discard];
+        renderer->discard();
     }
-    CHECK_EQ(renderer.hdTextureStats.detail_draws,
+    CHECK_EQ(renderer->hdTextureStats().detail_draws,
              2); // land and water; water's shader mask is zero
-    CHECK(renderer.hdTextureStats.resident_bytes <= renderer.hdTextureStats.budget_bytes);
+    CHECK(renderer->hdTextureStats().resident_bytes <= renderer->hdTextureStats().budget_bytes);
     test_hd = test_classic = 0;
     g_t5_legacy_frame = 0;
-    [PopD3DRenderer setShared:original];
+    D3DRenderer::setShared(original);
     if (had)
         setenv("POPM_TEXTURE_PACK_DIR", saved.c_str(), 1);
     else
@@ -5789,13 +5772,13 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
     std::filesystem::remove_all(dir);
 }
 
-static void test_native_tile_borders(PopD3DRenderer *renderer) {
+static void test_native_tile_borders(D3DRenderer *renderer) {
     // Red/green opposite texture edges expose accidental wrap filtering:
     // a complete native tile must stay red at its left edge. Repeating UVs,
     // explicitly wrapped polygons, and Classic must retain the mixed border.
     for (int variant = 0; variant < 4; ++variant) {
-        [renderer discard];
-        [PopD3DRenderer setShared:renderer];
+        renderer->discard();
+        D3DRenderer::setShared(renderer);
         host_d3d_reset_coherence();
         test_classic = variant == 3;
         host_present_start_offscreen(128, 128);
@@ -5808,7 +5791,7 @@ static void test_native_tile_borders(PopD3DRenderer *renderer) {
         tex.width = tex.height = 2;
         tex.pitch = 4;
         tex.bpp = 16;
-        [renderer uploadTexture:&tex];
+        renderer->uploadTexture(&tex);
         Command quad;
         quad.cmd.primitive_type = 5;
         quad.cmd.texture_handle = 988;
@@ -5822,8 +5805,8 @@ static void test_native_tile_borders(PopD3DRenderer *renderer) {
         quad.tlvertex(64, 0, .5f, 0xffffffff, max_u, 0);
         quad.tlvertex(0, 64, .5f, 0xffffffff, 0, 1);
         quad.tlvertex(64, 64, .5f, 0xffffffff, max_u, 1);
-        [renderer clearFlags:3 rects:nullptr count:0 color:0xff000000 depth:1];
-        [renderer draw:&quad.cmd];
+        renderer->clearFlags(3, nullptr, 0, 0xff000000, 1);
+        renderer->draw(&quad.cmd);
         auto rb = read_target(renderer);
         int r, g, b, a;
         rb.rgb(1, rb.h / 2, &r, &g, &b, &a);
@@ -5837,18 +5820,18 @@ static void test_native_tile_borders(PopD3DRenderer *renderer) {
         host_present_stop();
         host_d3d_retire_frame(9003 + variant);
         test_classic = 0;
-        [renderer discard];
+        renderer->discard();
     }
 }
-static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *renderer) {
-    [renderer discard];
-    [PopD3DRenderer setShared:renderer];
+static void test_presenter_incremental_world_and_overlay(D3DRenderer *renderer) {
+    renderer->discard();
+    D3DRenderer::setShared(renderer);
     host_d3d_reset_coherence();
     host_present_start_offscreen(128, 128);
     Surface surface(880, 64, 64);
     host_d3d_bind_generation(&surface.desc, 1, 9000);
     auto target = host_present_acquire_target(64, 64, 128, 128);
-    CHECK(renderer.colorTarget == present_native(target.world));
+    CHECK(renderer->colorTarget() == target.world);
     CHECK_EQ(target.w, 128);
     HostD3DDrawSnapshot clear{};
     clear.kind = HOST_DRAW_CLEAR;
@@ -5923,7 +5906,7 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     host_present_stop();
     host_d3d_retire_frame(9000);
     g_t5_mapping = HOST_MAPPING_SCENE;
-    [renderer discard];
+    renderer->discard();
 
     // Classic keeps the CPU HUD and the subsequent UI-mapped primitive in
     // the same guest-resolution surface, then aspect-fits it at presentation.
@@ -5934,7 +5917,7 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     target = host_present_acquire_target(64, 64, 128, 96);
     CHECK_EQ(target.w, 64);
     CHECK_EQ(target.h, 64);
-    CHECK(renderer.colorTarget == present_native(target.world));
+    CHECK(renderer->colorTarget() == target.world);
     g_t5_mapping = HOST_MAPPING_SCENE;
     host_d3d_draw(&clear);
     cpu.dst_generation = 2;
@@ -5988,7 +5971,7 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     host_d3d_retire_frame(9001);
     test_classic = 0;
     g_t5_mapping = HOST_MAPPING_SCENE;
-    [renderer discard];
+    renderer->discard();
 }
 
 static void test_presentation_service() {
@@ -8743,7 +8726,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
             host_present_set_device(g_gpu.get());
-            PopD3DRenderer *renderer = make_renderer();
+            D3DRenderer *renderer = make_renderer();
             if (!renderer)
                 return 1;
             test_presenter_real_offscreen(renderer);
@@ -8865,16 +8848,16 @@ int main(int argc, char **argv) {
             return g_failures ? 1 : 2;
         }
         host_present_set_device(g_gpu.get());
-        PopD3DRenderer *renderer = make_renderer();
+        D3DRenderer *renderer = make_renderer();
         if (!renderer) {
             fprintf(stderr, "FAIL: the renderer would not initialise\n");
             return 1;
         }
-        [PopD3DRenderer setShared:renderer];
+        D3DRenderer::setShared(renderer);
 
         struct {
             const char *name;
-            void (*fn)(PopD3DRenderer *);
+            void (*fn)(D3DRenderer *);
         } gpu[] = {
             {"offscreen presenter", test_presenter_real_offscreen},
             {"presenter world and overlay", test_presenter_incremental_world_and_overlay},

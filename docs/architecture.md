@@ -44,7 +44,7 @@ requests for the guest thread rather than directly executing guest functions.
 ## A frame through the host
 
 1. The original game submits DirectDraw/Direct3D operations to `dx/`.
-2. `host/d3d_render.mm` translates draws and texture revisions into Metal commands.
+2. `host/d3d_render.cpp` translates draws and texture revisions into GPU commands over `host/gpu/gpu.h`.
 3. `host/ui_layer.cpp` extracts UI elements from recorded blits.
 4. `host/present_thread.cpp` seals the frame, retains its resources and queues it.
 5. `host/compositor.cpp` combines world, UI and overlays for presentation.

@@ -11,7 +11,8 @@ these inputs.
 - Vertex and fragment bytes slot 1: `D3DUniforms` (`d3d_render.h`): `float mvp[16]` column-major, then
   `uint32 pretransformed, textured, texblend, alphatest, alphafunc; float alpharef; uint32 specular,
   texture_has_alpha, fogmode; float fogstart, fogend, fogdensity, fogr, fogg, fogb, pointsize;
-  uint32 terrain_detail`. 112 bytes, no padding.
+  uint32 terrain_detail`. 132 bytes of fields; the C struct is 16-byte aligned (144 bytes) and
+  the backend receives it whole.
 - Fragment texture 0 + sampler 0: the draw's texture. Fragment texture 1 + sampler 1: terrain detail.
 - Outputs: colour attachment 0 (BGRA8) and coverage attachment 1 (R8, 1.0 for every surviving fragment).
 - Semantics: texblend cases 1/7 decal, 2 modulate, 3 decal alpha, 4 modulate alpha, 5 decal mask,

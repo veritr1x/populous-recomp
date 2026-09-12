@@ -63,6 +63,8 @@ MTLBlendFactor blend(Blend b) {
         return MTLBlendFactorDestinationColor;
     case Blend::OneMinusDstColor:
         return MTLBlendFactorOneMinusDestinationColor;
+    case Blend::SrcAlphaSaturated:
+        return MTLBlendFactorSourceAlphaSaturated;
     }
     return MTLBlendFactorOne;
 }
@@ -95,6 +97,8 @@ MTLSamplerAddressMode address(Address a) {
         return MTLSamplerAddressModeClampToEdge;
     case Address::MirrorRepeat:
         return MTLSamplerAddressModeMirrorRepeat;
+    case Address::ClampToBorder:
+        return MTLSamplerAddressModeClampToBorderColor;
     }
     return MTLSamplerAddressModeClampToEdge;
 }
@@ -759,6 +763,42 @@ void MetalDevice::blit(CommandBuffer cb, Texture src, Region r, Texture dst, int
                      destinationLevel:0
                     destinationOrigin:MTLOriginMake(dst_x, dst_y, 0)];
 }
+void MetalDevice::copy_buffer_to_texture(CommandBuffer cb, Buffer src, uint64_t offset, int pitch,
+                                         Texture dst, Region r) {
+    std::lock_guard lock(mutex_);
+    Cmd *c = cmd(cb);
+    auto b = buffers_.find(src.id);
+    auto d = textures_.find(dst.id);
+    if (!c || b == buffers_.end() || d == textures_.end() || r.w <= 0 || r.h <= 0)
+        return;
+    [blit_encoder(*c) copyFromBuffer:b->second
+                        sourceOffset:offset
+                   sourceBytesPerRow:pitch
+                 sourceBytesPerImage:NSUInteger(pitch) * r.h
+                          sourceSize:MTLSizeMake(r.w, r.h, 1)
+                           toTexture:d->second.texture
+                    destinationSlice:0
+                    destinationLevel:0
+                   destinationOrigin:MTLOriginMake(r.x, r.y, 0)];
+}
+void MetalDevice::copy_texture_to_buffer(CommandBuffer cb, Texture src, Region r, Buffer dst,
+                                         uint64_t offset, int pitch) {
+    std::lock_guard lock(mutex_);
+    Cmd *c = cmd(cb);
+    auto s = textures_.find(src.id);
+    auto b = buffers_.find(dst.id);
+    if (!c || s == textures_.end() || b == buffers_.end() || r.w <= 0 || r.h <= 0)
+        return;
+    [blit_encoder(*c) copyFromTexture:s->second.texture
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(r.x, r.y, 0)
+                           sourceSize:MTLSizeMake(r.w, r.h, 1)
+                             toBuffer:b->second
+                    destinationOffset:offset
+               destinationBytesPerRow:pitch
+             destinationBytesPerImage:NSUInteger(pitch) * r.h];
+}
 void MetalDevice::generate_mipmaps(CommandBuffer cb, Texture t) {
     std::lock_guard lock(mutex_);
     Cmd *c = cmd(cb);
@@ -825,13 +865,21 @@ CommandStatus MetalDevice::status(CommandBuffer cb) {
     id<MTLCommandBuffer> buffer;
     {
         std::lock_guard lock(mutex_);
+        if (commands_.count(cb.id))
+            return CommandStatus::Pending;
         auto it = committed_.find(cb.id);
         if (it == committed_.end())
             return CommandStatus::Completed;
         buffer = it->second;
     }
-    return buffer.status == MTLCommandBufferStatusError ? CommandStatus::Error
-                                                        : CommandStatus::Completed;
+    switch (buffer.status) {
+    case MTLCommandBufferStatusError:
+        return CommandStatus::Error;
+    case MTLCommandBufferStatusCompleted:
+        return CommandStatus::Completed;
+    default:
+        return CommandStatus::Pending;
+    }
 }
 
 // --- swapchain (see metal_surface.mm for the layer side) --------------------

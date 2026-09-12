@@ -1,5 +1,5 @@
 #include "../dx/passes.h"
-// d3d_render.mm - the Metal renderer behind host_d3d_draw.
+// d3d_render.cpp - the renderer behind host_d3d_draw, over gpu.h.
 //
 // src/recomp/dx/d3d.cpp records; this rasterizes. Every DrawPrimitive and
 // DrawIndexedPrimitive arrives as one HostD3DDraw carrying the vertices, a
@@ -28,30 +28,29 @@
 // lights before it draws, so its vertices arrive as D3DVT_TLVERTEX with the
 // colour already in them.
 //
-// Nothing here opens a window.
+// Nothing here opens a window, and nothing here names a GPU API: the shaders
+// are the programs gpu/shaders.md describes, bound by slot number.
 #include "d3d_render.h"
-#include "gpu/metal/metal_bridge.h"
-#include "texture_pixels.h"
-#include "texture_pack.h"
-#include <mach-o/dyld.h>
-#include "present.h"
+#include "../platform/os.h"
 #include "../runtime/display_seam.h"
+#include "present.h"
+#include "texture_pack.h"
+#include "texture_pixels.h"
 
-#import <Metal/Metal.h>
-#import <QuartzCore/QuartzCore.h>
-
-#include <dispatch/dispatch.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <map>
-#include <string>
-#include <vector>
 #include <algorithm>
 #include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <string>
+#include <thread>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Render state numbering, from src/recomp/dx/dxtypes.h. Repeated here as the
@@ -381,240 +380,10 @@ extern "C" void host_d3d_reset_readback_metrics(void) {
     g_peak_nonblack = 0.0;
 }
 
-// ---------------------------------------------------------------------------
-// The shader. One pipeline shape for every draw: what changes between draws is
-// the uniform block, the blend factors and the depth state.
-// ---------------------------------------------------------------------------
-static NSString *const kShader = @R"metal(
-#include <metal_stdlib>
-using namespace metal;
-
-struct HVertex {
-    float x, y, z, w;
-    float u, v;
-    float r, g, b, a;
-    float sr, sg, sb, sa;
-};
-struct Uniforms {
-    float4x4 mvp;
-    uint  pretransformed;
-    uint  textured;
-    uint  texblend;
-    uint  alphatest;
-    uint  alphafunc;
-    float alpharef;
-    uint  specular;
-    uint  texture_has_alpha;
-    uint  fogmode;        // 0 off, 1 vertex, 2 exp, 3 exp2, 4 linear
-    float fogstart, fogend, fogdensity;
-    float fogr, fogg, fogb;
-    float pointsize;
-    uint terrain_detail;
-};
-struct VOut {
-    float4 position [[position]];
-    float  size [[point_size]];
-    float2 uv;
-    float4 color;
-    float4 spec;
-    float  fogdist;
-};
-// Colour, and the coverage mask that says this pixel was rasterized. A
-// discarded fragment writes neither.
-struct FOut {
-    float4 color    [[color(0)]];
-    float  coverage [[color(1)]];
-};
-
-vertex VOut d3d_vertex(uint vid [[vertex_id]],
-                       const device HVertex* v [[buffer(0)]],
-                       constant Uniforms& u [[buffer(1)]]) {
-    HVertex s = v[vid];
-    VOut o;
-    o.position = u.pretransformed ? float4(s.x, s.y, s.z, s.w)
-                                  : u.mvp * float4(s.x, s.y, s.z, 1.0);
-    o.size = u.pointsize;
-    o.uv = float2(s.u, s.v);
-    o.color = float4(s.r, s.g, s.b, s.a);
-    o.spec = float4(s.sr, s.sg, s.sb, s.sa);
-    // Table fog is a function of eye-space distance, which after a standard
-    // projection is the clip w.
-    o.fogdist = abs(o.position.w);
-    return o;
-}
-
-// Shade a world fragment using the guest material and optional terrain detail.
-// Apply the legacy texture/alpha rules before writing color and coverage attachments.
-fragment FOut d3d_fragment(VOut in [[stage_in]],
-                           constant Uniforms& u [[buffer(1)]],
-                           texture2d<float> tex [[texture(0)]],
-                           sampler samp [[sampler(0)]],
-                           texture2d<float> detail [[texture(1)]],
-                           sampler detail_samp [[sampler(1)]]) {
-    float4 c = in.color;
-    if (u.textured != 0) {
-        float4 t = tex.sample(samp, in.uv);
-        if (u.terrain_detail != 0) {
-            // An independent material sample supplies real fine structures;
-            // enlarging the guest's 16/32 texels cannot create those. The
-            // source remains the color/lighting/coastline mask. Blue water
-            // fades this land-only layer out, including mixed shore texels.
-            float3 chroma = t.rgb / max(max(t.r, t.g), max(t.b, 0.01f));
-            float land = 1.0f - smoothstep(0.02f, 0.22f, chroma.b - chroma.r);
-            float grass = smoothstep(-0.03f, 0.16f, chroma.g - chroma.r);
-            float stone = 1.0f - smoothstep(0.06f, 0.28f, max(chroma.r, chroma.g) - min(chroma.r, min(chroma.g, chroma.b)));
-            float sand = smoothstep(0.28f, 0.62f, max(t.r, t.g));
-            float4 structure = (detail.sample(detail_samp, in.uv) * 255.0f - 128.0f) / 128.0f;
-            float material = mix(structure.a, structure.g, sand);
-            material = mix(material, structure.b, stone);
-            material = mix(material, structure.r, grass);
-            t.rgb = saturate(t.rgb * (1.0f + material * 0.85f * land));
-        }
-        switch (u.texblend) {
-            case 1: case 7:                                   // DECAL, COPY
-                c = t; break;
-            case 2:                                           // MODULATE
-                // The legacy rule: the texture's alpha when it has one,
-                // otherwise the diffuse's. Taking the vertex alpha from a
-                // vertex that never set it - and plenty of D3DTLVERTEX
-                // colours leave it at zero - makes every blended pixel
-                // invisible and the whole scene the colour of the clear.
-                c = float4(t.rgb * in.color.rgb,
-                           u.texture_has_alpha != 0 ? t.a : in.color.a);
-                break;
-            case 3:                                           // DECALALPHA
-                c = float4(mix(in.color.rgb, t.rgb, t.a), in.color.a); break;
-            case 5:                                           // DECALMASK
-                c = float4(t.rgb, in.color.a); break;
-            case 8:                                           // ADD
-                c = float4(saturate(t.rgb + in.color.rgb), in.color.a); break;
-            case 4:                                           // MODULATEALPHA
-                c = float4(t.rgb * in.color.rgb, t.a * in.color.a); break;
-            default:
-                c = float4(t.rgb * in.color.rgb,
-                           u.texture_has_alpha != 0 ? t.a : in.color.a);
-                break;
-        }
-    }
-    if (u.specular != 0) c = float4(saturate(c.rgb + in.spec.rgb), c.a);
-    if (u.alphatest != 0) {
-        bool pass;
-        switch (u.alphafunc) {
-            case 1: pass = false;                break;   // NEVER
-            case 2: pass = c.a <  u.alpharef;    break;   // LESS
-            case 3: pass = c.a == u.alpharef;    break;   // EQUAL
-            case 4: pass = c.a <= u.alpharef;    break;   // LESSEQUAL
-            case 5: pass = c.a >  u.alpharef;    break;   // GREATER
-            case 6: pass = c.a != u.alpharef;    break;   // NOTEQUAL
-            case 7: pass = c.a >= u.alpharef;    break;   // GREATEREQUAL
-            default: pass = true;                break;   // ALWAYS
-        }
-        if (!pass) discard_fragment();
-    }
-    if (u.fogmode != 0) {
-        // The fog factor is how much of the fragment survives: 1 is clear.
-        float f = 1.0;
-        float d = in.fogdist;
-        switch (u.fogmode) {
-            case 1: f = in.spec.a; break;                          // vertex fog
-            case 2: f = exp(-u.fogdensity * d); break;             // EXP
-            case 3: f = exp(-(u.fogdensity * d) * (u.fogdensity * d)); break;
-            default:                                               // LINEAR
-                f = (u.fogend - d) / max(u.fogend - u.fogstart, 1e-6);
-                break;
-        }
-        f = saturate(f);
-        c = float4(mix(float3(u.fogr, u.fogg, u.fogb), c.rgb, f), c.a);
-    }
-    FOut o;
-    o.color = c;
-    o.coverage = 1.0;
-    return o;
-}
-// Reduce guest-visible reads on the GPU; never decompress a 4K texture on
-// the CPU merely to select 640x480 pixel centres. Each lane also counts its
-// disjoint native cell so existing full-resolution diagnostics stay exact.
-kernel void guest_readback_fused(texture2d<float, access::read> color [[texture(0)]],
-                           texture2d<float, access::read> coverage [[texture(1)]],
-                           device uint2* output [[buffer(0)]],
-                           constant uint4* p [[buffer(1)]],
-                           uint2 tid [[thread_position_in_grid]]) {
-    uint2 span=p[0].zw-p[0].xy;
-    if(any(tid>=span)) return;
-    uint2 guest=p[0].xy+tid, native_size=p[1].xy, guest_size=p[1].zw;
-    uint2 pos=min(((2*guest+1)*native_size)/(2*guest_size),p[2].yz-1);
-    uint3 rgb=uint3(round(color.read(pos).rgb*255.0f));
-    uint covered=coverage.read(pos).r>0 ? 1:0;
-    uint2 lo=(guest*native_size+guest_size-1)/guest_size;
-    uint2 hi=((guest+1)*native_size+guest_size-1)/guest_size;
-    uint lit=0;
-    for(uint y=lo.y;y<hi.y;++y) for(uint x=lo.x;x<hi.x;++x)
-        lit+=any(round(color.read(uint2(x,y)).rgb*255.0f)>8.0f) ? 1:0;
-    output[p[2].x+tid.y*span.x+tid.x]=uint2(rgb.b|(rgb.g<<8)|(rgb.r<<16)|(covered<<24),lit);
-}
-// Guest sampling and native brightness reduction have different grids.
-// Keeping the sampling lanes short avoids a variable native-cell loop in
-// every guest lane. Packing and coverage rules match the fused reference.
-kernel void guest_readback(texture2d<float, access::read> color [[texture(0)]],
-                           texture2d<float, access::read> coverage [[texture(1)]],
-                           device uint2* output [[buffer(0)]],
-                           constant uint4* p [[buffer(1)]],
-                           uint2 tid [[thread_position_in_grid]]) {
-    uint2 span=p[0].zw-p[0].xy;
-    if(any(tid>=span)) return;
-    uint2 guest=p[0].xy+tid, native_size=p[1].xy, guest_size=p[1].zw;
-    uint2 pos=min(((2*guest+1)*native_size)/(2*guest_size),p[2].yz-1);
-    uint3 rgb=uint3(round(color.read(pos).rgb*255.0f));
-    uint covered=coverage.read(pos).r>0 ? 1:0;
-    output[p[2].x+tid.y*span.x+tid.x]=uint2(rgb.b|(rgb.g<<8)|(rgb.r<<16)|(covered<<24),0);
-}
-// A 16x16 threadgroup covers a 32x32 native tile. Each lane reads four
-// adjacent pixels and each SIMD group writes one sum. Padded lanes contribute
-// zero but participate in the reduction; no contended global atomic is used.
-kernel void native_brightness(texture2d<float, access::read> color [[texture(0)]],
-                              device uint* output [[buffer(0)]],
-                              constant uint4* p [[buffer(1)]],
-                              uint2 tid [[thread_position_in_grid]],
-                              uint2 group [[threadgroup_position_in_grid]],
-                              uint lane [[thread_index_in_simdgroup]],
-                              uint simd_group [[simdgroup_index_in_threadgroup]]) {
-    uint2 pos=p[0].xy+tid*2;
-    uint lit=0;
-    for(uint y=0;y<2;++y) for(uint x=0;x<2;++x) {
-        uint2 q=pos+uint2(x,y);
-        if(all(q<p[0].zw)) lit+=any(round(color.read(q).rgb*255.0f)>8.0f) ? 1:0;
-    }
-    uint sum=simd_sum(lit);
-    if(lane==0) output[p[1].x+(group.y*p[1].y+group.x)*p[1].z+simd_group]=sum;
-}
-// Seed a native target directly from an immutable guest-sized buffer. Integer
-// channel expansion and floor(x * guest / native) preserve the CPU upload's
-// exact pixels without expanding the whole 4K image on the guest thread.
-vertex float4 surface_upload_vertex(uint id [[vertex_id]]) {
-    float2 corner=float2((id<<1)&2,id&2);
-    return float4(corner*2.0f-1.0f,0,1);
-}
-fragment float4 surface_upload_fragment(float4 position [[position]],
-    device const uchar* pixels [[buffer(0)]],
-    constant uint4* p [[buffer(1)]], constant uint* palette [[buffer(2)]]) {
-    uint2 xy=uint2(position.xy)*p[0].xy/p[0].zw;
-    uint offset=xy.y*p[1].x+xy.x*(p[1].y==8 ? 1:(p[1].y<=16 ? 2:4));
-    uint3 rgb;
-    if(p[1].y==8) {
-        uint index=pixels[offset];
-        uint c=p[1].z ? palette[index] : index*0x010101u;
-        rgb=uint3((c>>16)&255,(c>>8)&255,c&255);
-    } else {
-        uint value=uint(pixels[offset])|(uint(pixels[offset+1])<<8);
-        if(p[1].y>16) value|=(uint(pixels[offset+2])<<16)|(uint(pixels[offset+3])<<24);
-        rgb=((uint3(value)&p[2].xyz)>>p[3].xyz)*255/p[4].xyz;
-    }
-    return float4(float3(rgb)/255.0f,1);
-}
-)metal";
-
 namespace {
 
+// The uniform block gpu/shaders.md documents for the "d3d" program: 132 bytes
+// of fields sent with 16-byte alignment padding, the matrix column-major.
 struct alignas(16) Uniforms {
     float mvp[16];
     uint32_t pretransformed;
@@ -631,128 +400,129 @@ struct alignas(16) Uniforms {
     float pointsize;
     uint32_t terrain_detail;
 };
+static_assert(sizeof(Uniforms) == 144, "shaders.md documents this layout");
 
-MTLBlendFactor blend_factor(uint32_t d3d, bool for_dest, bool *both) {
+gpu::Blend blend_factor(uint32_t d3d, bool for_dest, bool *both) {
     *both = false;
     switch (d3d) {
     case 1:
-        return MTLBlendFactorZero;
+        return gpu::Blend::Zero;
     case 2:
-        return MTLBlendFactorOne;
+        return gpu::Blend::One;
     case 3:
-        return MTLBlendFactorSourceColor;
+        return gpu::Blend::SrcColor;
     case 4:
-        return MTLBlendFactorOneMinusSourceColor;
+        return gpu::Blend::OneMinusSrcColor;
     case 5:
-        return MTLBlendFactorSourceAlpha;
+        return gpu::Blend::SrcAlpha;
     case 6:
-        return MTLBlendFactorOneMinusSourceAlpha;
+        return gpu::Blend::OneMinusSrcAlpha;
     case 7:
-        return MTLBlendFactorDestinationAlpha;
+        return gpu::Blend::DstAlpha;
     case 8:
-        return MTLBlendFactorOneMinusDestinationAlpha;
+        return gpu::Blend::OneMinusDstAlpha;
     case 9:
-        return MTLBlendFactorDestinationColor;
+        return gpu::Blend::DstColor;
     case 10:
-        return MTLBlendFactorOneMinusDestinationColor;
+        return gpu::Blend::OneMinusDstColor;
     case 11:
-        return MTLBlendFactorSourceAlphaSaturated;
+        return gpu::Blend::SrcAlphaSaturated;
     // The two BOTH factors set the source and the destination together: the
     // caller only names one of them and the other follows, which is why the
     // renderer has to be told this was one of them.
     case 12:
         *both = true;
-        return for_dest ? MTLBlendFactorOneMinusSourceAlpha : MTLBlendFactorSourceAlpha;
+        return for_dest ? gpu::Blend::OneMinusSrcAlpha : gpu::Blend::SrcAlpha;
     case 13:
         *both = true;
-        return for_dest ? MTLBlendFactorSourceAlpha : MTLBlendFactorOneMinusSourceAlpha;
+        return for_dest ? gpu::Blend::SrcAlpha : gpu::Blend::OneMinusSrcAlpha;
     default:
-        return for_dest ? MTLBlendFactorZero : MTLBlendFactorOne;
+        return for_dest ? gpu::Blend::Zero : gpu::Blend::One;
     }
 }
 
-MTLCompareFunction compare_function(uint32_t d3d) {
+gpu::Compare compare_function(uint32_t d3d) {
     switch (d3d) {
     case 1:
-        return MTLCompareFunctionNever;
+        return gpu::Compare::Never;
     case 2:
-        return MTLCompareFunctionLess;
+        return gpu::Compare::Less;
     case 3:
-        return MTLCompareFunctionEqual;
+        return gpu::Compare::Equal;
     case 4:
-        return MTLCompareFunctionLessEqual;
+        return gpu::Compare::LessEqual;
     case 5:
-        return MTLCompareFunctionGreater;
+        return gpu::Compare::Greater;
     case 6:
-        return MTLCompareFunctionNotEqual;
+        return gpu::Compare::NotEqual;
     case 7:
-        return MTLCompareFunctionGreaterEqual;
+        return gpu::Compare::GreaterEqual;
     default:
-        return MTLCompareFunctionAlways;
+        return gpu::Compare::Always;
     }
 }
 
-MTLSamplerAddressMode address_mode(uint32_t d3d) {
+gpu::Address address_mode(uint32_t d3d) {
     switch (d3d) {
     case 2:
-        return MTLSamplerAddressModeMirrorRepeat;
+        return gpu::Address::MirrorRepeat;
     case 3:
-        return MTLSamplerAddressModeClampToEdge;
+        return gpu::Address::ClampToEdge;
     case 4:
-        return MTLSamplerAddressModeClampToBorderColor;
+        return gpu::Address::ClampToBorder;
     default:
-        return MTLSamplerAddressModeRepeat;
+        return gpu::Address::Repeat;
     }
 }
 
 // The six D3DFILTER_ values are a minification filter and a mip filter in one
-// number, and Metal wants them apart.
-void min_filter(uint32_t d3d, MTLSamplerMinMagFilter *minf, MTLSamplerMipFilter *mip) {
+// number, and the device wants them apart.
+void min_filter(uint32_t d3d, gpu::Filter *minf, gpu::MipFilter *mip) {
     switch (d3d) {
     case 2:
-        *minf = MTLSamplerMinMagFilterLinear;
-        *mip = MTLSamplerMipFilterNotMipmapped;
+        *minf = gpu::Filter::Linear;
+        *mip = gpu::MipFilter::None;
         break;
     case 3:
-        *minf = MTLSamplerMinMagFilterNearest;
-        *mip = MTLSamplerMipFilterNearest;
+        *minf = gpu::Filter::Nearest;
+        *mip = gpu::MipFilter::Nearest;
         break;
     case 4:
-        *minf = MTLSamplerMinMagFilterNearest;
-        *mip = MTLSamplerMipFilterLinear;
+        *minf = gpu::Filter::Nearest;
+        *mip = gpu::MipFilter::Linear;
         break;
     case 5:
-        *minf = MTLSamplerMinMagFilterLinear;
-        *mip = MTLSamplerMipFilterNearest;
+        *minf = gpu::Filter::Linear;
+        *mip = gpu::MipFilter::Nearest;
         break;
     case 6:
-        *minf = MTLSamplerMinMagFilterLinear;
-        *mip = MTLSamplerMipFilterLinear;
+        *minf = gpu::Filter::Linear;
+        *mip = gpu::MipFilter::Linear;
         break;
     default:
-        *minf = MTLSamplerMinMagFilterNearest;
-        *mip = MTLSamplerMipFilterNotMipmapped;
+        *minf = gpu::Filter::Nearest;
+        *mip = gpu::MipFilter::None;
         break;
     }
 }
 
-// D3DMATRIX holds M with row-vector maths: the guest computes v' = v * M. A
-// Metal float4x4 multiplies a column vector, so the matrix it needs is the
+// D3DMATRIX holds M with row-vector maths: the guest computes v' = v * M. The
+// shader's float4x4 multiplies a column vector, so the matrix it needs is the
 // transpose, and v * W * V * P becomes Pt * Vt * Wt * v.
 //
 // The transpose costs nothing. A D3DMATRIX in memory is m[row*4 + col]; a
-// Metal float4x4's storage is columns[j][i] = A_ij, and A_ij = M_ji means
-// memory[j*4 + i] = m[j*4 + i]. Column j is D3D row j and the bytes go
+// column-major float4x4's storage is columns[j][i] = A_ij, and A_ij = M_ji
+// means memory[j*4 + i] = m[j*4 + i]. Column j is D3D row j and the bytes go
 // straight across. The loop is written out rather than memcpy'd so the
 // indexing above can be read off it.
-void d3d_matrix_to_metal(const float *d3d, float *metal_column_major) {
+void d3d_matrix_to_column_major(const float *d3d, float *column_major) {
     for (int j = 0; j < 4; ++j)
         for (int i = 0; i < 4; ++i)
-            metal_column_major[j * 4 + i] = d3d[j * 4 + i];
+            column_major[j * 4 + i] = d3d[j * 4 + i];
 }
 
 void matrix_multiply(const float *a, const float *b, float *out) {
-    // Column-major, Metal convention: out = a * b.
+    // Column-major: out = a * b.
     for (int j = 0; j < 4; ++j)
         for (int i = 0; i < 4; ++i) {
             float s = 0;
@@ -779,7 +549,20 @@ void mask_shape(uint32_t mask, int *shift, uint32_t *max) {
     *max = mask >> *shift;
 }
 
-PopD3DRenderer *g_shared = nil;
+D3DRenderer *g_shared = nullptr;
+
+// A texture the renderer allocated, destroyed with its last reference. The
+// backend keeps the storage alive for commands already encoded against it,
+// so dropping the reference while a frame is in flight is safe.
+struct OwnedTexture {
+    gpu::Device *device = nullptr;
+    gpu::Texture texture;
+    int width = 0, height = 0, levels = 1;
+    ~OwnedTexture() {
+        if (device && texture)
+            device->destroy(texture);
+    }
+};
 
 } // namespace
 
@@ -808,21 +591,24 @@ struct ReplayJournal {
     std::vector<ReplayStep> steps;
     // GPU-only copies until fallback actually needs them. They are buffers,
     // not additional scene targets, and never cause a normal-frame readback.
-    id<MTLBuffer> checkpoint[3] = {nil, nil, nil};
-    NSUInteger pitch[3] = {0, 0, 0};
+    gpu::Buffer checkpoint[3];
+    uint64_t pitch[3] = {0, 0, 0};
     int width = 0, height = 0;
-    void reset() {
+    void reset(gpu::Device *device) {
         seed.clear();
         steps.clear();
         hasPalette = done = pendingCheckpoint = false;
-        for (auto &buffer : checkpoint)
-            buffer = nil;
+        for (auto &buffer : checkpoint) {
+            if (device && buffer)
+                device->destroy(buffer);
+            buffer = {};
+        }
         width = height = 0;
     }
 };
 // All inputs are frozen after the GPU completion wait. Each shard owns
-// disjoint destination rows; dispatch_apply_f joins them before guest code
-// can see the surface again. No renderer, mod or guest callback runs here.
+// disjoint destination rows; the threads join before guest code can see the
+// surface again. No renderer, mod or guest callback runs here.
 struct ReadbackCopy {
     const HostDirtyRect *rects;
     const size_t *offsets;
@@ -878,12 +664,13 @@ void copy_readback_rows(void *context, size_t shard) {
 }
 
 struct HDTexture {
-    id<MTLTexture> texture = nil;
-    id<MTLCommandBuffer> lastUse = nil;
+    std::shared_ptr<OwnedTexture> texture;
+    gpu::CommandBuffer lastUse;
     uint64_t bytes = 0, stamp = 0;
     bool alpha = false;
 };
 struct HDCache {
+    gpu::Device *device = nullptr;
     pop_hd::Pack pack;
     std::map<std::pair<uint64_t, uint64_t>, std::shared_ptr<HDTexture>> entries;
     uint64_t budget = 512ull * 1024 * 1024, used = 0, clock = 0, hits = 0, loads = 0, refused = 0,
@@ -898,8 +685,8 @@ struct HDCache {
             auto victim = entries.end();
             for (auto i = entries.begin(); i != entries.end(); ++i) {
                 auto &t = i->second;
-                if (t->lastUse && t->lastUse.status >= MTLCommandBufferStatusCompleted)
-                    t->lastUse = nil;
+                if (t->lastUse && device->status(t->lastUse) != gpu::CommandStatus::Pending)
+                    t->lastUse = {};
                 if (t.use_count() != 1 || t->lastUse)
                     continue;
                 if (victim == entries.end() || t->stamp < victim->second->stamp)
@@ -917,8 +704,9 @@ struct HDCache {
 };
 
 struct SceneSlot {
-    id<MTLTexture> color = nil, depth = nil, coverage = nil, staging = nil, coverageStaging = nil;
-    id<MTLCommandBuffer> last = nil;
+    gpu::Texture color, depth, coverage, staging, coverageStaging;
+    int width = 0, height = 0;
+    gpu::CommandBuffer last;
     HostD3DSurface surface{};
     uint32_t palette[256]{};
     uint32_t generation = 0;
@@ -928,61 +716,29 @@ struct SceneSlot {
     bool separateLayers = false, materializedLayers = false;
     int scene_domain_w = 0;
     HostSceneTarget presentTarget;
-    gpu::Texture legacyImport;
     std::shared_ptr<void> coherenceLease;
-    id<MTLTexture> overlayDepth = nil, overlayCoverage = nil;
+    gpu::Texture overlayDepth, overlayCoverage;
 };
 
-// Until the renderer itself runs over gpu.h (plan Task 5), the presenter's
-// texture handles become Metal objects here and the renderer's Metal command
-// buffers report their completion through the presenter's prefix fence.
-static id<MTLTexture> present_texture(gpu::Texture t) {
-    return t ? gpu::metal::export_texture(host_present_device(), t) : nil;
-}
-static void track_native_command(id<MTLCommandBuffer> cb) {
-    void *handle = host_present_prefix_begin();
-    if (!handle)
-        return;
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-      host_present_prefix_done(handle, c.status == MTLCommandBufferStatusCompleted);
-    }];
-}
-// A compose with renderer-owned textures. Importing an object the presenter
-// already owns returns the presenter's handle, so imports are never destroyed
-// here: the few long-lived slot textures simply stay registered.
-static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<MTLTexture> out,
-                           id<MTLCommandBuffer> cb) {
-    gpu::Device *dev = host_present_device();
-    if (!dev)
-        return;
-    CompositorInput copy = in;
-    copy.world = gpu::metal::import_texture(dev, world);
-    gpu::CommandBuffer command = gpu::metal::import_command(dev, cb);
-    compositor_compose(dev, &copy, gpu::metal::import_texture(dev, out), command);
-    gpu::metal::forget_command(dev, command);
-}
-
-@implementation PopD3DRenderer {
-    id<MTLDevice> device_;
-    id<MTLCommandQueue> queue_;
-    id<MTLLibrary> library_;
-    id<MTLTexture> color_;
-    id<MTLTexture> depth_;
+struct D3DRenderer::Impl {
+    gpu::Device *device_ = nullptr;
+    bool ok_ = false;
+    gpu::Texture color_;
+    gpu::Texture depth_;
     // 1 where the device rasterized since the last write-back, 0 elsewhere.
-    id<MTLTexture> coverage_;
-    id<MTLTexture> staging_; // shared storage, for readback
-    id<MTLTexture> coverage_staging_;
-    id<MTLTexture> white_;
-    id<MTLComputePipelineState> readback_pipeline_, readback_fused_pipeline_, brightness_pipeline_;
-    id<MTLRenderPipelineState> surface_upload_pipeline_;
-    bool cpu_surface_upload_;
-    id<MTLBuffer> readback_buffer_, brightness_buffer_;
-    bool tiled_readback_;
-    id<MTLCommandBuffer> command_;
-    id<MTLRenderCommandEncoder> encoder_;
-    std::map<uint64_t, id<MTLRenderPipelineState>> *pipelines_;
-    std::map<uint64_t, id<MTLDepthStencilState>> *depths_;
-    std::map<uint64_t, id<MTLSamplerState>> *samplers_;
+    gpu::Texture coverage_;
+    gpu::Texture staging_; // CPU-visible, for readback
+    gpu::Texture coverage_staging_;
+    gpu::Texture white_;
+    gpu::Pipeline readback_pipeline_, readback_fused_pipeline_, brightness_pipeline_;
+    gpu::Pipeline surface_upload_pipeline_;
+    bool cpu_surface_upload_ = false;
+    gpu::Buffer readback_buffer_, brightness_buffer_;
+    uint64_t readback_buffer_bytes_ = 0, brightness_buffer_bytes_ = 0;
+    bool tiled_readback_ = false;
+    gpu::CommandBuffer command_;
+    bool encoding_ = false; // a render pass is open on command_
+    std::map<uint64_t, gpu::Pipeline> pipelines_;
     // Textures by (handle, revision), because a frame is composited after the
     // guest has moved on: a draw submitted against revision 1 must still find
     // revision 1 when the compositor gets to it, however many uploads the
@@ -992,142 +748,212 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     // A revision is dropped when it is neither the current one nor leased by
     // a frame, which is what keeps this from growing by one texture a frame.
     struct TexEntry {
-        id<MTLTexture> texture = nil;
+        std::shared_ptr<OwnedTexture> texture;
         std::shared_ptr<HDTexture> enhanced;
         bool alpha = false;
         bool smallOpaqueTile = false;
         uint32_t leases = 0;
     };
-    std::map<uint64_t, TexEntry> *textures_;
+    std::map<uint64_t, TexEntry> textures_;
     HDCache hd_;
     std::shared_ptr<HDTexture> terrain_detail_;
     // handle -> the revision most recently uploaded, which is what a draw that
     // names no revision gets.
-    std::map<uint32_t, uint32_t> *texture_current_;
-    int width_, height_;
-    int guest_width_, guest_height_, scene_width_, scene_height_;
-    bool incremental_;
-    bool replaying_;
+    std::map<uint32_t, uint32_t> texture_current_;
+    int width_ = 0, height_ = 0;
+    int guest_width_ = 0, guest_height_ = 0, scene_width_ = 0, scene_height_ = 0;
+    bool incremental_ = false;
+    bool replaying_ = false;
     SceneSlot slots_[4];
     HostSceneTarget acquiringTarget_;
-    bool frame_dropped_;
-    bool overlay_rendering_;
-    int active_slot_;
-    uint32_t target_generation_;
-    id<MTLCommandBuffer> last_command_;
+    bool frame_dropped_ = false;
+    bool overlay_rendering_ = false;
+    int active_slot_ = -1;
+    uint32_t target_generation_ = 0;
+    gpu::CommandBuffer last_command_;
 
     // The render target: which surface, in what format. `pixels` is never
     // cached across a call the shim could have changed it in - Flip moves it -
     // so the shim re-states the target whenever it moves and every flush
     // carries the pointer afresh.
-    uint32_t target_id_;
+    uint32_t target_id_ = 0;
     // Which surface the mirror's contents belong to. It is the render target
     // in the ordinary case, and it is what a flush matches on: the target can
     // change while the mirror still holds a scene, and that scene belongs to
     // the surface it was drawn for, not to whichever surface is current now.
-    uint32_t pending_id_;
-    void *target_pixels_;
-    int target_pitch_, target_bpp_;
-    uint32_t target_rmask_, target_gmask_, target_bmask_;
-    uint32_t target_palette_[256];
-    bool target_has_palette_;
+    uint32_t pending_id_ = 0;
+    void *target_pixels_ = nullptr;
+    int target_pitch_ = 0, target_bpp_ = 0;
+    uint32_t target_rmask_ = 0, target_gmask_ = 0, target_bmask_ = 0;
+    uint32_t target_palette_[256]{};
+    bool target_has_palette_ = false;
     // The 5-5-5 nearest-index cache for writing back into an 8-bit target,
     // rebuilt when the palette changes.
-    std::vector<uint8_t> *index_cache_;
-    bool index_cache_valid_;
+    std::vector<uint8_t> index_cache_;
+    bool index_cache_valid_ = false;
 
-    bool gpu_dirty_;    // the mirror holds something the surface does not
-    bool needs_upload_; // the surface holds something the mirror does not
-    bool in_scene_;
-    uint32_t submit_draws_, encoded_draws_, early_submissions_, readback_workers_;
-    FILE *readback_timings_;
-    id<MTLCounterSampleBuffer> sample_counter_, brightness_counter_;
+    bool gpu_dirty_ = false;    // the mirror holds something the surface does not
+    bool needs_upload_ = false; // the surface holds something the mirror does not
+    bool in_scene_ = false;
+    uint32_t submit_draws_ = 256, encoded_draws_ = 0, early_submissions_ = 0, readback_workers_ = 4;
+    FILE *readback_timings_ = nullptr;
 
-    bool pending_clear_color_, pending_clear_depth_;
+    bool pending_clear_color_ = false, pending_clear_depth_ = false;
     // The coverage mask has to go back to zero after every write-back, and a
     // whole-target colour clear puts it to one: the clear touched every pixel.
-    bool coverage_reset_pending_;
-    MTLClearColor pending_color_;
-    float pending_depth_;
-    bool cull_enabled_;
-    HostCommandStorageStats storage_stats_;
+    bool coverage_reset_pending_ = true;
+    float pending_color_[4] = {0, 0, 0, 1};
+    float pending_depth_ = 1.0f;
+    bool cull_enabled_ = true;
+    HostCommandStorageStats storage_stats_{};
     std::vector<HostD3DVertex> vertex_scratch_;
     std::vector<uint8_t> upload_scratch_, mask_scratch_;
     struct ArgumentBuffer {
-        id<MTLBuffer> buffer = nil;
-        id<MTLCommandBuffer> owner = nil;
+        gpu::Buffer buffer;
+        uint64_t length = 0;
+        gpu::CommandBuffer owner;
         uint64_t frame = 0;
     };
     std::vector<ArgumentBuffer> argument_pool_;
-    size_t argument_cursor_;
-}
+    size_t argument_cursor_ = 0;
 
-- (instancetype)initWithDevice:(id<MTLDevice>)device {
-    return [self initWithDevice:device queue:[device newCommandQueue]];
-}
-- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue {
-    self = [super init];
-    if (!self)
-        return nil;
-    device_ = device;
-    queue_ = queue;
-    NSError *error = nil;
-    library_ = [device newLibraryWithSource:kShader options:nil error:&error];
-    if (!library_) {
-        fprintf(stderr, "[host] the Direct3D renderer's shaders did not compile: %s\n",
-                error ? error.localizedDescription.UTF8String : "unknown error");
-        return nil;
+    explicit Impl(gpu::Device *device);
+    ~Impl();
+
+    // --- device helpers ---
+    gpu::Texture makeTarget(int w, int h, gpu::Format format, bool cpu) {
+        uint32_t usage = gpu::UsageRenderTarget | gpu::UsageSampled | (cpu ? gpu::UsageCpu : 0);
+        if (format == gpu::Format::Depth32F)
+            usage = gpu::UsageRenderTarget;
+        return device_->create_texture({w, h, format, usage, 1});
     }
-    auto upload = [MTLRenderPipelineDescriptor new];
-    upload.vertexFunction = [library_ newFunctionWithName:@"surface_upload_vertex"];
-    upload.fragmentFunction = [library_ newFunctionWithName:@"surface_upload_fragment"];
-    upload.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-    surface_upload_pipeline_ = [device newRenderPipelineStateWithDescriptor:upload error:&error];
+    void beginCommand() {
+        if (!command_)
+            command_ = device_->begin();
+    }
+    // A scene texture the renderer owns: not the presenter's, and not held by
+    // any slot other than `except`.
+    bool ownsTexture(gpu::Texture t, int except) const {
+        if (!t)
+            return false;
+        if (t == acquiringTarget_.world || t == acquiringTarget_.overlay)
+            return false;
+        for (int i = 0; i < 4; ++i) {
+            const SceneSlot &s = slots_[i];
+            if (t == s.presentTarget.world || t == s.presentTarget.overlay)
+                return false;
+            if (i == except)
+                continue;
+            if (t == s.color || t == s.depth || t == s.coverage || t == s.staging ||
+                t == s.coverageStaging || t == s.overlayDepth || t == s.overlayCoverage)
+                return false;
+        }
+        return true;
+    }
+    // Drop the current mirror textures before reallocating them. The active
+    // slot's copies go with them: saveSlot refreshes it afterwards.
+    void releaseMirror() {
+        gpu::Texture *mine[] = {&color_, &depth_, &coverage_, &staging_, &coverage_staging_};
+        for (gpu::Texture *t : mine) {
+            if (ownsTexture(*t, active_slot_))
+                device_->destroy(*t);
+            *t = {};
+        }
+        if (active_slot_ >= 0) {
+            SceneSlot &s = slots_[active_slot_];
+            s.color = s.depth = s.coverage = s.staging = s.coverageStaging = {};
+        }
+    }
+    void releaseSlot(int i) {
+        SceneSlot &s = slots_[i];
+        gpu::Texture *mine[] = {&s.color,           &s.depth,        &s.coverage,       &s.staging,
+                                &s.coverageStaging, &s.overlayDepth, &s.overlayCoverage};
+        for (gpu::Texture *t : mine) {
+            if (ownsTexture(*t, i) && *t != color_ && *t != depth_ && *t != coverage_ &&
+                *t != staging_ && *t != coverage_staging_)
+                device_->destroy(*t);
+            *t = {};
+        }
+        s.replay.reset(device_);
+    }
+
+    gpu::Buffer argumentBytes(const void *bytes, uint64_t length);
+    void bindVertices(const std::vector<HostD3DVertex> &vertices);
+    void allocateMirror(int width, int height);
+    void discard();
+    void setRenderTarget(const HostD3DSurface *target);
+    void uploadSurface();
+    void rebuildIndexCache();
+    void flushSurface(const HostD3DSurface *surface, const char *why);
+    void legacyWriteBackPending();
+    bool encoder();
+    void endEncoding();
+    void flush();
+    void collectCleanTargets();
+    void saveSlot();
+    void loadSlot(int i);
+    int slotFor(uint32_t s, uint32_t g) const;
+    void refreshSurface(const HostD3DSurface *s, int i);
+    gpu::Texture colorTargetForFrame(uint64_t frame);
+    gpu::CommandBuffer completionForFrame(uint64_t frame);
+    void bindSurface(const HostD3DSurface *s, uint32_t g, uint64_t f);
+    void sealFrame(uint64_t f);
+    void retireFrame(uint64_t f);
+    void swapSurface(uint32_t a, uint32_t ag, uint32_t b, uint32_t bg);
+    bool coherentSurface(const HostD3DSurface *surface, uint32_t generation,
+                         const HostDirtyRect *rects, uint32_t count);
+    void applyCPU(const HostD3DSurface *surface, const HostBlitRecord *r);
+    gpu::Pipeline pipelineForBlend(bool enabled, gpu::Blend src, gpu::Blend dst, bool writeColor);
+    void setSampler(int slot, gpu::Address u, gpu::Address v, gpu::Filter mag, gpu::Filter minf,
+                    gpu::MipFilter mip, int anisotropy);
+    void beginScene();
+    void endScene();
+    void dumpScene();
+    void clearFlags(uint32_t flags, const int32_t *rects, uint32_t count, uint32_t color,
+                    float depth);
+    void draw(const HostD3DDraw *cmd, uint32_t revision);
+    std::shared_ptr<OwnedTexture> makeTexture(const HostD3DTexture *t, bool *alpha);
+    std::shared_ptr<HDTexture> packTexture(uint64_t hash, int width, int height);
+    void uploadTexture(const HostD3DTexture *t);
+    void dropTexture(uint32_t handle, uint32_t revision);
+    void destroyTexture(uint32_t handle);
+    bool retainTexture(uint32_t handle, uint32_t revision);
+    void releaseTexture(uint32_t handle, uint32_t revision);
+    bool hasTexture(uint32_t handle, uint32_t revision);
+    HostDrawMapping mappingForFrame(uint64_t f, uint32_t seq) const;
+    void replayBarrier(const HostD3DSurface *surface, uint32_t g, uint32_t seq);
+    void captureReplaySeed();
+    void captureReplayCheckpoint(bool needed);
+    bool replayLegacyFrame(uint64_t frame);
+    void drawSnapshot(const HostD3DDrawSnapshot *d);
+    bool readPixels(void *out, int *width, int *height);
+};
+
+D3DRenderer::Impl::Impl(gpu::Device *device) : device_(device) {
+    hd_.device = device;
+    if (!device_)
+        return;
+    gpu::RenderState upload_state;
+    upload_state.color_format[0] = gpu::Format::BGRA8;
+    upload_state.color_count = 1;
+    surface_upload_pipeline_ = device_->render_pipeline("surface_upload", upload_state);
     if (!surface_upload_pipeline_) {
-        fprintf(stderr, "[host] surface upload pipeline failed: %s\n",
-                error.localizedDescription.UTF8String);
-        return nil;
+        fprintf(stderr, "[host] surface upload pipeline failed\n");
+        return;
     }
     const char *upload_mode = getenv("POP_HOST_SURFACE_UPLOAD");
     cpu_surface_upload_ = upload_mode && !strcmp(upload_mode, "cpu");
-    readback_pipeline_ =
-        [device newComputePipelineStateWithFunction:[library_ newFunctionWithName:@"guest_readback"]
-                                              error:&error];
-    readback_fused_pipeline_ = [device
-        newComputePipelineStateWithFunction:[library_ newFunctionWithName:@"guest_readback_fused"]
-                                      error:&error];
-    brightness_pipeline_ = [device
-        newComputePipelineStateWithFunction:[library_ newFunctionWithName:@"native_brightness"]
-                                      error:&error];
+    readback_pipeline_ = device_->compute_pipeline("guest_readback");
+    readback_fused_pipeline_ = device_->compute_pipeline("guest_readback_fused");
+    brightness_pipeline_ = device_->compute_pipeline("native_brightness");
     const char *kernel = getenv("POP_HOST_READBACK_KERNEL");
     // Keep the established path unless explicitly testing the candidate:
     // repeated gameplay runs have not shown a throughput benefit yet.
     tiled_readback_ = kernel && strcmp(kernel, "tiled") == 0;
     if (!readback_pipeline_ || !readback_fused_pipeline_ || !brightness_pipeline_) {
-        fprintf(stderr, "[host] readback pipeline failed: %s\n",
-                error.localizedDescription.UTF8String);
-        return nil;
+        fprintf(stderr, "[host] readback pipeline failed\n");
+        return;
     }
-    pipelines_ = new std::map<uint64_t, id<MTLRenderPipelineState>>();
-    depths_ = new std::map<uint64_t, id<MTLDepthStencilState>>();
-    samplers_ = new std::map<uint64_t, id<MTLSamplerState>>();
-    textures_ = new std::map<uint64_t, TexEntry>();
-    texture_current_ = new std::map<uint32_t, uint32_t>();
-    index_cache_ = new std::vector<uint8_t>();
-    width_ = height_ = 0;
-    active_slot_ = -1;
-    target_id_ = 0;
-    pending_id_ = 0;
-    target_pixels_ = nullptr;
-    target_pitch_ = target_bpp_ = 0;
-    target_rmask_ = target_gmask_ = target_bmask_ = 0;
-    target_has_palette_ = false;
-    index_cache_valid_ = false;
-    memset(target_palette_, 0, sizeof target_palette_);
-    gpu_dirty_ = false;
-    needs_upload_ = false;
-    in_scene_ = false;
-    submit_draws_ = 256;
     const char *submit = getenv("POP_HOST_D3D_SUBMIT_DRAWS");
     if (submit && *submit) {
         char *end = nullptr;
@@ -1135,7 +961,6 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         if (end && !*end && value <= 65536)
             submit_draws_ = (uint32_t)value;
     }
-    readback_workers_ = 4;
     if (const char *workers = getenv("POP_HOST_READBACK_WORKERS")) {
         char *end = nullptr;
         unsigned long value = strtoul(workers, &end, 10);
@@ -1150,58 +975,22 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                     "workers,kernel,last_render_gpu_ms,readback_gpu_ms,wait_ms,copy_ms,sample_"
                     "stage_ms,brightness_stage_ms\n");
     }
-    // Optional diagnostic pass boundaries. Production keeps one encoder;
-    // the counter path separates the kernels so their cost can be attributed.
-    // Resolved Apple GPU timestamps are nanoseconds in the CPU clock domain.
-    if (readback_timings_ && getenv("POP_HOST_READBACK_COUNTERS") &&
-        [device supportsFamily:MTLGPUFamilyApple1] &&
-        [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
-        for (id<MTLCounterSet> set in device.counterSets) {
-            if (![set.name isEqualToString:MTLCommonCounterSetTimestamp])
-                continue;
-            MTLCounterSampleBufferDescriptor *desc = [MTLCounterSampleBufferDescriptor new];
-            desc.counterSet = set;
-            desc.storageMode = MTLStorageModeShared;
-            desc.sampleCount = 2;
-            sample_counter_ = [device newCounterSampleBufferWithDescriptor:desc error:&error];
-            brightness_counter_ = [device newCounterSampleBufferWithDescriptor:desc error:&error];
-            if (!sample_counter_ || !brightness_counter_) {
-                sample_counter_ = nil;
-                brightness_counter_ = nil;
-            }
-            break;
-        }
-    }
-    pending_clear_color_ = pending_clear_depth_ = false;
-    coverage_reset_pending_ = true;
-    pending_color_ = MTLClearColorMake(0, 0, 0, 1);
-    pending_depth_ = 1.0f;
     cull_enabled_ = getenv("POP_HOST_D3D_NOCULL") == nullptr;
 
     // Bound wherever a draw is untextured, because the fragment function's
     // texture argument has to be something.
-    MTLTextureDescriptor *d =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                           width:1
-                                                          height:1
-                                                       mipmapped:NO];
-    d.usage = MTLTextureUsageShaderRead;
-    white_ = [device newTextureWithDescriptor:d];
+    white_ =
+        device_->create_texture({1, 1, gpu::Format::RGBA8, gpu::UsageSampled | gpu::UsageCpu, 1});
     uint32_t opaque_white = 0xffffffffu;
-    [white_ replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
-              mipmapLevel:0
-                withBytes:&opaque_white
-              bytesPerRow:4];
+    device_->upload(white_, {0, 0, 1, 1}, &opaque_white, 4);
     std::string packPath = "build/texture-pack";
     const char *packEnv = getenv("POPM_TEXTURE_PACK_DIR");
     if (packEnv)
         packPath = packEnv;
     else {
-        uint32_t n = 0;
-        _NSGetExecutablePath(nullptr, &n);
-        std::vector<char> path(n);
-        if (n && !_NSGetExecutablePath(path.data(), &n)) {
-            std::filesystem::path exe(path.data());
+        char path[4096];
+        if (os_exe_path(path, sizeof path) == 0) {
+            std::filesystem::path exe(path);
             if (exe.parent_path().filename() == "MacOS" &&
                 exe.parent_path().parent_path().filename() == "Contents")
                 packPath =
@@ -1215,7 +1004,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             hd_.budget = uint64_t(value) * 1024 * 1024;
     }
     hd_.pack.open(packPath);
-    terrain_detail_ = [self packTexture:0 width:0 height:0];
+    ok_ = true;
+    terrain_detail_ = packTexture(0, 0, 0);
     // Preload the pack's priority list before the first game frame. Stop at
     // 75% of the budget, leaving headroom for textures encountered later.
     std::ifstream preload(std::filesystem::path(packPath) / "preload.txt");
@@ -1228,12 +1018,11 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             continue;
         if (hd_.used + file->second.bytes > hd_.budget * 3 / 4)
             continue;
-        (void)[self packTexture:key width:0 height:0];
+        (void)packTexture(key, 0, 0);
     }
-    return self;
 }
 
-- (void)dealloc {
+D3DRenderer::Impl::~Impl() {
     if (!hd_.pack.files.empty())
         fprintf(stderr, "[hd] loads=%llu hits=%llu refused=%llu resident=%llu budget=%llu bytes\n",
                 (unsigned long long)hd_.loads, (unsigned long long)hd_.hits,
@@ -1241,40 +1030,30 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 (unsigned long long)hd_.budget);
     if (readback_timings_)
         fclose(readback_timings_);
-    delete pipelines_;
-    delete depths_;
-    delete samplers_;
-    delete textures_;
-    delete texture_current_;
-    delete index_cache_;
-}
-
-+ (PopD3DRenderer *)shared {
-    return g_shared;
-}
-+ (void)setShared:(PopD3DRenderer *)renderer {
-    g_shared = renderer;
-}
-
-- (id<MTLTexture>)colorTarget {
-    return color_;
-}
-- (id<MTLCommandQueue>)commandQueue {
-    return queue_;
-}
-
-- (HostHDTextureStats)hdTextureStats {
-    return {hd_.draws, hd_.loads, hd_.hits, hd_.refused, hd_.used, hd_.budget, hd_.detail_draws};
-}
-
-- (HostCommandStorageStats)commandStorageStats {
-    return storage_stats_;
+    if (!device_)
+        return;
+    endEncoding();
+    if (command_) {
+        device_->commit(command_);
+        command_ = {};
+    }
+    for (int i = 0; i < 4; ++i)
+        releaseSlot(i);
+    releaseMirror();
+    if (white_)
+        device_->destroy(white_);
+    for (auto &entry : argument_pool_)
+        device_->destroy(entry.buffer);
+    if (readback_buffer_)
+        device_->destroy(readback_buffer_);
+    if (brightness_buffer_)
+        device_->destroy(brightness_buffer_);
 }
 
 // The CPU scratch is reused immediately after encoding. GPU-consumed bytes
 // remain immutable until their exact command buffer finishes, including
 // prefixes committed before seal and work belonging to dropped frames.
-- (id<MTLBuffer>)argumentBytes:(const void *)bytes length:(NSUInteger)length {
+gpu::Buffer D3DRenderer::Impl::argumentBytes(const void *bytes, uint64_t length) {
     assert(command_);
     ArgumentBuffer *available = nullptr;
     for (size_t n = 0; n < argument_pool_.size(); ++n) {
@@ -1286,117 +1065,80 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 held = true;
         if (held)
             continue;
-        auto status = entry.owner.status;
-        if (entry.owner && status != MTLCommandBufferStatusCompleted &&
-            status != MTLCommandBufferStatusError)
+        if (entry.owner && device_->status(entry.owner) == gpu::CommandStatus::Pending)
             continue;
-        if (entry.buffer.length >= length) {
+        if (entry.length >= length) {
             available = &entry;
             argument_cursor_ = index + 1;
             break;
         }
     }
     if (!available) {
-        id<MTLBuffer> buffer = [device_ newBufferWithLength:(length + 4095) & ~(NSUInteger)4095
-                                                    options:MTLResourceStorageModeShared];
+        const uint64_t rounded = (length + 4095) & ~uint64_t(4095);
+        gpu::Buffer buffer = device_->create_buffer(rounded, nullptr);
         if (!buffer) {
             fprintf(stderr, "[host] command argument allocation failed\n");
             abort();
         }
         if (argument_pool_.size() == argument_pool_.capacity())
             ++storage_stats_.cpu_growths;
-        argument_pool_.push_back({buffer, nil});
+        argument_pool_.push_back({buffer, rounded, {}, 0});
         ++storage_stats_.argument_buffers;
         available = &argument_pool_.back();
         argument_cursor_ = argument_pool_.size();
     }
     available->owner = command_;
     available->frame = incremental_ && active_slot_ >= 0 ? slots_[active_slot_].frame : 0;
-    memcpy(available->buffer.contents, bytes, length);
+    device_->update(available->buffer, 0, bytes, length);
     return available->buffer;
 }
 
-- (void)bindVertices:(const std::vector<HostD3DVertex> &)vertices
-             encoder:(id<MTLRenderCommandEncoder>)enc {
-    NSUInteger bytes = vertices.size() * sizeof(HostD3DVertex);
+void D3DRenderer::Impl::bindVertices(const std::vector<HostD3DVertex> &vertices) {
+    const uint64_t bytes = vertices.size() * sizeof(HostD3DVertex);
     if (bytes <= 4096)
-        [enc setVertexBytes:vertices.data() length:bytes atIndex:0];
+        device_->set_bytes(command_, gpu::Stage::Vertex, 0, vertices.data(), bytes);
     else
-        [enc setVertexBuffer:[self argumentBytes:vertices.data() length:bytes] offset:0 atIndex:0];
+        device_->set_vertex_buffer(command_, 0, argumentBytes(vertices.data(), bytes), 0);
 }
 
 // --- the mirror -------------------------------------------------------------
 
-- (void)allocateMirror:(int)width height:(int)height {
+void D3DRenderer::Impl::allocateMirror(int width, int height) {
     if (width <= 0 || height <= 0)
         return;
     if (color_ && width == width_ && height == height_) {
         if (acquiringTarget_.world)
-            color_ = present_texture(acquiringTarget_.world);
+            color_ = acquiringTarget_.world;
         return;
     }
-    [self endEncoding];
+    endEncoding();
+    releaseMirror();
     width_ = width;
     height_ = height;
 
-    MTLTextureDescriptor *c =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    c.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    c.storageMode = MTLStorageModePrivate;
-    color_ = acquiringTarget_.world ? present_texture(acquiringTarget_.world)
-                                    : [device_ newTextureWithDescriptor:c];
-    if (color_ && !acquiringTarget_.world)
-        ++storage_stats_.scene_textures;
-
-    MTLTextureDescriptor *z =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    z.usage = MTLTextureUsageRenderTarget;
-    z.storageMode = MTLStorageModePrivate;
-    depth_ = [device_ newTextureWithDescriptor:z];
+    if (acquiringTarget_.world)
+        color_ = acquiringTarget_.world;
+    else {
+        color_ = makeTarget(width, height, gpu::Format::BGRA8, false);
+        if (color_)
+            ++storage_stats_.scene_textures;
+    }
+    depth_ = makeTarget(width, height, gpu::Format::Depth32F, false);
     if (depth_)
         ++storage_stats_.scene_textures;
-
-    MTLTextureDescriptor *m =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    m.usage = MTLTextureUsageRenderTarget;
-    m.storageMode = MTLStorageModePrivate;
-    coverage_ = [device_ newTextureWithDescriptor:m];
+    coverage_ = makeTarget(width, height, gpu::Format::R8, false);
     if (coverage_)
         ++storage_stats_.scene_textures;
-
-    // A private render target cannot be read by the CPU, so a shared texture
-    // is kept alongside each one to blit into and out of.
-    MTLTextureDescriptor *s =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    s.usage = MTLTextureUsageShaderRead;
-    s.storageMode = MTLStorageModeShared;
-    staging_ = [device_ newTextureWithDescriptor:s];
+    // A private render target cannot be read by the CPU, so a CPU-visible
+    // texture is kept alongside each one to blit into and out of.
+    staging_ = device_->create_texture(
+        {width, height, gpu::Format::BGRA8, gpu::UsageSampled | gpu::UsageCpu, 1});
     if (staging_)
         ++storage_stats_.scene_textures;
-
-    MTLTextureDescriptor *cs =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    cs.usage = MTLTextureUsageShaderRead;
-    cs.storageMode = MTLStorageModeShared;
-    coverage_staging_ = [device_ newTextureWithDescriptor:cs];
+    coverage_staging_ = device_->create_texture(
+        {width, height, gpu::Format::R8, gpu::UsageSampled | gpu::UsageCpu, 1});
     if (coverage_staging_)
         ++storage_stats_.scene_textures;
-
     pending_clear_color_ = pending_clear_depth_ = true;
     coverage_reset_pending_ = true;
     gpu_dirty_ = false;
@@ -1407,7 +1149,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 // pointed into it, so target_pixels_ names memory that is not there. This is
 // the one path that must NOT write back: a flush here would put a scene through
 // a dangling guest address.
-- (void)discard {
+void D3DRenderer::Impl::discard() {
     if (hd_.draws)
         fprintf(stderr,
                 "[hd] world_draws=%llu loads=%llu hits=%llu refused=%llu resident=%llu budget=%llu "
@@ -1415,21 +1157,25 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 (unsigned long long)hd_.draws, (unsigned long long)hd_.loads,
                 (unsigned long long)hd_.hits, (unsigned long long)hd_.refused,
                 (unsigned long long)hd_.used, (unsigned long long)hd_.budget);
-    [self endEncoding];
+    endEncoding();
     if (command_) {
         last_command_ = command_;
-        track_native_command(command_);
-        [command_ commit];
-        command_ = nil;
+        host_present_track_command(command_);
+        device_->commit(command_);
+        command_ = {};
     }
+    acquiringTarget_ = {};
+    for (int i = 0; i < 4; ++i)
+        releaseSlot(i);
+    releaseMirror();
     for (auto &slot : slots_)
         slot = SceneSlot{};
     active_slot_ = -1;
     incremental_ = false;
     target_generation_ = 0;
-    acquiringTarget_ = {};
     frame_dropped_ = false;
     guest_width_ = guest_height_ = 0;
+    width_ = height_ = 0;
     gpu_dirty_ = false;
     pending_id_ = 0;
     target_id_ = 0;
@@ -1439,14 +1185,14 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     pending_clear_color_ = pending_clear_depth_ = false;
 }
 
-- (void)setRenderTarget:(const HostD3DSurface *)target {
+void D3DRenderer::Impl::setRenderTarget(const HostD3DSurface *target) {
     // Anything the device drew into the target it is leaving belongs in that
     // surface before it stops being the target: the mirror is about to be
     // reused, and in the worst case reallocated at another size. The shim
     // flushes before it switches; this is the same guarantee made where the
     // mirror actually lives, so no path through the shims can lose a scene.
     if (!incremental_ && gpu_dirty_ && pending_id_ && (!target || target->id != pending_id_))
-        [self legacyWriteBackPending];
+        legacyWriteBackPending();
 
     if (!target) {
         target_id_ = 0;
@@ -1475,8 +1221,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         target_has_palette_ = false;
     }
     if (changed) {
-        [self allocateMirror:scene_width_ ? scene_width_ : target->width
-                      height:scene_height_ ? scene_height_ : target->height];
+        allocateMirror(scene_width_ ? scene_width_ : target->width,
+                       scene_height_ ? scene_height_ : target->height);
         // Alternating front/back surfaces is normal frame traffic. Report
         // configuration changes without synchronous console I/O every frame.
         if (format_changed) {
@@ -1492,18 +1238,16 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 }
 
 // The surface's pixels as BGRA8, which is the mirror's format.
-- (void)uploadSurface {
+void D3DRenderer::Impl::uploadSurface() {
     if (!color_ || !staging_ || !target_pixels_ || !width_ || !height_)
         return;
     if (!cpu_surface_upload_) {
-        [self endEncoding];
-        if (!command_)
-            command_ = [queue_ commandBuffer];
+        endEncoding();
+        beginCommand();
         // argumentBytes copies now and retains each buffer until its exact
         // command finishes. Guest writes and palette changes after this call
         // cannot alter an upload already queued on the GPU.
-        id<MTLBuffer> pixels = [self argumentBytes:target_pixels_
-                                            length:(NSUInteger)target_pitch_ * guest_height_];
+        gpu::Buffer pixels = argumentBytes(target_pixels_, (uint64_t)target_pitch_ * guest_height_);
         int rshift = 0, gshift = 0, bshift = 0;
         uint32_t rmax = 0, gmax = 0, bmax = 0;
         uint32_t rm = target_rmask_, gm = target_gmask_, bm = target_bmask_;
@@ -1541,17 +1285,19 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                           gmax,
                           bmax,
                           0};
-        auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = color_;
-        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        auto encoder = [command_ renderCommandEncoderWithDescriptor:pass];
-        [encoder setRenderPipelineState:surface_upload_pipeline_];
-        [encoder setFragmentBuffer:pixels offset:0 atIndex:0];
-        [encoder setFragmentBytes:p length:sizeof p atIndex:1];
-        [encoder setFragmentBytes:target_palette_ length:sizeof target_palette_ atIndex:2];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-        [encoder endEncoding];
+        gpu::RenderPass pass;
+        pass.color_count = 1;
+        pass.color[0].texture = color_;
+        pass.color[0].load = gpu::Load::DontCare;
+        pass.color[0].store = gpu::Store::Store;
+        device_->begin_render_pass(command_, pass);
+        device_->set_pipeline(command_, surface_upload_pipeline_);
+        device_->set_buffer(command_, gpu::Stage::Fragment, 0, pixels, 0);
+        device_->set_bytes(command_, gpu::Stage::Fragment, 1, p, sizeof p);
+        device_->set_bytes(command_, gpu::Stage::Fragment, 2, target_palette_,
+                           sizeof target_palette_);
+        device_->draw(command_, gpu::Primitive::Triangles, 0, 3);
+        device_->end_render_pass(command_);
         needs_upload_ = pending_clear_color_ = false;
         return;
     }
@@ -1597,34 +1343,20 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             out[4 * x + 3] = 255;
         }
     }
-    [staging_ replaceRegion:MTLRegionMake2D(0, 0, width_, height_)
-                mipmapLevel:0
-                  withBytes:bgra.data()
-                bytesPerRow:(NSUInteger)width_ * 4];
-    [self endEncoding];
-    if (!command_)
-        command_ = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [command_ blitCommandEncoder];
-    [blit copyFromTexture:staging_
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(width_, height_, 1)
-                toTexture:color_
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
+    device_->upload(staging_, {0, 0, width_, height_}, bgra.data(), width_ * 4);
+    endEncoding();
+    beginCommand();
+    device_->blit(command_, staging_, {0, 0, width_, height_}, color_, 0, 0);
     // The mirror now matches the surface, so a clear that was still pending
     // would wipe what was just read in.
     pending_clear_color_ = false;
 }
 
-- (void)rebuildIndexCache {
+void D3DRenderer::Impl::rebuildIndexCache() {
     // Nearest palette entry for every 5-5-5 colour. 32768 entries, rebuilt
     // only when the palette changes, which is what makes writing back into an
     // 8-bit render target affordable at all.
-    index_cache_->assign(32768, 0);
+    index_cache_.assign(32768, 0);
     for (uint32_t key = 0; key < 32768; ++key) {
         int r = (int)(((key >> 10) & 31) * 255 / 31);
         int g = (int)(((key >> 5) & 31) * 255 / 31);
@@ -1644,12 +1376,12 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                     break;
             }
         }
-        (*index_cache_)[key] = (uint8_t)best;
+        index_cache_[key] = (uint8_t)best;
     }
     index_cache_valid_ = true;
 }
 
-- (void)flushSurface:(const HostD3DSurface *)surface why:(const char *)why {
+void D3DRenderer::Impl::flushSurface(const HostD3DSurface *surface, const char *why) {
     // POP_HOST_TRACE_FLUSH=1 prints one line per flush that actually wrote
     // something, naming what asked for it. Read against the guest's own blit
     // sequence for a frame, that says whether a software blit landed before or
@@ -1667,12 +1399,12 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     target_pitch_ = surface->pitch;
     if (trace && gpu_dirty_)
         fprintf(stderr, "[host] flush surface %u for %s\n", surface->id, why ? why : "?");
-    [self legacyWriteBackPending];
+    legacyWriteBackPending();
 }
 
 // Writes the mirror into the surface the mirror belongs to, using the pointer
 // and pitch most recently supplied for it.
-- (void)legacyWriteBackPending {
+void D3DRenderer::Impl::legacyWriteBackPending() {
     if (!gpu_dirty_ || !color_ || !staging_ || !target_pixels_)
         return;
 
@@ -1680,48 +1412,24 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     // Flushing without opening the pass would copy out the pixels the clear
     // was about to replace, which is what a Clear followed by a Lock before
     // any EndScene would otherwise read.
-    [self flush];
+    flush();
 
-    id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:color_
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(width_, height_, 1)
-                toTexture:staging_
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit copyFromTexture:coverage_
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(width_, height_, 1)
-                toTexture:coverage_staging_
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
-    track_native_command(cb);
-    [cb commit];
+    gpu::CommandBuffer cb = device_->begin();
+    device_->blit(cb, color_, {0, 0, width_, height_}, staging_, 0, 0);
+    device_->blit(cb, coverage_, {0, 0, width_, height_}, coverage_staging_, 0, 0);
+    host_present_track_command(cb);
+    device_->commit(cb);
     assert(!host_d3d_appkit_pending());
-    [cb waitUntilCompleted];
-    if (cb.status == MTLCommandBufferStatusError) {
+    device_->wait(cb);
+    if (device_->status(cb) == gpu::CommandStatus::Error) {
         fprintf(stderr, "[host] legacy write-back GPU failure\n");
         abort();
     }
 
     std::vector<uint8_t> bgra((size_t)width_ * (size_t)height_ * 4);
-    [staging_ getBytes:bgra.data()
-           bytesPerRow:(NSUInteger)width_ * 4
-            fromRegion:MTLRegionMake2D(0, 0, width_, height_)
-           mipmapLevel:0];
+    device_->readback(staging_, {0, 0, width_, height_}, bgra.data(), width_ * 4);
     std::vector<uint8_t> covered((size_t)width_ * (size_t)height_);
-    [coverage_staging_ getBytes:covered.data()
-                    bytesPerRow:(NSUInteger)width_
-                     fromRegion:MTLRegionMake2D(0, 0, width_, height_)
-                    mipmapLevel:0];
+    device_->readback(coverage_staging_, {0, 0, width_, height_}, covered.data(), width_);
 
     // How much of what the device produced is above black, measured from the
     // pixels this write-back already has in hand. Sampling at a dump instead
@@ -1738,7 +1446,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     mask_shape(target_gmask_, &gs_shift, &gmax);
     mask_shape(target_bmask_, &bs_shift, &bmax);
     if (target_bpp_ == 8 && target_has_palette_ && !index_cache_valid_)
-        [self rebuildIndexCache];
+        rebuildIndexCache();
 
     for (int y = 0; y < h; ++y) {
         const uint8_t *row = bgra.data() + (size_t)y * (size_t)width_ * 4;
@@ -1755,7 +1463,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             if (target_bpp_ == 8) {
                 if (index_cache_valid_) {
                     uint32_t key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
-                    out[x] = (*index_cache_)[key];
+                    out[x] = index_cache_[key];
                 } else {
                     log_once("d3d.rt8",
                              "d3d: the render target is 8-bit with no palette; "
@@ -1788,81 +1496,74 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 
 // --- the encoder ------------------------------------------------------------
 
-- (id<MTLRenderCommandEncoder>)encoder {
-    if (encoder_)
-        return encoder_;
+// Opens the scene render pass on the current command buffer, applying the
+// pending clears as load actions. False when there is no colour target.
+bool D3DRenderer::Impl::encoder() {
+    if (encoding_)
+        return true;
     if (!color_)
-        return nil;
+        return false;
     if (needs_upload_)
-        [self uploadSurface];
-    if (!command_)
-        command_ = [queue_ commandBuffer];
+        uploadSurface();
+    beginCommand();
 
-    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = color_;
-    pass.colorAttachments[0].loadAction =
-        pending_clear_color_ ? MTLLoadActionClear : MTLLoadActionLoad;
-    pass.colorAttachments[0].clearColor = pending_color_;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    gpu::RenderPass pass;
+    pass.color_count = 2;
+    pass.color[0].texture = color_;
+    pass.color[0].load = pending_clear_color_ ? gpu::Load::Clear : gpu::Load::Load;
+    memcpy(pass.color[0].clear, pending_color_, sizeof pending_color_);
+    pass.color[0].store = gpu::Store::Store;
     // A whole-target colour clear covered every pixel, so the mask starts at
     // one; otherwise it starts at zero after a write-back and is carried
     // forward inside a batch.
-    pass.colorAttachments[1].texture = coverage_;
-    pass.colorAttachments[1].loadAction =
-        pending_clear_color_ ? MTLLoadActionClear
-                             : (coverage_reset_pending_ ? MTLLoadActionClear : MTLLoadActionLoad);
-    pass.colorAttachments[1].clearColor =
-        MTLClearColorMake(pending_clear_color_ ? 1.0 : 0.0, 0, 0, 0);
-    pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+    pass.color[1].texture = coverage_;
+    pass.color[1].load = pending_clear_color_
+                             ? gpu::Load::Clear
+                             : (coverage_reset_pending_ ? gpu::Load::Clear : gpu::Load::Load);
+    pass.color[1].clear[0] = pending_clear_color_ ? 1.0f : 0.0f;
+    pass.color[1].clear[1] = pass.color[1].clear[2] = pass.color[1].clear[3] = 0;
+    pass.color[1].store = gpu::Store::Store;
     coverage_reset_pending_ = false;
-    pass.depthAttachment.texture = depth_;
-    pass.depthAttachment.loadAction = pending_clear_depth_ ? MTLLoadActionClear : MTLLoadActionLoad;
-    pass.depthAttachment.clearDepth = pending_depth_;
-    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depth.texture = depth_;
+    pass.depth.load = pending_clear_depth_ ? gpu::Load::Clear : gpu::Load::Load;
+    pass.depth.clear = pending_depth_;
+    pass.depth.store = gpu::Store::Store;
     pending_clear_color_ = pending_clear_depth_ = false;
 
-    encoder_ = [command_ renderCommandEncoderWithDescriptor:pass];
-    [encoder_ setFrontFacingWinding:MTLWindingClockwise];
-    return encoder_;
+    device_->begin_render_pass(command_, pass);
+    encoding_ = true;
+    return true;
 }
 
-- (void)endEncoding {
-    if (encoder_) {
-        [encoder_ endEncoding];
-        encoder_ = nil;
+void D3DRenderer::Impl::endEncoding() {
+    if (encoding_) {
+        device_->end_render_pass(command_);
+        encoding_ = false;
     }
 }
 
-- (void)flush {
+void D3DRenderer::Impl::flush() {
     // A batch that only cleared has nothing encoded yet, and a clear that
     // never reaches the GPU is not a clear. Opening the pass is what applies
     // the load actions the pending clear turned into.
-    if (!encoder_ && color_ && (pending_clear_color_ || pending_clear_depth_))
-        (void)[self encoder];
-    [self endEncoding];
+    if (!encoding_ && color_ && (pending_clear_color_ || pending_clear_depth_))
+        (void)encoder();
+    endEncoding();
     if (command_) {
         last_command_ = command_;
-        track_native_command(command_);
-        [command_ commit];
-        command_ = nil;
+        host_present_track_command(command_);
+        device_->commit(command_);
+        command_ = {};
     }
 }
 
-- (BOOL)acceptsDraw {
-    return !frame_dropped_;
-}
-- (void)collectCleanTargets {
+void D3DRenderer::Impl::collectCleanTargets() {
     for (auto &slot : slots_)
         if (!host_d3d_dirty_rect(slot.surface.id, slot.generation, nullptr))
             slot.coherenceLease.reset();
 }
 
-- (void)setSceneWidth:(int)w height:(int)h {
-    assert(w >= 0 && h >= 0 && ((w == 0) == (h == 0)));
-    scene_width_ = w;
-    scene_height_ = h;
-}
-- (void)saveSlot {
+void D3DRenderer::Impl::saveSlot() {
     if (active_slot_ < 0)
         return;
     SceneSlot &slot = slots_[active_slot_];
@@ -1871,10 +1572,12 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     slot.coverage = coverage_;
     slot.staging = staging_;
     slot.coverageStaging = coverage_staging_;
+    slot.width = width_;
+    slot.height = height_;
     slot.last = last_command_;
     slot.initialized = !needs_upload_;
 }
-- (void)loadSlot:(int)i {
+void D3DRenderer::Impl::loadSlot(int i) {
     active_slot_ = i;
     SceneSlot &slot = slots_[i];
     color_ = slot.color;
@@ -1882,8 +1585,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     coverage_ = slot.coverage;
     staging_ = slot.staging;
     coverage_staging_ = slot.coverageStaging;
-    width_ = (int)color_.width;
-    height_ = (int)color_.height;
+    width_ = slot.width;
+    height_ = slot.height;
     target_id_ = pending_id_ = slot.surface.id;
     target_generation_ = slot.generation;
     target_pixels_ = slot.surface.pixels;
@@ -1906,13 +1609,13 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     coverage_reset_pending_ = !slot.initialized;
     gpu_dirty_ = true;
 }
-- (int)slotFor:(uint32_t)s generation:(uint32_t)g {
+int D3DRenderer::Impl::slotFor(uint32_t s, uint32_t g) const {
     for (int i = 0; i < 4; ++i)
         if (slots_[i].surface.id == s && slots_[i].generation == g)
             return i;
     return -1;
 }
-- (void)refreshSurface:(const HostD3DSurface *)s slot:(int)i {
+void D3DRenderer::Impl::refreshSurface(const HostD3DSurface *s, int i) {
     SceneSlot &slot = slots_[i];
     slot.surface = *s;
     if (s->palette) {
@@ -1930,37 +1633,37 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         index_cache_valid_ = false;
     }
 }
-- (id<MTLTexture>)colorTargetForFrame:(uint64_t)frame {
+gpu::Texture D3DRenderer::Impl::colorTargetForFrame(uint64_t frame) {
     if (active_slot_ >= 0 && slots_[active_slot_].frame == frame) {
-        [self flush];
-        [self saveSlot];
+        flush();
+        saveSlot();
     }
     for (auto &slot : slots_)
         if (slot.frame == frame)
             return slot.color;
-    return nil;
+    return {};
 }
-- (id<MTLCommandBuffer>)completionForFrame:(uint64_t)frame {
+gpu::CommandBuffer D3DRenderer::Impl::completionForFrame(uint64_t frame) {
     if (active_slot_ >= 0 && slots_[active_slot_].frame == frame) {
-        [self flush];
-        [self saveSlot];
+        flush();
+        saveSlot();
     }
     for (auto &slot : slots_)
         if (slot.frame == frame)
             return slot.last;
-    return nil;
+    return {};
 }
-- (void)bindSurface:(const HostD3DSurface *)s generation:(uint32_t)g frame:(uint64_t)f {
+void D3DRenderer::Impl::bindSurface(const HostD3DSurface *s, uint32_t g, uint64_t f) {
     if (!s)
         return;
     incremental_ = true;
     if (active_slot_ >= 0 && slots_[active_slot_].frame == f && target_id_ == s->id &&
         target_generation_ == g) {
-        [self refreshSurface:s slot:active_slot_];
+        refreshSurface(s, active_slot_);
         return;
     }
-    [self flush];
-    [self saveSlot];
+    flush();
+    saveSlot();
     bool managed = host_present_running();
     HostSceneTarget target{};
     if (managed) {
@@ -1973,18 +1676,17 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     // Standalone renderer tests retain the pre-service unclaimed-frame path.
     for (auto &slot : slots_)
         if (slot.unclaimed && slot.frame != f &&
-            (slot.last.status == MTLCommandBufferStatusCompleted ||
-             slot.last.status == MTLCommandBufferStatusError)) {
+            device_->status(slot.last) != gpu::CommandStatus::Pending) {
             uint64_t old = slot.frame;
-            [self retireFrame:old];
+            retireFrame(old);
             host_d3d_release_unclaimed_frame(old);
         }
-    int source = [self slotFor:s->id generation:g];
+    int source = slotFor(s->id, g);
     if (!managed && source >= 0 && (!slots_[source].frame || slots_[source].frame == f)) {
         slots_[source].frame = f;
-        [self loadSlot:source];
-        [self refreshSurface:s slot:source];
-        [self captureReplaySeed];
+        loadSlot(source);
+        refreshSurface(s, source);
+        captureReplaySeed();
         return;
     }
     int dest = -1;
@@ -2001,7 +1703,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             if (i != source && slots_[i].unclaimed &&
                 !host_d3d_dirty_rect(slots_[i].surface.id, slots_[i].generation, nullptr)) {
                 uint64_t old = slots_[i].frame;
-                [self retireFrame:old];
+                retireFrame(old);
                 host_d3d_release_unclaimed_frame(old);
                 dest = i;
                 break;
@@ -2033,8 +1735,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     coverage_ = reuse.coverage;
     staging_ = reuse.staging;
     coverage_staging_ = reuse.coverageStaging;
-    width_ = (int)color_.width;
-    height_ = (int)color_.height;
+    width_ = reuse.width;
+    height_ = reuse.height;
     target_id_ = 0;
     guest_width_ = guest_height_ = 0;
     pending_clear_color_ = pending_clear_depth_ = coverage_reset_pending_ = true;
@@ -2048,7 +1750,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         scene_width_ = target.w;
         scene_height_ = target.h;
     }
-    [self setRenderTarget:s];
+    setRenderTarget(s);
     target_generation_ = g;
     acquiringTarget_ = {};
     scene_width_ = requestedWidth;
@@ -2064,38 +1766,39 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     slot.presentTarget = target;
     slot.coherenceLease = host_present_target_lease(target.world);
     if (target.overlay) {
-        auto desc =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                               width:s->width
-                                                              height:s->height
-                                                           mipmapped:NO];
-        desc.usage = MTLTextureUsageRenderTarget;
-        desc.storageMode = MTLStorageModePrivate;
-        if (!slot.overlayDepth || slot.overlayDepth.width != s->width ||
-            slot.overlayDepth.height != s->height) {
-            slot.overlayDepth = [device_ newTextureWithDescriptor:desc];
+        const gpu::TextureDesc have =
+            slot.overlayDepth ? device_->describe(slot.overlayDepth) : gpu::TextureDesc{};
+        if (!slot.overlayDepth || have.width != s->width || have.height != s->height) {
+            if (slot.overlayDepth)
+                device_->destroy(slot.overlayDepth);
+            if (slot.overlayCoverage)
+                device_->destroy(slot.overlayCoverage);
+            slot.overlayDepth = makeTarget(s->width, s->height, gpu::Format::Depth32F, false);
             if (slot.overlayDepth)
                 ++storage_stats_.scene_textures;
-            desc.pixelFormat = MTLPixelFormatR8Unorm;
-            slot.overlayCoverage = [device_ newTextureWithDescriptor:desc];
+            slot.overlayCoverage = makeTarget(s->width, s->height, gpu::Format::R8, false);
             if (slot.overlayCoverage)
                 ++storage_stats_.scene_textures;
         }
-        if (!command_)
-            command_ = [queue_ commandBuffer];
-        auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = present_texture(target.overlay);
-        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
-        pass.colorAttachments[1].texture = slot.overlayCoverage;
-        pass.colorAttachments[1].loadAction = MTLLoadActionClear;
-        pass.colorAttachments[1].storeAction = MTLStoreActionStore;
-        pass.depthAttachment.texture = slot.overlayDepth;
-        pass.depthAttachment.loadAction = MTLLoadActionClear;
-        pass.depthAttachment.storeAction = MTLStoreActionStore;
-        pass.depthAttachment.clearDepth = 1;
-        [[command_ renderCommandEncoderWithDescriptor:pass] endEncoding];
+        beginCommand();
+        gpu::RenderPass pass;
+        pass.color_count = 2;
+        pass.color[0].texture = target.overlay;
+        pass.color[0].load = gpu::Load::Clear;
+        pass.color[0].store = gpu::Store::Store;
+        pass.color[0].clear[0] = pass.color[0].clear[1] = pass.color[0].clear[2] =
+            pass.color[0].clear[3] = 0;
+        pass.color[1].texture = slot.overlayCoverage;
+        pass.color[1].load = gpu::Load::Clear;
+        pass.color[1].store = gpu::Store::Store;
+        pass.color[1].clear[0] = pass.color[1].clear[1] = pass.color[1].clear[2] =
+            pass.color[1].clear[3] = 0;
+        pass.depth.texture = slot.overlayDepth;
+        pass.depth.load = gpu::Load::Clear;
+        pass.depth.store = gpu::Store::Store;
+        pass.depth.clear = 1;
+        device_->begin_render_pass(command_, pass);
+        device_->end_render_pass(command_);
     }
     if (s->palette) {
         memcpy(slot.palette, s->palette, sizeof slot.palette);
@@ -2103,31 +1806,21 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     }
     if (source >= 0) {
         SceneSlot &old = slots_[source];
-        bool sameSize = old.color.width == color_.width && old.color.height == color_.height;
-        if (!command_)
-            command_ = [queue_ commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [command_ blitCommandEncoder];
-        id<MTLTexture> from[] = {old.color, old.depth, old.coverage};
-        id<MTLTexture> to[] = {color_, depth_, coverage_};
+        bool sameSize = old.width == width_ && old.height == height_;
+        beginCommand();
+        gpu::Texture from[] = {old.color, old.depth, old.coverage};
+        gpu::Texture to[] = {color_, depth_, coverage_};
         for (int k = 0; sameSize && k < 3; ++k)
-            [blit copyFromTexture:from[k]
-                      sourceSlice:0
-                      sourceLevel:0
-                     sourceOrigin:MTLOriginMake(0, 0, 0)
-                       sourceSize:MTLSizeMake(width_, height_, 1)
-                        toTexture:to[k]
-                 destinationSlice:0
-                 destinationLevel:0
-                destinationOrigin:MTLOriginMake(0, 0, 0)];
-        [blit endEncoding];
+            device_->blit(command_, from[k], {0, 0, width_, height_}, to[k], 0, 0);
         if (!sameSize) {
             CompositorInput in{};
             in.cls = HOST_SCREEN_GAMEPLAY;
+            in.world = old.color;
             in.guest_w = s->width;
             in.guest_h = s->height;
             in.drawable_w = width_;
             in.drawable_h = height_;
-            compose_native(in, old.color, color_, command_);
+            compositor_compose(device_, &in, color_, command_);
         }
         needs_upload_ = false;
         pending_clear_color_ = false;
@@ -2137,10 +1830,10 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         // belong to the newer target after the first write.
         old.surface.id = 0;
     }
-    [self saveSlot];
-    [self captureReplaySeed];
+    saveSlot();
+    captureReplaySeed();
 }
-- (void)sealFrame:(uint64_t)f {
+void D3DRenderer::Impl::sealFrame(uint64_t f) {
     bool ownsTarget = false;
     for (auto &slot : slots_)
         if (slot.frame == f)
@@ -2148,12 +1841,12 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     if (ownsTarget &&
         (host_frame_legacy({f}) ||
          (active_slot_ >= 0 && slots_[active_slot_].materializedLayers)) &&
-        !host_d3d_legacy_writeback() && ![self replayLegacyFrame:f]) {
+        !host_d3d_legacy_writeback() && !replayLegacyFrame(f)) {
         fprintf(stderr, "[host] legacy replay failed for frame %llu\n", (unsigned long long)f);
         abort();
     }
-    [self flush];
-    [self saveSlot];
+    flush();
+    saveSlot();
     if (host_present_running() && !frame_dropped_) {
         for (auto &slot : slots_)
             if (slot.frame == f && slot.presentTarget.world) {
@@ -2171,12 +1864,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 if (in.legacy) {
                     in.world = {};
                     in.overlay = {};
-                    // The renderer's own colour texture. Importing the same
-                    // object again returns the same handle, so the presenter's
-                    // cached input stays valid across frames.
-                    slot.legacyImport =
-                        gpu::metal::import_texture(host_present_device(), slot.color);
-                    in.legacy_frame = slot.legacyImport;
+                    in.legacy_frame = slot.color;
                 }
                 host_present_set_input(&in);
             }
@@ -2187,26 +1875,26 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         if (slot.frame == f)
             slot.unclaimed = unclaimed;
 }
-- (void)retireFrame:(uint64_t)f {
+void D3DRenderer::Impl::retireFrame(uint64_t f) {
     if (active_slot_ >= 0 && slots_[active_slot_].frame == f) {
-        [self flush];
-        [self saveSlot];
+        flush();
+        saveSlot();
     }
     for (auto &slot : slots_)
         if (slot.frame == f) {
             assert(!host_d3d_appkit_pending());
-            if (!slot.presentTarget.world)
-                [slot.last waitUntilCompleted];
+            if (!slot.presentTarget.world && slot.last)
+                device_->wait(slot.last);
             slot.frame = 0;
             slot.unclaimed = false;
-            slot.replay.reset();
+            slot.replay.reset(device_);
             if (!host_d3d_dirty_rect(slot.surface.id, slot.generation, nullptr))
                 slot.coherenceLease.reset();
         }
 }
-- (void)swapSurface:(uint32_t)a generation:(uint32_t)ag other:(uint32_t)b generation:(uint32_t)bg {
-    [self flush];
-    [self saveSlot];
+void D3DRenderer::Impl::swapSurface(uint32_t a, uint32_t ag, uint32_t b, uint32_t bg) {
+    flush();
+    saveSlot();
     for (auto &slot : slots_) {
         if (slot.surface.id == a && slot.generation == ag) {
             slot.surface.id = b;
@@ -2217,33 +1905,30 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         }
     }
     if (active_slot_ >= 0)
-        [self loadSlot:active_slot_];
+        loadSlot(active_slot_);
 }
 
 // One command-buffer wait for all dirty islands touched by this reader. No
-// main-queue dispatch, drawable acquisition, or AppKit call is on this path.
-- (BOOL)coherentSurface:(const HostD3DSurface *)surface
-             generation:(uint32_t)generation
-                  rects:(const HostDirtyRect *)rects
-                  count:(uint32_t)count {
-    int slot = [self slotFor:surface->id generation:generation];
+// main-queue dispatch, drawable acquisition, or window call is on this path.
+bool D3DRenderer::Impl::coherentSurface(const HostD3DSurface *surface, uint32_t generation,
+                                        const HostDirtyRect *rects, uint32_t count) {
+    int slot = slotFor(surface->id, generation);
     if (slot < 0)
-        return NO;
+        return false;
     // A reader needs the guest's original ordering, including CPU HUD and UI
     // overlays. Reuse T5's retained journal to materialize that picture; the
     // frame then presents this full image instead of mixing it with layers.
     if (slots_[slot].separateLayers)
         slots_[slot].materializedLayers = true;
     if (host_frame_legacy({slots_[slot].frame}) || slots_[slot].materializedLayers)
-        return [self replayLegacyFrame:slots_[slot].frame];
-    [self flush];
-    [self saveSlot];
+        return replayLegacyFrame(slots_[slot].frame);
+    flush();
+    saveSlot();
     int previous = active_slot_;
-    [self loadSlot:slot];
-    [self refreshSurface:surface slot:slot];
-    [self flush];
-    id<MTLCommandBuffer> render = readback_timings_ ? last_command_ : nil;
-    id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+    loadSlot(slot);
+    refreshSurface(surface, slot);
+    flush();
+    gpu::CommandBuffer cb = device_->begin();
     size_t pixels = 0;
     std::vector<size_t> offsets;
     for (uint32_t i = 0; i < count; ++i) {
@@ -2251,36 +1936,30 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         pixels += size_t(rects[i].x1 - rects[i].x0) * (rects[i].y1 - rects[i].y0);
     }
     if (!pixels) {
-        [self saveSlot];
+        device_->commit(cb);
+        saveSlot();
         if (previous >= 0)
-            [self loadSlot:previous];
-        return YES;
+            loadSlot(previous);
+        return true;
     }
-    if (readback_buffer_.length < pixels * 8)
-        readback_buffer_ = [device_ newBufferWithLength:pixels * 8
-                                                options:MTLResourceStorageModeShared];
-    if (!readback_buffer_)
-        return NO;
-    auto make_compute = [&](id<MTLCounterSampleBuffer> counter) {
-        // Dispatches read immutable textures and write disjoint output ranges.
-        // No dispatch consumes another dispatch's output. Tracked resources
-        // order the preceding render pass; the CPU waits for the whole buffer.
-        if (!counter)
-            return [cb computeCommandEncoderWithDispatchType:tiled_readback_
-                                                                 ? MTLDispatchTypeConcurrent
-                                                                 : MTLDispatchTypeSerial];
-        MTLComputePassDescriptor *desc = [MTLComputePassDescriptor new];
-        desc.sampleBufferAttachments[0].sampleBuffer = counter;
-        desc.sampleBufferAttachments[0].startOfEncoderSampleIndex = 0;
-        desc.sampleBufferAttachments[0].endOfEncoderSampleIndex = 1;
-        return [cb computeCommandEncoderWithDescriptor:desc];
-    };
-    id<MTLComputeCommandEncoder> compute = make_compute(sample_counter_);
-    [compute
-        setComputePipelineState:tiled_readback_ ? readback_pipeline_ : readback_fused_pipeline_];
-    [compute setTexture:color_ atIndex:0];
-    [compute setTexture:coverage_ atIndex:1];
-    [compute setBuffer:readback_buffer_ offset:0 atIndex:0];
+    if (readback_buffer_bytes_ < pixels * 8) {
+        if (readback_buffer_)
+            device_->destroy(readback_buffer_);
+        readback_buffer_ = device_->create_buffer(pixels * 8, nullptr);
+        readback_buffer_bytes_ = readback_buffer_ ? pixels * 8 : 0;
+    }
+    if (!readback_buffer_) {
+        device_->commit(cb);
+        return false;
+    }
+    // Dispatches read immutable textures and write disjoint output ranges.
+    // No dispatch consumes another dispatch's output. The device orders the
+    // preceding render pass; the CPU waits for the whole buffer.
+    device_->begin_compute_pass(cb);
+    device_->set_pipeline(cb, tiled_readback_ ? readback_pipeline_ : readback_fused_pipeline_);
+    device_->set_texture(cb, gpu::Stage::Compute, 0, color_);
+    device_->set_texture(cb, gpu::Stage::Compute, 1, coverage_);
+    device_->set_buffer(cb, gpu::Stage::Compute, 0, readback_buffer_, 0);
     auto edge = [](int x, int n, int g) { return (int)(((int64_t)x * n + g - 1) / g); };
     for (uint32_t i = 0; i < count; ++i) {
         auto r = rects[i];
@@ -2296,37 +1975,35 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                              uint32_t(edge(r.x1, width_, guest_width_)),
                              uint32_t(edge(r.y1, height_, guest_height_)),
                              0};
-        [compute setBytes:params length:sizeof params atIndex:1];
-        [compute dispatchThreads:MTLSizeMake(r.x1 - r.x0, r.y1 - r.y0, 1)
-            threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+        device_->set_bytes(cb, gpu::Stage::Compute, 1, params, sizeof params);
+        device_->dispatch_threads(cb, r.x1 - r.x0, r.y1 - r.y0, 8, 8);
     }
     size_t brightness_count = 0;
     if (tiled_readback_) {
         // Query the pipeline width instead of assuming a particular GPU's
         // SIMD width. Every dispatch uses complete 16x16 threadgroups.
-        const NSUInteger simds = (256 + brightness_pipeline_.threadExecutionWidth - 1) /
-                                 brightness_pipeline_.threadExecutionWidth;
+        const int width = std::max(1, device_->thread_execution_width(brightness_pipeline_));
+        const size_t simds = (256 + width - 1) / width;
         for (uint32_t i = 0; i < count; ++i) {
             auto r = rects[i];
             size_t w = edge(r.x1, width_, guest_width_) - edge(r.x0, width_, guest_width_);
             size_t h = edge(r.y1, height_, guest_height_) - edge(r.y0, height_, guest_height_);
             brightness_count += ((w + 31) / 32) * ((h + 31) / 32) * simds;
         }
-        if (brightness_buffer_.length < brightness_count * 4)
-            brightness_buffer_ = [device_ newBufferWithLength:brightness_count * 4
-                                                      options:MTLResourceStorageModeShared];
+        if (brightness_buffer_bytes_ < brightness_count * 4) {
+            if (brightness_buffer_)
+                device_->destroy(brightness_buffer_);
+            brightness_buffer_ = device_->create_buffer(brightness_count * 4, nullptr);
+            brightness_buffer_bytes_ = brightness_buffer_ ? brightness_count * 4 : 0;
+        }
         if (brightness_count && !brightness_buffer_) {
-            [compute endEncoding];
-            return NO;
+            device_->end_compute_pass(cb);
+            device_->commit(cb);
+            return false;
         }
-        if (sample_counter_) {
-            [compute endEncoding];
-            compute = make_compute(brightness_counter_);
-            [compute setTexture:color_ atIndex:0];
-        }
-        [compute setComputePipelineState:brightness_pipeline_];
+        device_->set_pipeline(cb, brightness_pipeline_);
         if (brightness_count)
-            [compute setBuffer:brightness_buffer_ offset:0 atIndex:0];
+            device_->set_buffer(cb, gpu::Stage::Compute, 0, brightness_buffer_, 0);
         size_t offset = 0;
         for (uint32_t i = 0; i < count; ++i) {
             auto r = rects[i];
@@ -2336,37 +2013,40 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             if (!gx || !gy)
                 continue;
             uint32_t params[] = {x0, y0, x1, y1, uint32_t(offset), gx, uint32_t(simds), 0};
-            [compute setBytes:params length:sizeof params atIndex:1];
-            [compute dispatchThreadgroups:MTLSizeMake(gx, gy, 1)
-                    threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+            device_->set_bytes(cb, gpu::Stage::Compute, 1, params, sizeof params);
+            device_->dispatch_groups(cb, int(gx), int(gy), 16, 16);
             offset += size_t(gx) * gy * simds;
         }
     }
-    [compute endEncoding];
-    track_native_command(cb);
-    double wait_begin = readback_timings_ ? CACurrentMediaTime() : 0;
-    [cb commit];
+    device_->end_compute_pass(cb);
+    host_present_track_command(cb);
+    double render_ms = -1, readback_ms = -1;
+    if (readback_timings_)
+        device_->on_complete(cb,
+                             [&readback_ms](gpu::CommandStatus, double ms) { readback_ms = ms; });
+    double wait_begin = readback_timings_ ? device_->now_seconds() : 0;
+    device_->commit(cb);
     assert(!host_d3d_appkit_pending());
-    [cb waitUntilCompleted];
+    device_->wait(cb);
     last_command_ = cb;
-    double copy_begin = readback_timings_ ? CACurrentMediaTime() : 0;
-    if (cb.status == MTLCommandBufferStatusError)
-        return NO;
+    double copy_begin = readback_timings_ ? device_->now_seconds() : 0;
+    if (device_->status(cb) == gpu::CommandStatus::Error)
+        return false;
     int rs = 0, gs = 0, bs = 0;
     uint32_t rm = 0, gm = 0, bm = 0;
     mask_shape(target_rmask_, &rs, &rm);
     mask_shape(target_gmask_, &gs, &gm);
     mask_shape(target_bmask_, &bs, &bm);
     if (target_bpp_ == 8 && target_has_palette_ && !index_cache_valid_)
-        [self rebuildIndexCache];
+        rebuildIndexCache();
     // Small reads stay on the calling thread; large reads use at most four
-    // jobs on the system pool. The guest remains stopped until all rows join.
+    // threads. The guest remains stopped until all rows join.
     uint32_t workers = pixels >= 128 * 1024 ? readback_workers_ : 1;
     ReadbackCopy copy{rects,
                       offsets.data(),
-                      (const uint32_t *)readback_buffer_.contents,
+                      (const uint32_t *)device_->map_read(readback_buffer_),
                       (uint8_t *)target_pixels_,
-                      target_has_palette_ && index_cache_valid_ ? index_cache_->data() : nullptr,
+                      target_has_palette_ && index_cache_valid_ ? index_cache_.data() : nullptr,
                       count,
                       workers,
                       rm,
@@ -2377,20 +2057,27 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                       rs,
                       gs,
                       bs};
+    if (!copy.sampled)
+        return false;
     if (workers > 1) {
-        dispatch_apply_f(workers, DISPATCH_APPLY_AUTO, &copy, copy_readback_rows);
+        std::vector<std::thread> threads;
+        for (uint32_t shard = 1; shard < workers; ++shard)
+            threads.emplace_back(copy_readback_rows, &copy, size_t(shard));
+        copy_readback_rows(&copy, 0);
+        for (auto &t : threads)
+            t.join();
         ++storage_stats_.parallel_readbacks;
     } else
         copy_readback_rows(&copy, 0);
     size_t lit = 0;
     for (uint32_t i = 0; i < workers; ++i) {
         if (copy.result[i].failed)
-            return NO;
+            return false;
         lit += copy.result[i].lit;
     }
     if (tiled_readback_) {
-        const uint32_t *counts = (const uint32_t *)brightness_buffer_.contents;
-        for (size_t i = 0; i < brightness_count; ++i)
+        const uint32_t *counts = (const uint32_t *)device_->map_read(brightness_buffer_);
+        for (size_t i = 0; counts && i < brightness_count; ++i)
             lit += counts[i];
     }
     // The tracker supplies disjoint islands. Count only pixels read in this
@@ -2398,52 +2085,39 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     // report a fully lit scene. This is a lower bound for partial reads and
     // the exact scene ratio for full reads, without any extra GPU readback.
     note_scene_nonblack(lit, (size_t)width_ * height_);
-    const double copy_end = readback_timings_ ? CACurrentMediaTime() : 0;
-    auto stage_ms = [&](id<MTLCounterSampleBuffer> counter) -> double {
-        if (!counter)
-            return -1;
-        NSData *data = [counter resolveCounterRange:NSMakeRange(0, 2)];
-        if (data.length != 2 * sizeof(MTLCounterResultTimestamp))
-            return -1;
-        const auto *times = (const MTLCounterResultTimestamp *)data.bytes;
-        if (times[0].timestamp == MTLCounterErrorValue ||
-            times[1].timestamp == MTLCounterErrorValue || times[1].timestamp < times[0].timestamp)
-            return -1;
-        return double(times[1].timestamp - times[0].timestamp) / 1e6;
-    };
+    const double copy_end = readback_timings_ ? device_->now_seconds() : 0;
+    // The per-stage counter columns the Metal renderer could attribute are
+    // not part of the device interface; they read -1.
     if (readback_timings_)
         fprintf(readback_timings_, "%d,%d,%u,%u,%u,%u,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", width_,
                 height_, submit_draws_, early_submissions_, g_draws_since_present, workers,
-                tiled_readback_ ? "tiled" : "fused",
-                render ? (render.GPUEndTime - render.GPUStartTime) * 1000 : 0,
-                (cb.GPUEndTime - cb.GPUStartTime) * 1000, (copy_begin - wait_begin) * 1000,
-                (copy_end - copy_begin) * 1000, stage_ms(sample_counter_),
-                tiled_readback_ ? stage_ms(brightness_counter_) : -1);
+                tiled_readback_ ? "tiled" : "fused", render_ms, readback_ms,
+                (copy_begin - wait_begin) * 1000, (copy_end - copy_begin) * 1000, -1.0, -1.0);
     ++g_total_flushes;
     // Do not schedule a whole-surface upload or clear depth. The next encoder
     // loads all three attachments from the just-completed prefix.
-    [self saveSlot];
+    saveSlot();
     if (previous >= 0)
-        [self loadSlot:previous];
-    return YES;
+        loadSlot(previous);
+    return true;
 }
 
-- (void)applyCPU:(const HostD3DSurface *)surface record:(const HostBlitRecord *)r {
+void D3DRenderer::Impl::applyCPU(const HostD3DSurface *surface, const HostBlitRecord *r) {
     if (frame_dropped_)
         return;
     if (!r || r->src.surface != HOST_SRC_CPU || !r->cpu_pixels || r->w <= 0 || r->h <= 0)
         return;
-    int slot = [self slotFor:r->dst generation:r->dst_generation];
+    int slot = slotFor(r->dst, r->dst_generation);
     if (slot < 0)
         return; // no GPU version: first draw uploads guest storage
     int previous = active_slot_;
     if (slot != previous) {
-        [self flush];
-        [self saveSlot];
-        [self loadSlot:slot];
+        flush();
+        saveSlot();
+        loadSlot(slot);
     }
     if (!replaying_) {
-        [self captureReplayCheckpoint:YES];
+        captureReplayCheckpoint(true);
         ReplayStep step;
         step.seq = r->seq;
         step.record = *r;
@@ -2470,22 +2144,20 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         // a duplicate at the old guest position after the compositor anchors UI.
         slots_[slot].separateLayers = true;
         if (slot != previous) {
-            [self saveSlot];
+            saveSlot();
             if (previous >= 0)
-                [self loadSlot:previous];
+                loadSlot(previous);
         }
         return;
     }
     // Materialize a pending Clear before the upload, then continue in the
     // same command buffer. CPU writes do not themselves require a submission.
-    if (!encoder_ && (pending_clear_color_ || pending_clear_depth_))
-        (void)[self encoder];
+    if (!encoding_ && (pending_clear_color_ || pending_clear_depth_))
+        (void)encoder();
     if (needs_upload_)
-        [self uploadSurface];
-    [self endEncoding];
-    if (!command_)
-        command_ = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [command_ blitCommandEncoder];
+        uploadSurface();
+    endEncoding();
+    beginCommand();
     int rs = 0, gs = 0, bs = 0;
     uint32_t rm = 0, gm = 0, bm = 0;
     mask_shape(surface->rmask, &rs, &rm);
@@ -2554,130 +2226,87 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 }
             // Each buffer is immutable and retained by the command buffer. Reusing
             // a shared staging texture here races an earlier in-flight upload.
-            id<MTLBuffer> pixels = [self argumentBytes:data.data() length:data.size()];
-            id<MTLBuffer> mask = [self argumentBytes:zero.data() length:zero.size()];
-            for (int k = 0; k < 2; ++k)
-                [blit copyFromBuffer:k ? mask : pixels
-                           sourceOffset:0
-                      sourceBytesPerRow:pitch
-                    sourceBytesPerImage:pitch * (y1 - y0)
-                             sourceSize:MTLSizeMake(x1 - x0, y1 - y0, 1)
-                              toTexture:k ? coverage_ : color_
-                       destinationSlice:0
-                       destinationLevel:0
-                      destinationOrigin:MTLOriginMake(x0, y0, 0)];
+            gpu::Buffer pixels = argumentBytes(data.data(), data.size());
+            gpu::Buffer mask = argumentBytes(zero.data(), zero.size());
+            device_->copy_buffer_to_texture(command_, pixels, 0, int(pitch), color_,
+                                            {x0, y0, x1 - x0, y1 - y0});
+            device_->copy_buffer_to_texture(command_, mask, 0, int(pitch), coverage_,
+                                            {x0, y0, x1 - x0, y1 - y0});
         }
-    [blit endEncoding];
     if (slot != previous) {
-        [self flush];
-        [self saveSlot];
+        flush();
+        saveSlot();
         if (previous >= 0)
-            [self loadSlot:previous];
+            loadSlot(previous);
     } else
-        [self saveSlot];
+        saveSlot();
 }
 
 // --- state objects ----------------------------------------------------------
 
-- (id<MTLRenderPipelineState>)pipelineForBlend:(BOOL)enabled
-                                           src:(MTLBlendFactor)src
-                                           dst:(MTLBlendFactor)dst
-                                    writeColor:(BOOL)writeColor {
+gpu::Pipeline D3DRenderer::Impl::pipelineForBlend(bool enabled, gpu::Blend src, gpu::Blend dst,
+                                                  bool writeColor) {
     uint64_t key = ((uint64_t)overlay_rendering_ << 41) | ((uint64_t)enabled << 40) |
                    ((uint64_t)writeColor << 32) | ((uint64_t)src << 16) | (uint64_t)dst;
-    auto it = pipelines_->find(key);
-    if (it != pipelines_->end())
+    auto it = pipelines_.find(key);
+    if (it != pipelines_.end())
         return it->second;
-
-    MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
-    d.vertexFunction = [library_ newFunctionWithName:@"d3d_vertex"];
-    d.fragmentFunction = [library_ newFunctionWithName:@"d3d_fragment"];
-    d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    gpu::RenderState state;
+    state.color_format[0] = gpu::Format::BGRA8;
     // The coverage mask never blends: a fragment either landed here or it did
     // not. It is masked off exactly when the colour is, because a draw that
     // writes no colour has not touched the surface either.
-    d.colorAttachments[1].pixelFormat = MTLPixelFormatR8Unorm;
-    d.colorAttachments[1].blendingEnabled = NO;
-    d.colorAttachments[1].writeMask = writeColor ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
-    d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-    d.colorAttachments[0].writeMask = writeColor ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
-    d.colorAttachments[0].blendingEnabled = enabled;
-    d.colorAttachments[0].sourceRGBBlendFactor = src;
-    d.colorAttachments[0].destinationRGBBlendFactor = dst;
-    d.colorAttachments[0].sourceAlphaBlendFactor = overlay_rendering_ ? MTLBlendFactorOne : src;
-    d.colorAttachments[0].destinationAlphaBlendFactor =
-        overlay_rendering_ ? MTLBlendFactorOneMinusSourceAlpha : dst;
-    NSError *error = nil;
-    id<MTLRenderPipelineState> state = [device_ newRenderPipelineStateWithDescriptor:d
-                                                                               error:&error];
-    if (!state) {
-        fprintf(stderr, "[host] Direct3D pipeline state failed: %s\n",
-                error ? error.localizedDescription.UTF8String : "unknown error");
-        return nil;
+    state.color_format[1] = gpu::Format::R8;
+    state.color_count = 2;
+    state.depth_attachment = true;
+    state.write_color = writeColor;
+    state.blend_enabled = enabled;
+    state.src_rgb = src;
+    state.dst_rgb = dst;
+    state.src_alpha = overlay_rendering_ ? gpu::Blend::One : src;
+    state.dst_alpha = overlay_rendering_ ? gpu::Blend::OneMinusSrcAlpha : dst;
+    state.writes_point_size = true;
+    gpu::Pipeline pipeline = device_->render_pipeline("d3d", state);
+    if (!pipeline) {
+        fprintf(stderr, "[host] Direct3D pipeline state failed\n");
+        return {};
     }
-    (*pipelines_)[key] = state;
-    return state;
+    pipelines_[key] = pipeline;
+    return pipeline;
 }
 
-- (id<MTLDepthStencilState>)depthStateWithCompare:(MTLCompareFunction)fn write:(BOOL)write {
-    uint64_t key = ((uint64_t)fn << 1) | (write ? 1u : 0u);
-    auto it = depths_->find(key);
-    if (it != depths_->end())
-        return it->second;
-    MTLDepthStencilDescriptor *d = [[MTLDepthStencilDescriptor alloc] init];
-    d.depthCompareFunction = fn;
-    d.depthWriteEnabled = write;
-    id<MTLDepthStencilState> state = [device_ newDepthStencilStateWithDescriptor:d];
-    (*depths_)[key] = state;
-    return state;
-}
-
-- (id<MTLSamplerState>)samplerU:(MTLSamplerAddressMode)u
-                              v:(MTLSamplerAddressMode)v
-                            mag:(MTLSamplerMinMagFilter)mag
-                            min:(MTLSamplerMinMagFilter)minf
-                            mip:(MTLSamplerMipFilter)mip
-                     anisotropy:(NSUInteger)anisotropy {
-    uint64_t key = ((uint64_t)u << 16) | ((uint64_t)v << 12) | ((uint64_t)mag << 8) |
-                   ((uint64_t)minf << 4) | (uint64_t)mip | (uint64_t(anisotropy) << 24);
-    auto it = samplers_->find(key);
-    if (it != samplers_->end())
-        return it->second;
-    MTLSamplerDescriptor *d = [[MTLSamplerDescriptor alloc] init];
-    d.sAddressMode = u;
-    d.tAddressMode = v;
-    d.magFilter = mag;
-    d.minFilter = minf;
-    d.mipFilter = mip;
-    d.maxAnisotropy = anisotropy;
-    id<MTLSamplerState> state = [device_ newSamplerStateWithDescriptor:d];
-    (*samplers_)[key] = state;
-    return state;
+void D3DRenderer::Impl::setSampler(int slot, gpu::Address u, gpu::Address v, gpu::Filter mag,
+                                   gpu::Filter minf, gpu::MipFilter mip, int anisotropy) {
+    gpu::SamplerState s;
+    s.u = u;
+    s.v = v;
+    s.mag = mag;
+    s.min = minf;
+    s.mip = mip;
+    s.anisotropy = anisotropy;
+    device_->set_sampler(command_, gpu::Stage::Fragment, slot, s);
 }
 
 // --- the callbacks ----------------------------------------------------------
 
-- (void)beginScene {
+void D3DRenderer::Impl::beginScene() {
     in_scene_ = true;
     encoded_draws_ = early_submissions_ = 0;
 }
-- (void)sealCommands {
-    [self flush];
-}
 
-- (void)endScene {
+void D3DRenderer::Impl::endScene() {
     in_scene_ = false;
     // Not a flush to the surface: EndScene does not present, and the shim
     // calls flushSurface before anything actually looks at the pixels. This
     // only stops work sitting in an open command buffer.
-    [self flush];
-    [self dumpScene];
+    flush();
+    dumpScene();
 }
 
 // The render target as the device left it, before anything the guest blits
 // over it. Separate from the presented frame on purpose: seeing both says
 // whether a dark scene was rendered dark or darkened afterwards.
-- (void)dumpScene {
+void D3DRenderer::Impl::dumpScene() {
     uint32_t every = host_dump_every();
     if (!every || !color_ || !width_ || !height_)
         return;
@@ -2686,7 +2315,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         return;
     std::vector<uint8_t> bgra((size_t)width_ * (size_t)height_ * 4);
     int w = 0, h = 0;
-    if (![self readPixels:bgra.data() width:&w height:&h])
+    if (!readPixels(bgra.data(), &w, &h))
         return;
     std::vector<uint8_t> rgb((size_t)w * (size_t)h * 3);
     for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; ++i) {
@@ -2699,11 +2328,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     host_write_ppm(path, rgb.data(), w, h);
 }
 
-- (void)clearFlags:(uint32_t)flags
-             rects:(const int32_t *)rects
-             count:(uint32_t)count
-             color:(uint32_t)color
-             depth:(float)depth {
+void D3DRenderer::Impl::clearFlags(uint32_t flags, const int32_t *rects, uint32_t count,
+                                   uint32_t color, float depth) {
     if (!color_)
         return;
     float r, g, b, a;
@@ -2725,10 +2351,13 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         whole =
             rects[0] <= 0 && rects[1] <= 0 && rects[2] >= guest_width_ && rects[3] >= guest_height_;
     }
-    if (whole && !encoder_) {
+    if (whole && !encoding_) {
         if (clear_color) {
             pending_clear_color_ = true;
-            pending_color_ = MTLClearColorMake(r, g, b, a);
+            pending_color_[0] = r;
+            pending_color_[1] = g;
+            pending_color_[2] = b;
+            pending_color_[3] = a;
             // A whole-target colour clear replaces the surface's contents, so
             // there is nothing left to read in from it.
             needs_upload_ = false;
@@ -2740,36 +2369,27 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         return;
     }
 
-    id<MTLRenderCommandEncoder> enc = [self encoder];
-    if (!enc)
+    if (!encoder())
         return;
-    id<MTLRenderPipelineState> pipeline = [self pipelineForBlend:NO
-                                                             src:MTLBlendFactorOne
-                                                             dst:MTLBlendFactorZero
-                                                      writeColor:clear_color ? YES : NO];
+    gpu::Pipeline pipeline =
+        pipelineForBlend(false, gpu::Blend::One, gpu::Blend::Zero, clear_color);
     if (!pipeline)
         return;
-    [enc setRenderPipelineState:pipeline];
-    [enc setDepthStencilState:[self depthStateWithCompare:MTLCompareFunctionAlways
-                                                    write:clear_depth ? YES : NO]];
-    [enc setCullMode:MTLCullModeNone];
-    [enc setViewport:(MTLViewport){0, 0, (double)width_, (double)height_, 0, 1}];
+    device_->set_pipeline(command_, pipeline);
+    device_->set_depth(command_, {gpu::Compare::Always, clear_depth});
+    device_->set_cull(command_, gpu::Cull::None);
+    device_->set_viewport(command_, {0, 0, (double)width_, (double)height_, 0, 1});
 
     Uniforms u;
     memset(&u, 0, sizeof u);
     identity(u.mvp);
     u.pretransformed = 1;
     u.pointsize = 1.0f;
-    [enc setVertexBytes:&u length:sizeof u atIndex:1];
-    [enc setFragmentBytes:&u length:sizeof u atIndex:1];
-    [enc setFragmentTexture:white_ atIndex:0];
-    [enc setFragmentSamplerState:[self samplerU:MTLSamplerAddressModeClampToEdge
-                                              v:MTLSamplerAddressModeClampToEdge
-                                            mag:MTLSamplerMinMagFilterNearest
-                                            min:MTLSamplerMinMagFilterNearest
-                                            mip:MTLSamplerMipFilterNotMipmapped
-                                     anisotropy:1]
-                         atIndex:0];
+    device_->set_bytes(command_, gpu::Stage::Vertex, 1, &u, sizeof u);
+    device_->set_bytes(command_, gpu::Stage::Fragment, 1, &u, sizeof u);
+    device_->set_texture(command_, gpu::Stage::Fragment, 0, white_);
+    setSampler(0, gpu::Address::ClampToEdge, gpu::Address::ClampToEdge, gpu::Filter::Nearest,
+               gpu::Filter::Nearest, gpu::MipFilter::None, 1);
 
     uint32_t n = count ? count : 1;
     auto &quad = vertex_scratch_;
@@ -2808,22 +2428,18 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     }
     if (quad.empty())
         return;
-    [self bindVertices:quad encoder:enc];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:quad.size()];
+    bindVertices(quad);
+    device_->draw(command_, gpu::Primitive::Triangles, 0, int(quad.size()));
 }
 
-- (void)draw:(const HostD3DDraw *)cmd {
-    [self draw:cmd revision:0];
-}
-
-- (void)draw:(const HostD3DDraw *)cmd revision:(uint32_t)revision {
+void D3DRenderer::Impl::draw(const HostD3DDraw *cmd, uint32_t revision) {
     if (!cmd || !color_)
         return;
     ++g_total_draws;
     ++g_draws_since_present;
 
     // Expand the logical viewport BEFORE TL vertices become clip coordinates.
-    // Changing only the Metal viewport would still clip the widened band at +w.
+    // Changing only the device viewport would still clip the widened band at +w.
     int domain = guest_width_;
     HostD3DDraw mapped;
     if (active_slot_ >= 0 && !overlay_rendering_ && !replaying_ && !mods_display_classic() &&
@@ -2855,8 +2471,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     vertices.resize(count);
     host_d3d_expand(cmd, vertices.data(), count);
 
-    id<MTLRenderCommandEncoder> enc = [self encoder];
-    if (!enc)
+    if (!encoder())
         return;
     gpu_dirty_ = true;
     pending_id_ = target_id_;
@@ -2919,47 +2534,43 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     bool both_src = false, ignored = false;
     uint32_t src_state = rs(cmd, RS_SRCBLEND, 2);
     uint32_t dst_state = rs(cmd, RS_DESTBLEND, 1);
-    MTLBlendFactor src = blend_factor(src_state, false, &both_src);
-    MTLBlendFactor dst = blend_factor(dst_state, true, &ignored);
+    gpu::Blend src = blend_factor(src_state, false, &both_src);
+    gpu::Blend dst = blend_factor(dst_state, true, &ignored);
     // D3DBLEND_BOTHSRCALPHA names both factors at once, so the destination
     // follows the source and whatever the guest left in DESTBLEND is ignored.
     if (both_src) {
         bool b;
         dst = blend_factor(src_state, true, &b);
     }
-    id<MTLRenderPipelineState> pipeline = [self pipelineForBlend:blend_on
-                                                             src:src
-                                                             dst:dst
-                                                      writeColor:YES];
+    gpu::Pipeline pipeline = pipelineForBlend(blend_on, src, dst, true);
     if (!pipeline)
         return;
-    [enc setRenderPipelineState:pipeline];
+    device_->set_pipeline(command_, pipeline);
 
     // --- depth ---
     // D3DRENDERSTATE_ZENABLE off means no test and no write: a device with its
     // depth buffer disabled does not quietly keep filling it in.
     bool ztest = rs_raw(cmd, RS_ZENABLE) != 0;
     bool zwrite = ztest && rs_raw(cmd, RS_ZWRITEENABLE) != 0;
-    MTLCompareFunction zfunc =
-        ztest ? compare_function(rs(cmd, RS_ZFUNC, 4)) : MTLCompareFunctionAlways;
-    [enc setDepthStencilState:[self depthStateWithCompare:zfunc write:zwrite ? YES : NO]];
+    gpu::Compare zfunc = ztest ? compare_function(rs(cmd, RS_ZFUNC, 4)) : gpu::Compare::Always;
+    device_->set_depth(command_, {zfunc, zwrite});
 
     // --- culling ---
-    MTLCullMode cull = MTLCullModeNone;
+    gpu::Cull cull = gpu::Cull::None;
     if (cull_enabled_) {
         switch (rs(cmd, RS_CULLMODE, 1)) {
         case 2:
-            cull = MTLCullModeFront;
+            cull = gpu::Cull::Front;
             break; // D3DCULL_CW
         case 3:
-            cull = MTLCullModeBack;
+            cull = gpu::Cull::Back;
             break; // D3DCULL_CCW
         default:
-            cull = MTLCullModeNone;
+            cull = gpu::Cull::None;
             break;
         }
     }
-    [enc setCullMode:cull];
+    device_->set_cull(command_, cull);
 
     // --- viewport ---
     bool pretransformed = cmd->vertex_type == VT_TLVERTEX;
@@ -2982,7 +2593,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         near_z = 0.0;
         far_z = 1.0;
     }
-    [enc setViewport:(MTLViewport){vx, vy, vw, vh, near_z, far_z}];
+    device_->set_viewport(command_, {vx, vy, vw, vh, near_z, far_z});
 
     // --- uniforms ---
     Uniforms u;
@@ -2992,15 +2603,15 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     if (!pretransformed) {
         float world[16], view[16], proj[16], wv[16], mvp[16];
         if (cmd->world)
-            d3d_matrix_to_metal(cmd->world, world);
+            d3d_matrix_to_column_major(cmd->world, world);
         else
             identity(world);
         if (cmd->view)
-            d3d_matrix_to_metal(cmd->view, view);
+            d3d_matrix_to_column_major(cmd->view, view);
         else
             identity(view);
         if (cmd->projection)
-            d3d_matrix_to_metal(cmd->projection, proj);
+            d3d_matrix_to_column_major(cmd->projection, proj);
         else
             identity(proj);
         matrix_multiply(view, world, wv);
@@ -3036,7 +2647,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     }
 
     // --- texture ---
-    id<MTLTexture> texture = white_;
+    gpu::Texture texture = white_;
+    int texture_levels = 1, texture_width = 1;
     bool smallOpaqueTile = false;
     if (cmd->texture_handle) {
         // The revision this draw named, and only that one, when it named one.
@@ -3045,21 +2657,25 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         // defect the revisions exist to prevent.
         uint32_t want = revision;
         if (!want) {
-            auto cur = texture_current_->find(cmd->texture_handle);
-            want = cur == texture_current_->end() ? 0u : cur->second;
+            auto cur = texture_current_.find(cmd->texture_handle);
+            want = cur == texture_current_.end() ? 0u : cur->second;
         }
-        auto it = textures_->find(tex_key(cmd->texture_handle, want));
-        if (it != textures_->end() && it->second.texture) {
+        auto it = textures_.find(tex_key(cmd->texture_handle, want));
+        if (it != textures_.end() && it->second.texture) {
             smallOpaqueTile = it->second.smallOpaqueTile;
-            texture = it->second.texture;
+            texture = it->second.texture->texture;
+            texture_levels = it->second.texture->levels;
+            texture_width = it->second.texture->width;
             u.texture_has_alpha = it->second.alpha ? 1 : 0;
             // Classic and legacy replay always sample the original image.
             // A replacement must never contaminate the CPU compatibility path.
-            if (it->second.enhanced && active_slot_ >= 0 && !mods_display_classic() &&
-                mods_display_textures() && !replaying_ && !overlay_rendering_ &&
-                !slots_[active_slot_].materializedLayers &&
+            if (it->second.enhanced && it->second.enhanced->texture && active_slot_ >= 0 &&
+                !mods_display_classic() && mods_display_textures() && !replaying_ &&
+                !overlay_rendering_ && !slots_[active_slot_].materializedLayers &&
                 !host_frame_legacy({slots_[active_slot_].frame})) {
-                texture = it->second.enhanced->texture;
+                texture = it->second.enhanced->texture->texture;
+                texture_levels = it->second.enhanced->texture->levels;
+                texture_width = it->second.enhanced->texture->width;
                 u.texture_has_alpha = it->second.alpha || it->second.enhanced->alpha;
                 ++hd_.draws;
                 it->second.enhanced->lastUse = command_;
@@ -3081,20 +2697,19 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         addr_u = 1;
     if (rs_raw(cmd, RS_WRAPV))
         addr_v = 1;
-    MTLSamplerMinMagFilter mag = rs(cmd, RS_TEXTUREMAG, 1) == 1 ? MTLSamplerMinMagFilterNearest
-                                                                : MTLSamplerMinMagFilterLinear;
-    MTLSamplerMinMagFilter minf;
-    MTLSamplerMipFilter mip;
+    gpu::Filter mag = rs(cmd, RS_TEXTUREMAG, 1) == 1 ? gpu::Filter::Nearest : gpu::Filter::Linear;
+    gpu::Filter minf;
+    gpu::MipFilter mip;
     min_filter(rs(cmd, RS_TEXTUREMIN, 1), &minf, &mip);
-    if (texture.mipmapLevelCount <= 1)
-        mip = MTLSamplerMipFilterNotMipmapped;
+    if (texture_levels <= 1)
+        mip = gpu::MipFilter::None;
     // The game stores each terrain tile as a separate complete texture but
     // leaves the device's default REPEAT address mode in place. Bilinear taps
     // at UV 0/1 then pull colour from the tile's opposite edge, drawing seams
     // at native resolution. Clamp complete opaque tiles only; atlas regions,
     // explicit wrapping, repeating coordinates, sprites and legacy replay keep
     // the guest sampler. This does not blur the UI or substitute new textures.
-    NSUInteger anisotropy = 1;
+    int anisotropy = 1;
     if (active_slot_ >= 0 && !mods_display_classic() && !overlay_rendering_ && !replaying_ &&
         !slots_[active_slot_].materializedLayers &&
         !host_frame_legacy({slots_[active_slot_].frame}) && pretransformed && ztest && zwrite &&
@@ -3112,55 +2727,44 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         if (tile && lo_u && hi_u && lo_v && hi_v) {
             addr_u = addr_v = 3;
             // Larger artist replacements already contain their own detail.
-            if (smallOpaqueTile && texture.width <= 128 && terrain_detail_ &&
-                mods_display_textures()) {
+            if (smallOpaqueTile && texture_width <= 128 && terrain_detail_ &&
+                terrain_detail_->texture && mods_display_textures()) {
                 u.terrain_detail = 1;
                 ++hd_.detail_draws;
                 terrain_detail_->lastUse = command_;
             }
             const int filter = mods_display_filtering();
             if (filter) {
-                mag = minf = MTLSamplerMinMagFilterLinear;
-                mip = texture.mipmapLevelCount > 1 ? MTLSamplerMipFilterLinear
-                                                   : MTLSamplerMipFilterNotMipmapped;
-                anisotropy = filter > 1 ? (1u << filter) : 1;
+                mag = minf = gpu::Filter::Linear;
+                mip = texture_levels > 1 ? gpu::MipFilter::Linear : gpu::MipFilter::None;
+                anisotropy = filter > 1 ? (1 << filter) : 1;
             }
         }
     }
 
-    [enc setFragmentTexture:texture atIndex:0];
-    [enc setFragmentTexture:u.terrain_detail ? terrain_detail_->texture : white_ atIndex:1];
-    [enc setFragmentSamplerState:[self samplerU:MTLSamplerAddressModeRepeat
-                                              v:MTLSamplerAddressModeRepeat
-                                            mag:MTLSamplerMinMagFilterLinear
-                                            min:MTLSamplerMinMagFilterLinear
-                                            mip:MTLSamplerMipFilterLinear
-                                     anisotropy:std::max(NSUInteger(4), anisotropy)]
-                         atIndex:1];
-    [enc setFragmentSamplerState:[self samplerU:address_mode(addr_u)
-                                              v:address_mode(addr_v)
-                                            mag:mag
-                                            min:minf
-                                            mip:mip
-                                     anisotropy:anisotropy]
-                         atIndex:0];
-    [enc setVertexBytes:&u length:sizeof u atIndex:1];
-    [enc setFragmentBytes:&u length:sizeof u atIndex:1];
+    device_->set_texture(command_, gpu::Stage::Fragment, 0, texture);
+    device_->set_texture(command_, gpu::Stage::Fragment, 1,
+                         u.terrain_detail ? terrain_detail_->texture->texture : white_);
+    setSampler(1, gpu::Address::Repeat, gpu::Address::Repeat, gpu::Filter::Linear,
+               gpu::Filter::Linear, gpu::MipFilter::Linear, std::max(4, anisotropy));
+    setSampler(0, address_mode(addr_u), address_mode(addr_v), mag, minf, mip, anisotropy);
+    device_->set_bytes(command_, gpu::Stage::Vertex, 1, &u, sizeof u);
+    device_->set_bytes(command_, gpu::Stage::Fragment, 1, &u, sizeof u);
 
-    [self bindVertices:vertices encoder:enc];
-    MTLPrimitiveType primitive = MTLPrimitiveTypeTriangle;
+    bindVertices(vertices);
+    gpu::Primitive primitive = gpu::Primitive::Triangles;
     switch (host_d3d_primitive_kind(cmd)) {
     case HOST_D3D_POINTS:
-        primitive = MTLPrimitiveTypePoint;
+        primitive = gpu::Primitive::Points;
         break;
     case HOST_D3D_LINES:
-        primitive = MTLPrimitiveTypeLine;
+        primitive = gpu::Primitive::Lines;
         break;
     default:
-        primitive = MTLPrimitiveTypeTriangle;
+        primitive = gpu::Primitive::Triangles;
         break;
     }
-    [enc drawPrimitives:primitive vertexStart:0 vertexCount:vertices.size()];
+    device_->draw(command_, primitive, 0, int(vertices.size()));
     // Start native rendering while the CPU encodes the rest of the scene.
     // At most two early prefixes retain the normal attachment stores, command
     // tracking and resource ownership, then resume with load actions. Classic,
@@ -3168,17 +2772,17 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     if (submit_draws_ && in_scene_ && !replaying_ && !overlay_rendering_ && incremental_ &&
         active_slot_ >= 0 && !mods_display_classic() && width_ > guest_width_ &&
         early_submissions_ < 2 && ++encoded_draws_ >= submit_draws_) {
-        [self flush];
+        flush();
         encoded_draws_ = 0;
         ++early_submissions_;
         ++storage_stats_.early_submissions;
     }
 }
 
-- (id<MTLTexture>)makeTexture:(const HostD3DTexture *)t alpha:(bool *)alpha {
+std::shared_ptr<OwnedTexture> D3DRenderer::Impl::makeTexture(const HostD3DTexture *t, bool *alpha) {
     auto &rgba = upload_scratch_;
     if (!t || !texture_decode_rgba(*t, rgba, alpha))
-        return nil;
+        return nullptr;
     if (!t->original)
         hd_.pack.capture(*t, rgba);
 
@@ -3225,41 +2829,34 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 
     // A new texture every time, never a rewrite of the old one's bytes: draws
     // already encoded into an open command buffer still reference the old
-    // texture, and Metal keeps it alive until they finish. Replacing the bytes
-    // in place would change what those earlier draws sample.
+    // texture, and the device keeps it alive until they finish. Replacing the
+    // bytes in place would change what those earlier draws sample.
     int levels = 1;
     for (int d = t->width > t->height ? t->width : t->height; d > 1; d >>= 1)
         ++levels;
-    MTLTextureDescriptor *d =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                           width:t->width
-                                                          height:t->height
-                                                       mipmapped:levels > 1];
-    d.mipmapLevelCount = levels;
-    d.usage = MTLTextureUsageShaderRead;
-    d.storageMode = MTLStorageModeShared;
-    id<MTLTexture> texture = [device_ newTextureWithDescriptor:d];
-    if (!texture)
-        return nil;
-    [texture replaceRegion:MTLRegionMake2D(0, 0, t->width, t->height)
-               mipmapLevel:0
-                 withBytes:rgba.data()
-               bytesPerRow:(NSUInteger)t->width * 4];
+    auto owned = std::make_shared<OwnedTexture>();
+    owned->device = device_;
+    owned->width = t->width;
+    owned->height = t->height;
+    owned->levels = levels;
+    owned->texture = device_->create_texture(
+        {t->width, t->height, gpu::Format::RGBA8, gpu::UsageSampled | gpu::UsageCpu, levels});
+    if (!owned->texture)
+        return nullptr;
+    device_->upload(owned->texture, {0, 0, t->width, t->height}, rgba.data(), t->width * 4);
     if (levels > 1) {
         // The device advertises the mip filters, so the levels have to exist.
-        id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit generateMipmapsForTexture:texture];
-        [blit endEncoding];
-        track_native_command(cb);
-        [cb commit];
+        gpu::CommandBuffer cb = device_->begin();
+        device_->generate_mipmaps(cb, owned->texture);
+        host_present_track_command(cb);
+        device_->commit(cb);
     }
     ++g_total_textures;
     host_stats_note_upload((uint32_t)rgba.size());
-    return texture;
+    return owned;
 }
 
-- (std::shared_ptr<HDTexture>)packTexture:(uint64_t)hash width:(int)width height:(int)height {
+std::shared_ptr<HDTexture> D3DRenderer::Impl::packTexture(uint64_t hash, int width, int height) {
     auto file = hd_.pack.files.find(hash);
     if (file == hd_.pack.files.end())
         return {};
@@ -3282,16 +2879,16 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         return {};
     std::ifstream input(f.path, std::ios::binary);
     input.seekg(32);
-    auto descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                           width:f.width
-                                                          height:f.height
-                                                       mipmapped:f.levels > 1];
-    descriptor.usage = MTLTextureUsageShaderRead;
-    descriptor.storageMode = MTLStorageModeShared;
     auto resource = std::make_shared<HDTexture>();
-    resource->texture = [device_ newTextureWithDescriptor:descriptor];
-    if (!resource->texture)
+    resource->texture = std::make_shared<OwnedTexture>();
+    resource->texture->device = device_;
+    resource->texture->width = f.width;
+    resource->texture->height = f.height;
+    resource->texture->levels = int(f.levels);
+    resource->texture->texture =
+        device_->create_texture({int(f.width), int(f.height), gpu::Format::RGBA8,
+                                 gpu::UsageSampled | gpu::UsageCpu, int(f.levels)});
+    if (!resource->texture->texture)
         return {};
     std::vector<uint8_t> level;
     int w = f.width, h = f.height;
@@ -3299,14 +2896,11 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         level.resize(size_t(w) * h * 4);
         if (!input.read(reinterpret_cast<char *>(level.data()), level.size()))
             return {};
-        [resource->texture replaceRegion:MTLRegionMake2D(0, 0, w, h)
-                             mipmapLevel:i
-                               withBytes:level.data()
-                             bytesPerRow:w * 4];
+        device_->upload(resource->texture->texture, {0, 0, w, h}, level.data(), w * 4, int(i));
         w = std::max(1, w / 2);
         h = std::max(1, h / 2);
     }
-    resource->bytes = resource->texture.allocatedSize;
+    resource->bytes = device_->allocated_bytes(resource->texture->texture);
     if (!hd_.reserve(resource->bytes))
         return {};
     resource->alpha = f.flags & 1;
@@ -3320,17 +2914,17 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 
 // Upload a validated texture revision while retaining the original and optional replacement.
 // Existing leased revisions are immutable; material detail is restricted to eligible terrain.
-- (void)uploadTexture:(const HostD3DTexture *)t {
+void D3DRenderer::Impl::uploadTexture(const HostD3DTexture *t) {
     if (!t || !texture_layout_valid(*t) || (t->original && !texture_layout_valid(*t->original)))
         return;
-    auto existing = textures_->find(tex_key(t->handle, t->revision));
-    if (existing != textures_->end() && (t->revision || existing->second.leases))
+    auto existing = textures_.find(tex_key(t->handle, t->revision));
+    if (existing != textures_.end() && (t->revision || existing->second.leases))
         return;
     bool alpha = false;
-    id<MTLTexture> base = [self makeTexture:t->original ? t->original : t alpha:&alpha];
+    auto base = makeTexture(t->original ? t->original : t, &alpha);
     if (!base)
         return;
-    TexEntry &e = (*textures_)[tex_key(t->handle, t->revision)];
+    TexEntry &e = textures_[tex_key(t->handle, t->revision)];
     e.texture = base;
     e.alpha =
         (t->original ? t->original : t)->amask || (t->original ? t->original : t)->has_colorkey;
@@ -3348,11 +2942,11 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             pop_hd::mip_bytes(t->width, t->height, pop_hd::mip_levels(t->width, t->height));
         if (hd_.reserve(bytes)) {
             auto resource = std::make_shared<HDTexture>();
-            resource->texture = [self makeTexture:t alpha:&resource->alpha];
+            resource->texture = makeTexture(t, &resource->alpha);
             if (resource->texture) {
-                resource->bytes = resource->texture.allocatedSize;
+                resource->bytes = device_->allocated_bytes(resource->texture->texture);
                 if (!hd_.reserve(resource->bytes))
-                    resource->texture = nil;
+                    resource->texture.reset();
                 resource->stamp = ++hd_.clock;
                 // Provider revisions are independent; never cache them under
                 // the original content hash a mod may reinterpret next time.
@@ -3366,82 +2960,77 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             }
         }
     } else if (t->content_hash)
-        e.enhanced = [self packTexture:t->content_hash width:t->width height:t->height];
+        e.enhanced = packTexture(t->content_hash, t->width, t->height);
     uint32_t was = 0;
-    auto cur = texture_current_->find(t->handle);
-    if (cur != texture_current_->end())
+    auto cur = texture_current_.find(t->handle);
+    if (cur != texture_current_.end())
         was = cur->second;
-    (*texture_current_)[t->handle] = t->revision;
+    texture_current_[t->handle] = t->revision;
     // The revision this one replaces goes as soon as nothing holds it. Every
     // upload would otherwise add a texture the renderer never drops.
     if (was != t->revision)
-        [self dropTexture:t->handle revision:was];
+        dropTexture(t->handle, was);
 }
 
 // Drops one (handle, revision) if it is neither current nor leased.
-- (void)dropTexture:(uint32_t)handle revision:(uint32_t)revision {
-    auto it = textures_->find(tex_key(handle, revision));
-    if (it == textures_->end())
+void D3DRenderer::Impl::dropTexture(uint32_t handle, uint32_t revision) {
+    auto it = textures_.find(tex_key(handle, revision));
+    if (it == textures_.end())
         return;
     if (it->second.leases)
         return;
-    auto cur = texture_current_->find(handle);
-    if (cur != texture_current_->end() && cur->second == revision)
+    auto cur = texture_current_.find(handle);
+    if (cur != texture_current_.end() && cur->second == revision)
         return;
-    textures_->erase(it);
+    textures_.erase(it);
 }
 
-- (void)destroyTexture:(uint32_t)handle {
+void D3DRenderer::Impl::destroyTexture(uint32_t handle) {
     // The handle is gone, but a frame still holding one of its revisions is
     // not: those stay until the frame retires, and only then are dropped.
-    texture_current_->erase(handle);
-    for (auto it = textures_->begin(); it != textures_->end();) {
+    texture_current_.erase(handle);
+    for (auto it = textures_.begin(); it != textures_.end();) {
         if ((uint32_t)(it->first >> 32) == handle && !it->second.leases)
-            it = textures_->erase(it);
+            it = textures_.erase(it);
         else
             ++it;
     }
 }
 
-- (BOOL)retainTexture:(uint32_t)handle revision:(uint32_t)revision {
+bool D3DRenderer::Impl::retainTexture(uint32_t handle, uint32_t revision) {
     if (!handle)
-        return YES;
-    auto it = textures_->find(tex_key(handle, revision));
-    // NO means "I never received that revision". The shim uploads and asks
+        return true;
+    auto it = textures_.find(tex_key(handle, revision));
+    // False means "I never received that revision". The shim uploads and asks
     // again rather than leaving a draw naming pixels the renderer does not
     // have: a silent no-op here drew untextured where the pre-revision code
     // drew the handle's contents.
-    if (it == textures_->end())
-        return NO;
+    if (it == textures_.end())
+        return false;
     ++it->second.leases;
-    return YES;
+    return true;
 }
 
-- (void)releaseTexture:(uint32_t)handle revision:(uint32_t)revision {
+void D3DRenderer::Impl::releaseTexture(uint32_t handle, uint32_t revision) {
     if (!handle)
         return;
-    auto it = textures_->find(tex_key(handle, revision));
-    if (it == textures_->end())
+    auto it = textures_.find(tex_key(handle, revision));
+    if (it == textures_.end())
         return;
     if (it->second.leases)
         --it->second.leases;
     if (!it->second.leases)
-        [self dropTexture:handle revision:revision];
+        dropTexture(handle, revision);
 }
 
-- (BOOL)hasTexture:(uint32_t)handle revision:(uint32_t)revision {
-    auto it = textures_->find(tex_key(handle, revision));
-    return it != textures_->end() && it->second.texture != nil;
-}
-
-- (void)forgetTexturesForTest {
-    textures_->clear();
-    texture_current_->clear();
+bool D3DRenderer::Impl::hasTexture(uint32_t handle, uint32_t revision) {
+    auto it = textures_.find(tex_key(handle, revision));
+    return it != textures_.end() && it->second.texture != nullptr;
 }
 
 // Look up the layout mapping recorded for a draw within its sealed frame.
 // Unclassified draws use the scene mapping.
-- (HostDrawMapping)mappingForFrame:(uint64_t)f seq:(uint32_t)seq {
+HostDrawMapping D3DRenderer::Impl::mappingForFrame(uint64_t f, uint32_t seq) const {
     for (auto &slot : slots_)
         if (slot.frame == f)
             for (auto &step : slot.replay.steps)
@@ -3449,8 +3038,8 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                     return step.mapping;
     return HOST_MAPPING_SCENE;
 }
-- (void)replayBarrier:(const HostD3DSurface *)surface generation:(uint32_t)g seq:(uint32_t)seq {
-    int index = [self slotFor:surface->id generation:g];
+void D3DRenderer::Impl::replayBarrier(const HostD3DSurface *surface, uint32_t g, uint32_t seq) {
+    int index = slotFor(surface->id, g);
     if (index < 0 || !slots_[index].frame || replaying_)
         return;
     ReplayStep step;
@@ -3460,7 +3049,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
 }
 
 // Preserve the entry state before this frame's first GPU/CPU operation.
-- (void)captureReplaySeed {
+void D3DRenderer::Impl::captureReplaySeed() {
     if (active_slot_ < 0)
         return;
     auto &j = slots_[active_slot_].replay;
@@ -3472,7 +3061,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     memcpy(j.palette, target_palette_, sizeof j.palette);
     j.pendingCheckpoint = !needs_upload_;
 }
-- (void)captureReplayCheckpoint:(BOOL)needed {
+void D3DRenderer::Impl::captureReplayCheckpoint(bool needed) {
     if (active_slot_ < 0)
         return;
     auto &j = slots_[active_slot_].replay;
@@ -3483,40 +3072,31 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
     // Most gameplay frames start here and need no GPU checkpoint at all.
     if (!needed)
         return;
-    [self flush];
+    flush();
     j.width = width_;
     j.height = height_;
-    if (!command_)
-        command_ = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [command_ blitCommandEncoder];
-    id<MTLTexture> textures[] = {color_, depth_, coverage_};
+    beginCommand();
+    gpu::Texture textures[] = {color_, depth_, coverage_};
     for (int k = 0; k < 3; ++k) {
-        j.pitch[k] = ((NSUInteger)width_ * (k == 2 ? 1 : 4) + 255) & ~(NSUInteger)255;
-        j.checkpoint[k] = [device_ newBufferWithLength:j.pitch[k] * height_
-                                               options:MTLResourceStorageModePrivate];
+        j.pitch[k] = ((uint64_t)width_ * (k == 2 ? 1 : 4) + 255) & ~uint64_t(255);
+        if (j.checkpoint[k])
+            device_->destroy(j.checkpoint[k]);
+        j.checkpoint[k] = device_->create_buffer(j.pitch[k] * height_, nullptr);
         if (!j.checkpoint[k]) {
             fprintf(stderr, "[host] replay checkpoint allocation failed\n");
             abort();
         }
-        [blit copyFromTexture:textures[k]
-                         sourceSlice:0
-                         sourceLevel:0
-                        sourceOrigin:MTLOriginMake(0, 0, 0)
-                          sourceSize:MTLSizeMake(width_, height_, 1)
-                            toBuffer:j.checkpoint[k]
-                   destinationOffset:0
-              destinationBytesPerRow:j.pitch[k]
-            destinationBytesPerImage:j.pitch[k] * height_];
+        device_->copy_texture_to_buffer(command_, textures[k], {0, 0, width_, height_},
+                                        j.checkpoint[k], 0, int(j.pitch[k]));
     }
-    [blit endEncoding];
 }
 
 // This runs on the guest thread at seal, before the frame can be claimed. It
 // restarts from the entry seed and merges records/Clear/primitives by seq into
-// a guest-resolution target. No presenter or AppKit service is needed.
-- (BOOL)replayLegacyFrame:(uint64_t)frame {
-    [self flush];
-    [self saveSlot];
+// a guest-resolution target. No presenter or window service is needed.
+bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
+    flush();
+    saveSlot();
     int previous = active_slot_;
     bool found = false;
     uint32_t draws = g_total_draws, since = g_draws_since_present;
@@ -3529,37 +3109,19 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         if (j.done)
             continue;
         if (j.seed.empty())
-            return NO;
-        [self loadSlot:index];
-        [self captureReplayCheckpoint:YES];
-        [self flush];
-        [self saveSlot];
-        id<MTLBuffer> entry[3] = {nil, nil, nil};
-        id<MTLCommandBuffer> ready = slot.last;
-        if (j.checkpoint[0]) {
-            ready = [queue_ commandBuffer];
-            id<MTLBlitCommandEncoder> blit = [ready blitCommandEncoder];
-            for (int k = 0; k < 3; ++k) {
-                entry[k] = [device_ newBufferWithLength:j.checkpoint[k].length
-                                                options:MTLResourceStorageModeShared];
-                if (!entry[k]) {
-                    fprintf(stderr, "[host] legacy readback allocation failed\n");
-                    abort();
-                }
-                [blit copyFromBuffer:j.checkpoint[k]
-                         sourceOffset:0
-                             toBuffer:entry[k]
-                    destinationOffset:0
-                                 size:j.checkpoint[k].length];
-            }
-            [blit endEncoding];
-            track_native_command(ready);
-            [ready commit];
-        }
+            return false;
+        loadSlot(index);
+        captureReplayCheckpoint(true);
+        flush();
+        saveSlot();
+        // The checkpoint buffers are CPU-visible once the copy that filled them
+        // has completed; map_read waits for that.
         assert(!host_d3d_appkit_pending());
-        [ready waitUntilCompleted];
-        if (ready.status == MTLCommandBufferStatusError)
-            return NO;
+        if (slot.last) {
+            device_->wait(slot.last);
+            if (device_->status(slot.last) == gpu::CommandStatus::Error)
+                return false;
+        }
         HostD3DSurface actual = slot.surface;
         std::vector<uint8_t> pixels = j.seed;
         target_pixels_ = pixels.data();
@@ -3568,24 +3130,24 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         index_cache_valid_ = false;
         // Discard the speculative native result only after its GPU work has
         // completed. The four frame slots and their lifetime do not change.
-        color_ = nil;
-        [self allocateMirror:guest_width_ height:guest_height_];
+        releaseMirror();
+        allocateMirror(guest_width_, guest_height_);
         pending_id_ = target_id_;
         replaying_ = true;
         if (j.checkpoint[0]) {
             // Guest-centre sampling agrees with the coherence downsample.
-            [self uploadSurface];
+            uploadSurface();
             pending_clear_depth_ = false;
             coverage_reset_pending_ = false;
-            [self endEncoding];
-            if (!command_)
-                command_ = [queue_ commandBuffer];
-            id<MTLBlitCommandEncoder> blit = [command_ blitCommandEncoder];
-            id<MTLTexture> textures[] = {color_, depth_, coverage_};
+            endEncoding();
+            beginCommand();
+            gpu::Texture textures[] = {color_, depth_, coverage_};
             for (int k = 0; k < 3; ++k) {
                 size_t bpp = k == 2 ? 1 : 4, pitch = ((size_t)width_ * bpp + 255) & ~(size_t)255;
                 std::vector<uint8_t> data(pitch * height_);
-                auto *from = (const uint8_t *)entry[k].contents;
+                auto *from = (const uint8_t *)device_->map_read(j.checkpoint[k]);
+                if (!from)
+                    return false;
                 for (int y = 0; y < height_; ++y)
                     for (int x = 0; x < width_; ++x) {
                         int sx = (int)((int64_t)(2 * x + 1) * j.width / (2 * width_));
@@ -3593,27 +3155,19 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                         memcpy(data.data() + y * pitch + x * bpp, from + sy * j.pitch[k] + sx * bpp,
                                bpp);
                     }
-                id<MTLBuffer> buffer = [self argumentBytes:data.data() length:data.size()];
-                [blit copyFromBuffer:buffer
-                           sourceOffset:0
-                      sourceBytesPerRow:pitch
-                    sourceBytesPerImage:data.size()
-                             sourceSize:MTLSizeMake(width_, height_, 1)
-                              toTexture:textures[k]
-                       destinationSlice:0
-                       destinationLevel:0
-                      destinationOrigin:MTLOriginMake(0, 0, 0)];
+                gpu::Buffer buffer = argumentBytes(data.data(), data.size());
+                device_->copy_buffer_to_texture(command_, buffer, 0, int(pitch), textures[k],
+                                                {0, 0, width_, height_});
             }
-            [blit endEncoding];
             needs_upload_ = false;
             gpu_dirty_ = true;
-            [self legacyWriteBackPending];
+            legacyWriteBackPending();
         }
         std::stable_sort(j.steps.begin(), j.steps.end(),
                          [](const ReplayStep &a, const ReplayStep &b) { return a.seq < b.seq; });
         for (auto &step : j.steps) {
             if (step.barrier) {
-                [self legacyWriteBackPending];
+                legacyWriteBackPending();
                 continue;
             }
             if (step.draw) {
@@ -3621,10 +3175,10 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                 if (memcmp(target_palette_, step.palette, sizeof target_palette_))
                     index_cache_valid_ = false;
                 memcpy(target_palette_, step.palette, sizeof target_palette_);
-                [self drawSnapshot:&step.snapshot];
+                drawSnapshot(&step.snapshot);
                 continue;
             }
-            [self legacyWriteBackPending];
+            legacyWriteBackPending();
             target_has_palette_ = step.hasPalette;
             memcpy(target_palette_, step.palette, sizeof target_palette_);
             index_cache_valid_ = false;
@@ -3639,7 +3193,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             mask_shape(target_gmask_, &gs, &gm);
             mask_shape(target_bmask_, &bs, &bm);
             if (target_bpp_ == 8 && target_has_palette_ && !index_cache_valid_)
-                [self rebuildIndexCache];
+                rebuildIndexCache();
             for (int y = 0; y < r.h; ++y)
                 for (int x = 0; x < r.w; ++x) {
                     int dx = r.dst_x + x, dy = r.dst_y + y;
@@ -3677,8 +3231,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
                                     "[host] legacy CPU payload needs a destination palette\n");
                             abort();
                         }
-                        *out =
-                            (*index_cache_)[((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3)];
+                        *out = index_cache_[((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3)];
                     } else {
                         uint32_t raw = rm ? ((red * rm / 255) << rs) | ((green * gm / 255) << gs) |
                                                 ((blue * bm / 255) << bs)
@@ -3693,17 +3246,19 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
             needs_upload_ = true;
             coverage_reset_pending_ = true;
         }
-        [self legacyWriteBackPending];
+        legacyWriteBackPending();
         // Publish the quantized legacy picture, including final CPU-only
         // writes, not the unquantized colour left by the last primitive.
-        [self uploadSurface];
+        uploadSurface();
         needs_upload_ = false;
-        [self flush];
+        flush();
         assert(!host_d3d_appkit_pending());
-        [last_command_ waitUntilCompleted];
-        if (last_command_.status == MTLCommandBufferStatusError) {
-            replaying_ = false;
-            return NO;
+        if (last_command_) {
+            device_->wait(last_command_);
+            if (device_->status(last_command_) == gpu::CommandStatus::Error) {
+                replaying_ = false;
+                return false;
+            }
         }
         memcpy(actual.pixels, pixels.data(), pixels.size());
         target_pixels_ = actual.pixels;
@@ -3712,23 +3267,23 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         host_d3d_clean_pixels(actual.id, slot.generation, {0, 0, actual.width, actual.height});
         replaying_ = false;
         j.done = true;
-        [self saveSlot];
+        saveSlot();
     }
     g_total_draws = draws;
     g_draws_since_present = since; // replay is not another guest frame
     if (previous >= 0)
-        [self loadSlot:previous];
+        loadSlot(previous);
     return found;
 }
 
 // Replay an immutable draw snapshot with its captured transforms and texture revision.
 // Incremental rendering also records the operation so CPU/GPU barriers can rebuild ordering.
-- (void)drawSnapshot:(const HostD3DDrawSnapshot *)d {
+void D3DRenderer::Impl::drawSnapshot(const HostD3DDrawSnapshot *d) {
     if (!d || (frame_dropped_ && !replaying_))
         return;
     if (incremental_ && active_slot_ >= 0 && !replaying_) {
-        [self captureReplayCheckpoint:!(d->kind == HOST_DRAW_CLEAR && (d->clear_flags & 3) == 3 &&
-                                        !d->clear_rect_count)];
+        captureReplayCheckpoint(
+            !(d->kind == HOST_DRAW_CLEAR && (d->clear_flags & 3) == 3 && !d->clear_rect_count));
         ReplayStep step;
         step.seq = d->seq;
         step.draw = true;
@@ -3740,11 +3295,7 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         slots_[active_slot_].replay.steps.push_back(std::move(step));
     }
     if (d->kind == HOST_DRAW_CLEAR) {
-        [self clearFlags:d->clear_flags
-                   rects:d->clear_rects
-                   count:d->clear_rect_count
-                   color:d->clear_color
-                   depth:d->clear_z];
+        clearFlags(d->clear_flags, d->clear_rects, d->clear_rect_count, d->clear_color, d->clear_z);
         return;
     }
     HostD3DDraw cmd;
@@ -3785,22 +3336,23 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         !host_frame_legacy({slots_[active_slot_].frame});
     if (overlay) {
         slots_[active_slot_].separateLayers = true;
-        [self endEncoding];
+        endEncoding();
         auto &slot = slots_[active_slot_];
-        id<MTLTexture> world = color_, depth = depth_, coverage = coverage_;
+        gpu::Texture world = color_, depth = depth_, coverage = coverage_;
         int w = width_, h = height_;
         bool upload = needs_upload_, cc = pending_clear_color_, cd = pending_clear_depth_,
              cr = coverage_reset_pending_;
-        color_ = present_texture(slot.presentTarget.overlay);
+        color_ = slot.presentTarget.overlay;
         depth_ = slot.overlayDepth;
         coverage_ = slot.overlayCoverage;
-        width_ = (int)color_.width;
-        height_ = (int)color_.height;
+        const gpu::TextureDesc overlay_desc = device_->describe(color_);
+        width_ = overlay_desc.width;
+        height_ = overlay_desc.height;
         needs_upload_ = pending_clear_color_ = pending_clear_depth_ = coverage_reset_pending_ =
             false;
         overlay_rendering_ = true;
-        [self draw:&cmd revision:d->texture_revision];
-        [self endEncoding];
+        draw(&cmd, d->texture_revision);
+        endEncoding();
         overlay_rendering_ = false;
         color_ = world;
         depth_ = depth;
@@ -3812,124 +3364,265 @@ static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<M
         pending_clear_depth_ = cd;
         coverage_reset_pending_ = cr;
     } else
-        [self draw:&cmd revision:d->texture_revision];
+        draw(&cmd, d->texture_revision);
 }
 
-- (BOOL)readPixels:(void *)out width:(int *)width height:(int *)height {
-    [self flush];
+bool D3DRenderer::Impl::readPixels(void *out, int *width, int *height) {
+    flush();
     if (!color_ || !staging_ || !out)
-        return NO;
+        return false;
     if (width)
         *width = width_;
     if (height)
         *height = height_;
 
-    id<MTLCommandBuffer> cb = [queue_ commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:color_
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(width_, height_, 1)
-                toTexture:staging_
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
-    track_native_command(cb);
-    [cb commit];
-    [cb waitUntilCompleted];
-    if (cb.status == MTLCommandBufferStatusError)
-        return NO;
-    [staging_ getBytes:out
-           bytesPerRow:(NSUInteger)width_ * 4
-            fromRegion:MTLRegionMake2D(0, 0, width_, height_)
-           mipmapLevel:0];
+    gpu::CommandBuffer cb = device_->begin();
+    device_->blit(cb, color_, {0, 0, width_, height_}, staging_, 0, 0);
+    host_present_track_command(cb);
+    device_->commit(cb);
+    device_->wait(cb);
+    if (device_->status(cb) == gpu::CommandStatus::Error)
+        return false;
+    device_->readback(staging_, {0, 0, width_, height_}, out, width_ * 4);
     size_t n = (size_t)width_ * height_;
     note_scene_nonblack(count_nonblack((const uint8_t *)out, n), n);
-    return YES;
+    return true;
 }
-@end
+
+// ---------------------------------------------------------------------------
+// The public class: a thin forwarder over Impl.
+// ---------------------------------------------------------------------------
+D3DRenderer::D3DRenderer(gpu::Device *device) : impl_(std::make_unique<Impl>(device)) {}
+D3DRenderer::~D3DRenderer() {
+    if (g_shared == this)
+        g_shared = nullptr;
+}
+bool D3DRenderer::ok() const {
+    return impl_->ok_;
+}
+D3DRenderer *D3DRenderer::shared() {
+    return g_shared;
+}
+void D3DRenderer::setShared(D3DRenderer *renderer) {
+    g_shared = renderer;
+}
+gpu::Device *D3DRenderer::device() const {
+    return impl_->device_;
+}
+gpu::Texture D3DRenderer::colorTarget() const {
+    return impl_->color_;
+}
+gpu::Texture D3DRenderer::colorTargetForFrame(uint64_t frame) {
+    return impl_->colorTargetForFrame(frame);
+}
+gpu::CommandBuffer D3DRenderer::completionForFrame(uint64_t frame) {
+    return impl_->completionForFrame(frame);
+}
+HostHDTextureStats D3DRenderer::hdTextureStats() const {
+    const HDCache &hd = impl_->hd_;
+    return {hd.draws, hd.loads, hd.hits, hd.refused, hd.used, hd.budget, hd.detail_draws};
+}
+HostCommandStorageStats D3DRenderer::commandStorageStats() const {
+    return impl_->storage_stats_;
+}
+void D3DRenderer::setRenderTarget(const HostD3DSurface *target) {
+    impl_->setRenderTarget(target);
+}
+void D3DRenderer::flushSurface(const HostD3DSurface *surface, const char *why) {
+    impl_->flushSurface(surface, why);
+}
+void D3DRenderer::discard() {
+    impl_->discard();
+}
+void D3DRenderer::setSceneWidth(int width, int height) {
+    assert(width >= 0 && height >= 0 && ((width == 0) == (height == 0)));
+    impl_->scene_width_ = width;
+    impl_->scene_height_ = height;
+}
+void D3DRenderer::beginScene() {
+    impl_->beginScene();
+}
+void D3DRenderer::endScene() {
+    impl_->endScene();
+}
+void D3DRenderer::sealCommands() {
+    impl_->flush();
+}
+void D3DRenderer::clearFlags(uint32_t flags, const int32_t *rects, uint32_t count, uint32_t color,
+                             float depth) {
+    impl_->clearFlags(flags, rects, count, color, depth);
+}
+void D3DRenderer::draw(const HostD3DDraw *cmd) {
+    impl_->draw(cmd, 0);
+}
+void D3DRenderer::draw(const HostD3DDraw *cmd, uint32_t revision) {
+    impl_->draw(cmd, revision);
+}
+void D3DRenderer::drawSnapshot(const HostD3DDrawSnapshot *d) {
+    impl_->drawSnapshot(d);
+}
+void D3DRenderer::uploadTexture(const HostD3DTexture *tex) {
+    impl_->uploadTexture(tex);
+}
+void D3DRenderer::destroyTexture(uint32_t handle) {
+    impl_->destroyTexture(handle);
+}
+bool D3DRenderer::retainTexture(uint32_t handle, uint32_t revision) {
+    return impl_->retainTexture(handle, revision);
+}
+void D3DRenderer::releaseTexture(uint32_t handle, uint32_t revision) {
+    impl_->releaseTexture(handle, revision);
+}
+bool D3DRenderer::hasTexture(uint32_t handle, uint32_t revision) {
+    return impl_->hasTexture(handle, revision);
+}
+void D3DRenderer::forgetTexturesForTest() {
+    impl_->textures_.clear();
+    impl_->texture_current_.clear();
+}
+bool D3DRenderer::readPixels(void *out, int *width, int *height) {
+    return impl_->readPixels(out, width, height);
+}
+bool D3DRenderer::acceptsDraw() const {
+    return !impl_->frame_dropped_;
+}
+void D3DRenderer::collectCleanTargets() {
+    impl_->collectCleanTargets();
+}
+int D3DRenderer::slotFor(uint32_t surface, uint32_t generation) const {
+    return impl_->slotFor(surface, generation);
+}
+void D3DRenderer::bindSurface(const HostD3DSurface *s, uint32_t generation, uint64_t frame) {
+    impl_->bindSurface(s, generation, frame);
+}
+void D3DRenderer::sealFrame(uint64_t frame) {
+    impl_->sealFrame(frame);
+}
+void D3DRenderer::retireFrame(uint64_t frame) {
+    impl_->retireFrame(frame);
+}
+void D3DRenderer::swapSurface(uint32_t a, uint32_t ag, uint32_t b, uint32_t bg) {
+    impl_->swapSurface(a, ag, b, bg);
+}
+bool D3DRenderer::coherentSurface(const HostD3DSurface *surface, uint32_t generation,
+                                  const HostDirtyRect *rects, uint32_t count) {
+    return impl_->coherentSurface(surface, generation, rects, count);
+}
+void D3DRenderer::applyCPU(const HostD3DSurface *surface, const HostBlitRecord *r) {
+    impl_->applyCPU(surface, r);
+}
+HostDrawMapping D3DRenderer::mappingForFrame(uint64_t frame, uint32_t seq) const {
+    return impl_->mappingForFrame(frame, seq);
+}
+void D3DRenderer::replayBarrier(const HostD3DSurface *surface, uint32_t generation, uint32_t seq) {
+    impl_->replayBarrier(surface, generation, seq);
+}
+bool D3DRenderer::replayLegacyFrame(uint64_t frame) {
+    return impl_->replayLegacyFrame(frame);
+}
 
 // ---------------------------------------------------------------------------
 // The shim callbacks. Strong definitions that displace the weak no-ops in
-// src/recomp/dx/host_api.cpp.
+// src/recomp/dx/host_api.cpp. With no renderer installed they do nothing,
+// as a message to a nil receiver did in the Objective-C version.
 // ---------------------------------------------------------------------------
 extern "C" void host_d3d_begin_scene(void) {
-    [[PopD3DRenderer shared] beginScene];
+    if (auto *r = D3DRenderer::shared())
+        r->beginScene();
 }
 extern "C" void host_d3d_end_scene(void) {
-    [[PopD3DRenderer shared] endScene];
+    if (auto *r = D3DRenderer::shared())
+        r->endScene();
 }
 // The snapshot is the frame's own copy of the draw: every pointer in it is
 // arena-owned and outlives the guest call that made it. The renderer still
 // reads the older command shape, so this is a view over those copies - not a
 // second copy, and not a guest pointer.
 extern "C" void host_d3d_draw(const HostD3DDrawSnapshot *d) {
-    [[PopD3DRenderer shared] drawSnapshot:d];
+    if (auto *r = D3DRenderer::shared())
+        r->drawSnapshot(d);
 }
 
 extern "C" int host_d3d_texture_retain(uint32_t handle, uint32_t revision) {
-    return [[PopD3DRenderer shared] retainTexture:handle revision:revision] ? 1 : 0;
+    auto *r = D3DRenderer::shared();
+    return r && r->retainTexture(handle, revision) ? 1 : 0;
 }
 extern "C" void host_d3d_texture_release(uint32_t handle, uint32_t revision) {
-    [[PopD3DRenderer shared] releaseTexture:handle revision:revision];
+    if (auto *r = D3DRenderer::shared())
+        r->releaseTexture(handle, revision);
 }
 extern "C" int host_render_texture_revision_alive_for_test(uint32_t handle, uint32_t revision) {
-    return [[PopD3DRenderer shared] hasTexture:handle revision:revision] ? 1 : 0;
+    auto *r = D3DRenderer::shared();
+    return r && r->hasTexture(handle, revision) ? 1 : 0;
 }
 extern "C" void host_render_reset_for_test(void) {
-    [[PopD3DRenderer shared] forgetTexturesForTest];
+    if (auto *r = D3DRenderer::shared())
+        r->forgetTexturesForTest();
 }
 extern "C" void host_d3d_clear(uint32_t flags, const int32_t *rects, uint32_t count, uint32_t color,
                                float depth) {
-    [[PopD3DRenderer shared] clearFlags:flags rects:rects count:count color:color depth:depth];
+    if (auto *r = D3DRenderer::shared())
+        r->clearFlags(flags, rects, count, color, depth);
 }
 extern "C" void host_d3d_set_render_target(const HostD3DSurface *target) {
-    [[PopD3DRenderer shared] setRenderTarget:target];
+    if (auto *r = D3DRenderer::shared())
+        r->setRenderTarget(target);
 }
 extern "C" void host_d3d_flush_surface(const HostD3DSurface *surface, const char *why) {
     if (host_d3d_legacy_writeback())
-        [[PopD3DRenderer shared] flushSurface:surface why:why];
+        if (auto *r = D3DRenderer::shared())
+            r->flushSurface(surface, why);
 }
 extern "C" void host_d3d_discard(void) {
-    [[PopD3DRenderer shared] discard];
+    if (auto *r = D3DRenderer::shared())
+        r->discard();
 }
 extern "C" void host_d3d_texture(const HostD3DTexture *tex) {
-    [[PopD3DRenderer shared] uploadTexture:tex];
+    if (auto *r = D3DRenderer::shared())
+        r->uploadTexture(tex);
 }
 extern "C" void host_d3d_texture_destroyed(uint32_t handle) {
-    [[PopD3DRenderer shared] destroyTexture:handle];
+    if (auto *r = D3DRenderer::shared())
+        r->destroyTexture(handle);
 }
 
 void host_d3d_seal_commands(void) {
-    [[PopD3DRenderer shared] sealCommands];
+    if (auto *r = D3DRenderer::shared())
+        r->sealCommands();
 }
 extern "C" void host_d3d_bind_generation(const HostD3DSurface *s, uint32_t g, uint64_t f) {
+    auto *r = D3DRenderer::shared();
+    if (!r)
+        return;
     if (host_d3d_legacy_writeback()) {
-        [[PopD3DRenderer shared] setRenderTarget:s];
+        r->setRenderTarget(s);
         return;
     }
-    [[PopD3DRenderer shared] bindSurface:s generation:g frame:f];
+    r->bindSurface(s, g, f);
 }
 extern "C" int host_d3d_readback_rects(const HostD3DSurface *s, uint32_t g, const HostDirtyRect *r,
                                        uint32_t n) {
     if (host_d3d_legacy_writeback())
         return 1; // old flush already serviced it
-    return [[PopD3DRenderer shared] coherentSurface:s generation:g rects:r count:n];
+    auto *renderer = D3DRenderer::shared();
+    return renderer && renderer->coherentSurface(s, g, r, n) ? 1 : 0;
 }
 extern "C" void host_d3d_apply_cpu(const HostD3DSurface *s, const HostBlitRecord *r) {
     if (!host_d3d_legacy_writeback())
-        [[PopD3DRenderer shared] applyCPU:s record:r];
+        if (auto *renderer = D3DRenderer::shared())
+            renderer->applyCPU(s, r);
 }
 extern "C" void host_d3d_swap_generations(uint32_t a, uint32_t ag, uint32_t b, uint32_t bg) {
-    [[PopD3DRenderer shared] swapSurface:a generation:ag other:b generation:bg];
+    if (auto *r = D3DRenderer::shared())
+        r->swapSurface(a, ag, b, bg);
 }
 extern "C" void host_d3d_seal_frame(uint64_t f) {
-    [[PopD3DRenderer shared] sealFrame:f];
+    if (auto *r = D3DRenderer::shared())
+        r->sealFrame(f);
 }
 extern "C" void host_d3d_retire_frame(uint64_t f) {
-    [[PopD3DRenderer shared] retireFrame:f];
+    if (auto *r = D3DRenderer::shared())
+        r->retireFrame(f);
 }
 
 extern "C" void host_d3d_note_readback(HostReadReason reason) {
@@ -3942,26 +3635,31 @@ extern "C" void host_d3d_note_readback(HostReadReason reason) {
 }
 
 extern "C" void host_d3d_prepare_cpu_write(const HostD3DSurface *s, uint32_t g, uint64_t f) {
-    PopD3DRenderer *renderer = [PopD3DRenderer shared];
-    if (!host_d3d_legacy_writeback() && renderer && [renderer slotFor:s->id generation:g] >= 0)
-        [renderer bindSurface:s generation:g frame:f];
+    D3DRenderer *renderer = D3DRenderer::shared();
+    if (!host_d3d_legacy_writeback() && renderer && renderer->slotFor(s->id, g) >= 0)
+        renderer->bindSurface(s, g, f);
 }
 
 extern "C" int host_render_legacy_frame_for_test(HostFrameHandle f) {
-    return [[PopD3DRenderer shared] replayLegacyFrame:f.id];
+    auto *r = D3DRenderer::shared();
+    return r && r->replayLegacyFrame(f.id) ? 1 : 0;
 }
 
 extern "C" void host_d3d_replay_barrier(const HostD3DSurface *s, uint32_t generation,
                                         uint32_t seq) {
-    [[PopD3DRenderer shared] replayBarrier:s generation:generation seq:seq];
+    if (auto *r = D3DRenderer::shared())
+        r->replayBarrier(s, generation, seq);
 }
 extern "C" HostDrawMapping host_render_draw_mapping_for_test(HostFrameHandle f, uint32_t seq) {
-    return [[PopD3DRenderer shared] mappingForFrame:f.id seq:seq];
+    auto *r = D3DRenderer::shared();
+    return r ? r->mappingForFrame(f.id, seq) : HOST_MAPPING_SCENE;
 }
 
 extern "C" int host_d3d_accepts_draw() {
-    return ![PopD3DRenderer shared] || [[PopD3DRenderer shared] acceptsDraw];
+    auto *r = D3DRenderer::shared();
+    return !r || r->acceptsDraw();
 }
 void host_d3d_collect_present_targets() {
-    [[PopD3DRenderer shared] collectCleanTargets];
+    if (auto *r = D3DRenderer::shared())
+        r->collectCleanTargets();
 }

@@ -1253,11 +1253,10 @@ int main(int argc, char **argv) {
 
         // The renderer first: the presenter takes its command queue so a
         // present cannot run ahead of the scene it is showing.
-        PopD3DRenderer *renderer =
-            [[PopD3DRenderer alloc] initWithDevice:device queue:gpu::metal::queue(g_gpu.get())];
-        if (!renderer)
+        D3DRenderer *renderer = new D3DRenderer(g_gpu.get());
+        if (!renderer->ok())
             return 3;
-        [PopD3DRenderer setShared:renderer];
+        D3DRenderer::setShared(renderer);
         host_present_set_device(g_gpu.get());
 
         CAMetalLayer *layer = install_metal_layer();
@@ -1308,8 +1307,6 @@ int main(int argc, char **argv) {
                       [layer isKindOfClass:[CAMetalLayer class]] && layer.drawableSize.width > 0 &&
                       layer.drawableSize.height > 0,
                   @"presenter must start on the visible window's attached, nonzero Metal layer");
-        NSCAssert(layer.device == renderer.commandQueue.device,
-                  @"presenter and renderer must share a Metal device");
         host_present_start((__bridge void *)layer, int(layer.drawableSize.width),
                            int(layer.drawableSize.height));
         // Said out loud, because "the keyboard does nothing" and "the window

@@ -1,4 +1,4 @@
-// d3d_render.h - what main.mm, present.mm and the tests need from the Metal
+// d3d_render.h - what the hosts, present.cpp and the tests need from the
 // renderer behind host_d3d_draw.
 #pragma once
 #include <stdint.h>
@@ -79,70 +79,88 @@ uint32_t host_d3d_total_flushes(void);
 // Alpha is excluded; host_d3d_reset_coherence starts a new observation interval.
 double host_d3d_peak_nonblack(void);
 
-#ifdef __OBJC__
-#import <Metal/Metal.h>
-
-@interface PopD3DRenderer : NSObject
-- (instancetype)initWithDevice:(id<MTLDevice>)device;
-// The host's queue, so renderer and presenter share one: commands on one
-// queue run in submission order and nothing orders two queues against each other.
-- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue;
-- (HostHDTextureStats)hdTextureStats;
-// The renderer the host_d3d_* callbacks use. main.mm sets it once the Metal
-// device exists; the tests set their own.
-+ (PopD3DRenderer *)shared;
-+ (void)setShared:(PopD3DRenderer *)renderer;
-
-// The colour buffer the scene is drawn into. It mirrors the render target's
-// pixels; the surface's own memory is the copy that counts.
-@property(nonatomic, readonly) id<MTLTexture> colorTarget;
-// Sealed-frame consumers use the frame's texture and completion, not the
-// mutable current target. The frame lease must cover GPU completion/present.
-- (id<MTLTexture>)colorTargetForFrame:(uint64_t)frame;
-- (id<MTLCommandBuffer>)completionForFrame:(uint64_t)frame;
-// The queue the scene is submitted on. present.mm draws the drawable on this
-// same queue, because commands on one queue run in submission order and
-// nothing orders two queues against each other.
-@property(nonatomic, readonly) id<MTLCommandQueue> commandQueue;
-
-// The device's render target, or null when the device goes away.
-- (void)setRenderTarget:(const struct HostD3DSurface *)target;
-// Put anything drawn since the last flush into the surface's own pixels.
-- (void)flushSurface:(const struct HostD3DSurface *)surface why:(const char *)why;
-// The guest arena is gone. Drop everything pending without writing it: every
-// pixel pointer the renderer holds names memory that is not there any more.
-- (void)discard;
-
-// Task 7 supplies drawable resolution here; zero restores guest dimensions.
-- (void)setSceneWidth:(int)width height:(int)height;
-- (void)beginScene;
-- (void)endScene;
-- (void)sealCommands;
-- (void)clearFlags:(uint32_t)flags
-             rects:(const int32_t *)rects
-             count:(uint32_t)count
-             color:(uint32_t)color
-             depth:(float)depth;
-- (void)draw:(const struct HostD3DDraw *)cmd;
-// The same draw, sampling a NAMED texture revision rather than whichever one
-// the guest has uploaded most recently. A frame is composited after the guest
-// has moved on, so "the current texture" is the wrong answer by then.
-- (void)draw:(const struct HostD3DDraw *)cmd revision:(uint32_t)revision;
-- (void)uploadTexture:(const struct HostD3DTexture *)tex;
-- (void)destroyTexture:(uint32_t)handle;
-// A revision is kept while any frame holds it, and dropped when it is neither
-// the current one nor held.
-// NO when the renderer never received that revision, so the caller can upload
-// it and ask again.
-- (BOOL)retainTexture:(uint32_t)handle revision:(uint32_t)revision;
-- (void)releaseTexture:(uint32_t)handle revision:(uint32_t)revision;
-- (BOOL)hasTexture:(uint32_t)handle revision:(uint32_t)revision;
-- (HostCommandStorageStats)commandStorageStats;
-
-// Waits for the scene to finish and copies the colour target out as tightly
-// packed BGRA8. For the offscreen tests; nothing on the display path uses it.
-- (BOOL)readPixels:(void *)out width:(int *)width height:(int *)height;
-@end
-#endif
-
+// Drops coherence leases on targets the tracker no longer marks dirty.
 void host_d3d_collect_present_targets();
+
+#ifdef __cplusplus
+#include "../dx/passes.h"
+#include "gpu/gpu.h"
+#include <memory>
+
+// The renderer behind host_d3d_draw, over gpu.h. One instance per device; the
+// shim callbacks use the shared one. main sets it once the device exists; the
+// tests set their own.
+class D3DRenderer {
+  public:
+    explicit D3DRenderer(gpu::Device *device);
+    ~D3DRenderer();
+    D3DRenderer(const D3DRenderer &) = delete;
+    D3DRenderer &operator=(const D3DRenderer &) = delete;
+    // False when the shaders or pipelines failed; nothing else may be called then.
+    bool ok() const;
+    static D3DRenderer *shared();
+    static void setShared(D3DRenderer *renderer);
+    gpu::Device *device() const;
+
+    // The colour buffer the scene is drawn into. It mirrors the render target's
+    // pixels; the surface's own memory is the copy that counts.
+    gpu::Texture colorTarget() const;
+    // Sealed-frame consumers use the frame's texture and completion, not the
+    // mutable current target. The frame lease must cover GPU completion/present.
+    gpu::Texture colorTargetForFrame(uint64_t frame);
+    gpu::CommandBuffer completionForFrame(uint64_t frame);
+    HostHDTextureStats hdTextureStats() const;
+    HostCommandStorageStats commandStorageStats() const;
+
+    // The device's render target, or null when the device goes away.
+    void setRenderTarget(const struct HostD3DSurface *target);
+    // Put anything drawn since the last flush into the surface's own pixels.
+    void flushSurface(const struct HostD3DSurface *surface, const char *why);
+    // The guest arena is gone. Drop everything pending without writing it: every
+    // pixel pointer the renderer holds names memory that is not there any more.
+    void discard();
+    // Task 7 supplies drawable resolution here; zero restores guest dimensions.
+    void setSceneWidth(int width, int height);
+    void beginScene();
+    void endScene();
+    void sealCommands();
+    void clearFlags(uint32_t flags, const int32_t *rects, uint32_t count, uint32_t color,
+                    float depth);
+    void draw(const struct HostD3DDraw *cmd);
+    // The same draw, sampling a NAMED texture revision rather than whichever one
+    // the guest has uploaded most recently. A frame is composited after the guest
+    // has moved on, so "the current texture" is the wrong answer by then.
+    void draw(const struct HostD3DDraw *cmd, uint32_t revision);
+    void drawSnapshot(const struct HostD3DDrawSnapshot *d);
+    void uploadTexture(const struct HostD3DTexture *tex);
+    void destroyTexture(uint32_t handle);
+    // A revision is kept while any frame holds it, and dropped when it is neither
+    // the current one nor held. False when the renderer never received that
+    // revision, so the caller can upload it and ask again.
+    bool retainTexture(uint32_t handle, uint32_t revision);
+    void releaseTexture(uint32_t handle, uint32_t revision);
+    bool hasTexture(uint32_t handle, uint32_t revision);
+    void forgetTexturesForTest();
+    // Waits for the scene to finish and copies the colour target out as tightly
+    // packed BGRA8. For the offscreen tests; nothing on the display path uses it.
+    bool readPixels(void *out, int *width, int *height);
+    bool acceptsDraw() const;
+    void collectCleanTargets();
+    int slotFor(uint32_t surface, uint32_t generation) const;
+    void bindSurface(const struct HostD3DSurface *s, uint32_t generation, uint64_t frame);
+    void sealFrame(uint64_t frame);
+    void retireFrame(uint64_t frame);
+    void swapSurface(uint32_t a, uint32_t ag, uint32_t b, uint32_t bg);
+    bool coherentSurface(const struct HostD3DSurface *surface, uint32_t generation,
+                         const struct HostDirtyRect *rects, uint32_t count);
+    void applyCPU(const struct HostD3DSurface *surface, const struct HostBlitRecord *r);
+    HostDrawMapping mappingForFrame(uint64_t frame, uint32_t seq) const;
+    void replayBarrier(const struct HostD3DSurface *surface, uint32_t generation, uint32_t seq);
+    bool replayLegacyFrame(uint64_t frame);
+
+    struct Impl;
+
+  private:
+    std::unique_ptr<Impl> impl_;
+};
+#endif

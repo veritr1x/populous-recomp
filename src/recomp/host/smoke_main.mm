@@ -35,7 +35,6 @@
 #include "present.h"
 #include "d3d_render.h"
 #include "gpu/gpu_factory.h"
-#include "gpu/metal/metal_bridge.h"
 #include "../runtime/guest.h"
 #include "../runtime/loader.h"
 #include "../runtime/win32.h"
@@ -129,7 +128,7 @@ std::vector<std::string> g_dumps;
 std::vector<uint8_t> g_last_rgb;
 int g_last_w = 0, g_last_h = 0;
 
-PopD3DRenderer *g_renderer = nil;
+D3DRenderer *g_renderer = nullptr;
 
 // A channel's play cursor has to advance in real time from the moment Play was
 // called, whether or not anything is audible: the video player at 0057a9a0
@@ -176,11 +175,12 @@ void write_dump(const char *name) {
     // from what the surface ended up holding.
     int w = 0, h = 0;
     std::vector<uint8_t> bgra;
-    if (g_renderer && g_renderer.colorTarget) {
-        w = (int)g_renderer.colorTarget.width;
-        h = (int)g_renderer.colorTarget.height;
+    if (g_renderer && g_renderer->colorTarget()) {
+        const gpu::TextureDesc target = g_renderer->device()->describe(g_renderer->colorTarget());
+        w = target.width;
+        h = target.height;
         bgra.resize((size_t)w * (size_t)h * 4);
-        if ([g_renderer readPixels:bgra.data() width:&w height:&h]) {
+        if (g_renderer->readPixels(bgra.data(), &w, &h)) {
             std::vector<uint8_t> rgb((size_t)w * (size_t)h * 3);
             for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; ++i) {
                 rgb[i * 3 + 0] = bgra[i * 4 + 2];
@@ -541,11 +541,11 @@ double metric(const char *name, int32_t entity_id = -1) {
     if (!strcmp(name, "dumpat_fired"))
         return g_dumpat.fired;
     if (!strcmp(name, "hd_draws"))
-        return g_renderer ? g_renderer.hdTextureStats.draws : 0;
+        return g_renderer ? g_renderer->hdTextureStats().draws : 0;
     if (!strcmp(name, "terrain_detail_draws"))
-        return g_renderer ? g_renderer.hdTextureStats.detail_draws : 0;
+        return g_renderer ? g_renderer->hdTextureStats().detail_draws : 0;
     if (!strcmp(name, "hd_refused"))
-        return g_renderer ? g_renderer.hdTextureStats.refused : 0;
+        return g_renderer ? g_renderer->hdTextureStats().refused : 0;
     if (!strcmp(name, "textures"))
         return host_d3d_total_textures();
     if (!strcmp(name, "draws"))
@@ -1764,7 +1764,7 @@ void report(FILE *out, bool abnormal) {
     fprintf(out, "presented frames:   %u (%u of them different from the one before)\n", g_presents,
             g_present_changes);
     if (g_renderer) {
-        auto hd = g_renderer.hdTextureStats;
+        auto hd = g_renderer->hdTextureStats();
         fprintf(out,
                 "HD textures:        %llu world draws, %llu loads, %llu hits, %llu refused, %llu / "
                 "%llu bytes\n",
@@ -2247,19 +2247,17 @@ int main(int argc, char **argv) {
 
     @autoreleasepool {
         auto gpu_device = gpu::create_default_device();
-        id<MTLDevice> device = gpu_device ? gpu::metal::device(gpu_device.get()) : nil;
-        if (!device) {
-            fprintf(stderr, "smoke: no Metal device\n");
+        if (!gpu_device) {
+            fprintf(stderr, "smoke: no GPU device\n");
             return 3;
         }
-        g_renderer = [[PopD3DRenderer alloc] initWithDevice:device
-                                                      queue:gpu::metal::queue(gpu_device.get())];
+        g_renderer = new D3DRenderer(gpu_device.get());
         host_present_set_device(gpu_device.get());
-        if (!g_renderer) {
+        if (!g_renderer->ok()) {
             fprintf(stderr, "smoke: no renderer\n");
             return 3;
         }
-        [PopD3DRenderer setShared:g_renderer];
+        D3DRenderer::setShared(g_renderer);
         int drawable_w = 640, drawable_h = 480;
         if (const char *size = getenv("POP_SMOKE_DRAWABLE")) {
             char trailing = 0;

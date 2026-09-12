@@ -178,7 +178,7 @@ the game then blits its interface over the same pixels and flips. So the two
 kinds of drawing have to interleave in that surface's memory, in the order the
 guest produced them, and a composite at present time cannot reproduce that.
 
-`d3d_render.mm` therefore keeps a Metal mirror of the render-target surface:
+`d3d_render.cpp` therefore keeps a GPU mirror of the render-target surface:
 
 | when | what happens |
 | --- | --- |

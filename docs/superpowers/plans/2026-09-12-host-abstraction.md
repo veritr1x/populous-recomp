@@ -1798,3 +1798,18 @@ Expected: only the pre-existing failures from `PROGRESS.md`. Commit `"Finish the
 - Spec coverage: GPU interface (T2), Metal backend (T3), presenter/compositor/overlay (T4), renderer (T5), SDL3 window/input (T6), bridge removal (T7), mixer/sinks (T8), TinySoundFont MIDI (T9), `.mm` boundary, labels, CI, docs (T10). Accepted losses from the spec (menu-bar Settings item, Apple GM fallback, private confinement call) are each named in T6 and T9.
 - Type consistency: `gpu::Texture`/`Device`/`FakeDevice` names are identical across tasks; `host_present_set_device`, `host_present_start(void*,int,int)`, `host_present_start_offscreen(int,int)` in T4 are what T5/T6 call; `HostKeyMapping{scancode,dik,vk}` in T6 matches its tests; `AudioSink`/`Mixer`/`mixer_install` in T8 are what T9 extends.
 - Formats: `RGB565` from the spec's list is not in `gpu::Format`; the presenter expands 565 on the CPU today (`host_present_expand_rgb565`) and that stays, so no backend needs the format.
+
+## Execution notes
+
+- Task 4: `compositor_tests` stays on the real device (label `gpu`): the fake backend
+  executes no draws, so pixel assertions need Metal. The scene-reuse policy tests use
+  handle values. The presenter's commit path is tested through `gpu::FakeDevice`
+  (`host_present_test_commit_swapchain`). A pinned integration failure turned out to
+  be default-profile drift; see PROGRESS.md.
+- Task 5: the renderer stayed one file (`d3d_render.cpp`, 3.7k lines) behind a pimpl;
+  the `d3d_textures.cpp`/`d3d_readback.cpp` split was not worth the churn on a file
+  that is converted line for line. `gpu.h` gained `Blend::SrcAlphaSaturated`,
+  `Address::ClampToBorder`, `CommandStatus::Pending` and buffer<->texture copies,
+  which the renderer's argument pool, checkpoints and CPU uploads need. The Metal
+  counter-sample timing columns read -1. The renderer tests remain inside
+  `host_tests.mm` (converted call by call); the file becomes `.cpp` in Task 8.

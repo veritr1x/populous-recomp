@@ -81,13 +81,14 @@ enum class Blend {
     SrcColor,
     OneMinusSrcColor,
     DstColor,
-    OneMinusDstColor
+    OneMinusDstColor,
+    SrcAlphaSaturated
 };
 enum class Compare { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
 enum class Cull { None, Front, Back };
 enum class Filter { Nearest, Linear };
 enum class MipFilter { None, Nearest, Linear };
-enum class Address { Repeat, ClampToEdge, MirrorRepeat };
+enum class Address { Repeat, ClampToEdge, MirrorRepeat, ClampToBorder };
 enum class Primitive { Points, Lines, Triangles, TriangleStrip };
 enum class Load { Load, Clear, DontCare };
 enum class Store { Store, DontCare };
@@ -138,7 +139,8 @@ struct Viewport {
     double x, y, w, h, near_z, far_z;
 };
 
-enum class CommandStatus { Completed, Error };
+// Pending: begun or committed and not yet finished. Unknown ids read as Completed.
+enum class CommandStatus { Completed, Error, Pending };
 
 class Device {
   public:
@@ -197,6 +199,11 @@ class Device {
 
     virtual void blit(CommandBuffer cb, Texture src, Region src_region, Texture dst, int dst_x,
                       int dst_y) = 0;
+    // Buffer <-> texture copies inside the command stream, `pitch` bytes per row.
+    virtual void copy_buffer_to_texture(CommandBuffer cb, Buffer src, uint64_t offset, int pitch,
+                                        Texture dst, Region dst_region) = 0;
+    virtual void copy_texture_to_buffer(CommandBuffer cb, Texture src, Region src_region,
+                                        Buffer dst, uint64_t offset, int pitch) = 0;
     virtual void generate_mipmaps(CommandBuffer cb, Texture t) = 0;
 
     // Runs on a backend thread after the buffer finishes; `status` says how.

@@ -23,7 +23,7 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 - Branch: `host-abstraction` (forked from `main` at 920de70).
 - Plan: `plans/2026-09-12-host-abstraction.md` (10 tasks, written and committed).
-- Executing inline (superpowers:executing-plans). Tasks 1-4 done (dependencies; gpu.h + fake backend; Metal backend; presenter/compositor/overlay over gpu.h with a temporary Metal bridge for the renderer and main.mm); next Task 5 (D3D renderer over gpu.h).
+- Executing inline (superpowers:executing-plans). Tasks 1-5 done (dependencies; gpu.h + fake backend; Metal backend; presenter/compositor/overlay over gpu.h; D3D renderer as portable C++ `D3DRenderer` over gpu.h, menu composites byte-identical to main); the Metal bridge now only serves main.mm's CAMetalLayer; next Task 6 (SDL3 host).
 
 ## Environment gotcha found during Task 4
 

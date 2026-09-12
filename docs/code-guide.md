@@ -14,7 +14,7 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Mouse edges, coordinate mapping | [input_gate.cpp](../src/recomp/host/input_gate.cpp) | `take_layout`, `host_gate_pointer_event`, `pointer_correction` |
 | macOS window, focus, quit | [main.mm](../src/recomp/host/main.mm) | `handle_event`, `apply_focus`, `apply_window_mode`, `pump`, `applicationShouldTerminate` |
 | Frame lifetime and pacing | [present_thread.cpp](../src/recomp/host/present_thread.cpp) | `acquire`, `host_frame_seal`, `sweep` |
-| World rendering, materials | [d3d_render.mm](../src/recomp/host/d3d_render.mm) | `host_d3d_expand`, `uploadTexture`, `drawSnapshot`, `d3d_fragment` |
+| World rendering, materials | [d3d_render.cpp](../src/recomp/host/d3d_render.cpp) | `host_d3d_expand`, `uploadTexture`, `drawSnapshot`, `d3d_fragment` |
 | UI separation and final composition | [ui_layer.cpp](../src/recomp/host/ui_layer.cpp), [compositor.cpp](../src/recomp/host/compositor.cpp) | `ui_layer_extract`, `replay`, `compositor_compose` |
 | Audio streaming or gaps | [audio.mm](../src/recomp/host/audio.mm) | `ensure_engine`, `host_audio_stream`, `host_audio_queue`, `host_audio_queued_bytes` |
 | Sound evidence | [audio_capture.cpp](../src/recomp/host/audio_capture.cpp) | `host_capture_write`, `host_capture_stats` |

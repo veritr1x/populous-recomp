@@ -52,6 +52,10 @@ class FakeDevice final : public Device {
     void end_compute_pass(CommandBuffer cb) override;
     void blit(CommandBuffer cb, Texture src, Region src_region, Texture dst, int dst_x,
               int dst_y) override;
+    void copy_buffer_to_texture(CommandBuffer cb, Buffer src, uint64_t offset, int pitch,
+                                Texture dst, Region dst_region) override;
+    void copy_texture_to_buffer(CommandBuffer cb, Texture src, Region src_region, Buffer dst,
+                                uint64_t offset, int pitch) override;
     void generate_mipmaps(CommandBuffer cb, Texture t) override;
     void on_complete(CommandBuffer cb, std::function<void(CommandStatus, double)> fn) override;
     void commit(CommandBuffer cb) override;

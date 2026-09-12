@@ -213,6 +213,40 @@ void FakeDevice::blit(CommandBuffer, Texture src, Region r, Texture dst, int dx,
                &s->levels[0][(size_t(r.y + y) * s->desc.width + r.x) * bpp], size_t(w) * bpp);
     }
 }
+void FakeDevice::copy_buffer_to_texture(CommandBuffer, Buffer src, uint64_t offset, int pitch,
+                                        Texture dst, Region r) {
+    std::lock_guard lock(mutex_);
+    Tex *d = tex(dst);
+    auto b = buffers_.find(src.id);
+    if (!d || b == buffers_.end() || r.x < 0 || r.y < 0 || r.x + r.w > d->desc.width ||
+        r.y + r.h > d->desc.height)
+        return;
+    const int bpp = bytes_per_pixel(d->desc.format);
+    for (int y = 0; y < r.h; ++y) {
+        const uint64_t at = offset + uint64_t(y) * pitch;
+        if (at + uint64_t(r.w) * bpp > b->second.bytes.size())
+            break;
+        memcpy(&d->levels[0][(size_t(r.y + y) * d->desc.width + r.x) * bpp], &b->second.bytes[at],
+               size_t(r.w) * bpp);
+    }
+}
+void FakeDevice::copy_texture_to_buffer(CommandBuffer, Texture src, Region r, Buffer dst,
+                                        uint64_t offset, int pitch) {
+    std::lock_guard lock(mutex_);
+    Tex *s = tex(src);
+    auto b = buffers_.find(dst.id);
+    if (!s || b == buffers_.end() || r.x < 0 || r.y < 0 || r.x + r.w > s->desc.width ||
+        r.y + r.h > s->desc.height)
+        return;
+    const int bpp = bytes_per_pixel(s->desc.format);
+    for (int y = 0; y < r.h; ++y) {
+        const uint64_t at = offset + uint64_t(y) * pitch;
+        if (at + uint64_t(r.w) * bpp > b->second.bytes.size())
+            break;
+        memcpy(&b->second.bytes[at], &s->levels[0][(size_t(r.y + y) * s->desc.width + r.x) * bpp],
+               size_t(r.w) * bpp);
+    }
+}
 void FakeDevice::generate_mipmaps(CommandBuffer, Texture) {}
 void FakeDevice::on_complete(CommandBuffer cb, std::function<void(CommandStatus, double)> fn) {
     std::lock_guard lock(mutex_);
@@ -258,8 +292,13 @@ void FakeDevice::complete_all() {
         fn(status, 0.0);
 }
 void FakeDevice::wait(CommandBuffer) {}
-CommandStatus FakeDevice::status(CommandBuffer) {
-    return CommandStatus::Completed;
+CommandStatus FakeDevice::status(CommandBuffer cb) {
+    std::lock_guard lock(mutex_);
+    auto it = commands_.find(cb.id);
+    if (it == commands_.end())
+        return CommandStatus::Completed;
+    return it->second.committed && !manual_completion_ ? CommandStatus::Completed
+                                                       : CommandStatus::Pending;
 }
 
 Swapchain FakeDevice::create_swapchain(void *, int width, int height) {
