@@ -3761,3 +3761,28 @@ Then invoke `superpowers:finishing-a-development-branch`.
 
 - Spec coverage: Targets table → Tasks 1 to 5, 12; output locations → Tasks 1 to 4; generated code and translation step → Tasks 3 and 10; build lock → Task 9; platform layer table → Tasks 5, 6, 7, 8, 13; plugins and `build_core.py` → Tasks 2, 7; Python entry points and the translator test → Tasks 10, 11; CTest labels → every `add_test`; CI → Task 13; documentation and removed files → Task 14; risks: weak defaults → Task 12/13 `null_host_link`, `long` → Task 8, lock → Task 9, paths → Tasks 1 to 4, Windows/Linux visibility → Tasks 12 and 13.
 - Names used across tasks: `pop_optimize`, `pop_test_binary`, `pop_add_plugin`, `pop_link_gen`, `pop_mac_bundle`, `pop_host`, `check_binaries`, `recomp_platform`, `recomp_runtime`, `recomp_runtime_testing`, `recomp_snapshot`, `recomp_dx`, `recomp_dx_null`, `recomp_mods`, `recomp_mods_testing`, `recomp_gen`, `host_common`, `core_mods`, `example_mods`, `smoke_probe`, `mod_fixtures`, `plugins`, `roots_probe`, `null_host_link`; Python `buildlock.BuildLock`, `build_py.configure/build/cmake_tool/archive_path/publish_generated`, `build_core.install/plugin_extension`; C `os_*` as declared in Task 5.
+
+## Execution notes (2026-09-12)
+
+Deviations found while executing, all landed in the task commits:
+
+- `os.h` gained `os_rmdir`, `os_write_stderr_raw` and `os_exit_immediately`:
+  `RemoveDirectory` had one caller in `kernel32.cpp`, and the fault handler's
+  raw `write(2, ...)` and `_exit` had none of the platform layer's cover.
+- `kernel32.cpp` had one `pthread_cond_wait` beside the timed wait; it became
+  `g_sched_cv.wait(g_sched_m)`.
+- `capture_seam.cpp` includes the page-tracking harness from `src/recomp/native`
+  (mprotect and sigaction). Windows compiles `capture_seam_win32.cpp` instead,
+  which reports capture as unavailable. Porting page tracking is later work.
+- `run_record.cpp` hashed `st_mode & S_IFMT` for special files; it now hashes
+  one fixed kind code. Regular files and directories hash as before.
+- `dx_tests.cpp` used `getcwd`; it now uses `os_getcwd`.
+- `build_core.py` sets `SDKROOT` on macOS when absent, because a compiler named
+  by its toolchain path finds no libSystem without it.
+- `host_common` (boot.cpp) was not compiled by any `check_binaries` target on
+  macOS until `null_host_link` existed; that target now keeps it honest.
+- The Linux and macOS builds share `build/recomp/` for binaries, so a Docker
+  run on the same checkout overwrites the macOS test executables; delete them
+  and rebuild afterwards.
+- The checks workflow does not run on a feature-branch push; it was dispatched
+  with `gh workflow run checks.yml --ref portable-build-system`.
