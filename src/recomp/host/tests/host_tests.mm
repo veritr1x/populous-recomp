@@ -46,6 +46,7 @@
 #include "../../runtime/mods_seam.h"
 
 #include "../gpu/fake/fake_device.h"
+#include <unistd.h>
 #include "../gpu/gpu_factory.h"
 
 #include <math.h>
@@ -3225,7 +3226,7 @@ static void test_readback_kernel_parity(D3DRenderer *original) {
     for (const char *mode : {"fused", "tiled"}) {
         setenv("POP_HOST_READBACK_KERNEL", mode, 1);
         D3DRenderer *r = make_renderer();
-        CHECK(r != nil);
+        CHECK(r != nullptr);
         if (!r)
             continue;
         D3DRenderer::setShared(r);
@@ -3254,7 +3255,7 @@ static void test_surface_upload_pixels(D3DRenderer *original) {
             for (const char *mode : {"cpu", "gpu"}) {
                 setenv("POP_HOST_SURFACE_UPLOAD", mode, 1);
                 auto r = make_renderer();
-                CHECK(r != nil);
+                CHECK(r != nullptr);
                 if (!r)
                     continue;
                 D3DRenderer::setShared(r);
@@ -3348,7 +3349,7 @@ static void test_bounded_submission_pixels(D3DRenderer *original) {
         for (int interval : {0, 1, 256}) {
             setenv("POP_HOST_D3D_SUBMIT_DRAWS", std::to_string(interval).c_str(), 1);
             D3DRenderer *r = make_renderer();
-            CHECK(r != nil);
+            CHECK(r != nullptr);
             if (!r)
                 continue;
             D3DRenderer::setShared(r);
@@ -3420,7 +3421,7 @@ static void test_parallel_readback_pixels(D3DRenderer *original) {
         for (int workers : {1, 4}) {
             setenv("POP_HOST_READBACK_WORKERS", std::to_string(workers).c_str(), 1);
             D3DRenderer *r = make_renderer();
-            CHECK(r != nil);
+            CHECK(r != nullptr);
             if (!r)
                 continue;
             D3DRenderer::setShared(r);
@@ -5611,7 +5612,7 @@ static void test_hd_pack_and_classic_isolation(D3DRenderer *original) {
     setenv("POPM_TEXTURE_BUDGET_MB", "32", 1);
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
     auto r = make_renderer();
-    CHECK(r != nil);
+    CHECK(r != nullptr);
     D3DRenderer::setShared(r);
     for (int variant = 0; r && variant < 5; ++variant) {
         r->discard();
@@ -5706,7 +5707,7 @@ static void test_terrain_material_detail(D3DRenderer *original) {
     std::string saved = env ? env : "";
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
     auto renderer = make_renderer();
-    CHECK(renderer != nil);
+    CHECK(renderer != nullptr);
     D3DRenderer::setShared(renderer);
     for (int variant = 0; renderer && variant < 8; ++variant) {
         renderer->discard();
@@ -7317,60 +7318,27 @@ static void test_fullscreen_edge_presentation() {
     // 4K sizes. Test the last complete point (max - 1), overrun, monotonic
     // motion and the flipped vertical axis; without remapping, the final
     // rows/columns would be unreachable and edge scrolling would still stop.
-    for (auto size : {NSMakeSize(1512, 949), NSMakeSize(1920, 1080), NSMakeSize(960, 600)}) {
-        const NSRect clip = host_pointer_confinement_rect({{0, 0}, size});
-        CHECK(clip.origin.x > 0 && clip.origin.y > 0);
-        CHECK(NSMaxX(clip) < size.width && NSMaxY(clip) < size.height);
-        const int w = int(size.width * 2), h = int(size.height * 2);
-        CHECK_EQ(host_confined_pointer_pixel(clip.origin.x, clip.origin.x, clip.size.width, w), 0);
-        CHECK_EQ(host_confined_pointer_pixel(NSMaxX(clip) - 1, clip.origin.x, clip.size.width, w),
-                 w - 1);
-        CHECK_EQ(
-            host_confined_pointer_pixel(clip.origin.y, clip.origin.y, clip.size.height, h, true),
-            h - 1);
-        CHECK_EQ(
-            host_confined_pointer_pixel(NSMaxY(clip) - 1, clip.origin.y, clip.size.height, h, true),
-            0);
-        CHECK_EQ(host_confined_pointer_pixel(-100, clip.origin.x, clip.size.width, w), 0);
-        CHECK_EQ(host_confined_pointer_pixel(10000, clip.origin.y, clip.size.height, h, true), 0);
+    const double sizes[][2] = {{1512, 949}, {1920, 1080}, {960, 600}};
+    for (auto size : sizes) {
+        const HostRect clip = host_pointer_confinement_rect({0, 0, size[0], size[1]});
+        CHECK(clip.x > 0 && clip.y > 0);
+        CHECK(clip.x + clip.w < size[0] && clip.y + clip.h < size[1]);
+        const int w = int(size[0] * 2), h = int(size[1] * 2);
+        CHECK_EQ(host_confined_pointer_pixel(clip.x, clip.x, clip.w, w), 0);
+        CHECK_EQ(host_confined_pointer_pixel(clip.x + clip.w - 1, clip.x, clip.w, w), w - 1);
+        CHECK_EQ(host_confined_pointer_pixel(clip.y, clip.y, clip.h, h, true), h - 1);
+        CHECK_EQ(host_confined_pointer_pixel(clip.y + clip.h - 1, clip.y, clip.h, h, true), 0);
+        CHECK_EQ(host_confined_pointer_pixel(-100, clip.x, clip.w, w), 0);
+        CHECK_EQ(host_confined_pointer_pixel(10000, clip.y, clip.h, h, true), 0);
         int previous = -1;
-        for (double x = clip.origin.x; x < NSMaxX(clip); x += 0.5) {
-            int pixel = host_confined_pointer_pixel(x, clip.origin.x, clip.size.width, w);
+        for (double x = clip.x; x < clip.x + clip.w; x += 0.5) {
+            int pixel = host_confined_pointer_pixel(x, clip.x, clip.w, w);
             CHECK(pixel >= previous && pixel < w);
             previous = pixel;
         }
     }
-    CHECK(NSIsEmptyRect(host_pointer_confinement_rect(NSMakeRect(0, 0, 0, 0))));
+    CHECK(host_pointer_confinement_rect({0, 0, 0, 0}).empty());
     CHECK_EQ(host_confined_pointer_pixel(5, 0, 0, 0), 0);
-    // AppKit can propose different legal combinations depending on the user's
-    // menu/toolbar settings. The game must suppress edge reveals without an
-    // invalid combination (which raises NSInvalidArgumentException), and must
-    // leave keyboard escape routes available.
-    const NSApplicationPresentationOptions normal[] = {
-        NSApplicationPresentationFullScreen | NSApplicationPresentationAutoHideDock |
-            NSApplicationPresentationAutoHideMenuBar,
-        NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock |
-            NSApplicationPresentationAutoHideMenuBar | NSApplicationPresentationAutoHideToolbar,
-        NSApplicationPresentationFullScreen | NSApplicationPresentationHideDock |
-            NSApplicationPresentationHideMenuBar,
-        NSApplicationPresentationFullScreen | NSApplicationPresentationAutoHideDock |
-            NSApplicationPresentationDisableCursorLocationAssistance,
-    };
-    for (auto proposed : normal) {
-        const auto playing = host_fullscreen_presentation(proposed, true);
-        CHECK(playing & NSApplicationPresentationFullScreen);
-        CHECK(playing & NSApplicationPresentationHideDock);
-        CHECK(playing & NSApplicationPresentationHideMenuBar);
-        CHECK(!(playing &
-                (NSApplicationPresentationAutoHideDock | NSApplicationPresentationAutoHideMenuBar |
-                 NSApplicationPresentationAutoHideToolbar)));
-        CHECK(!(playing & (NSApplicationPresentationDisableProcessSwitching |
-                           NSApplicationPresentationDisableForceQuit |
-                           NSApplicationPresentationDisableSessionTermination)));
-        CHECK_EQ(playing & NSApplicationPresentationDisableCursorLocationAssistance,
-                 proposed & NSApplicationPresentationDisableCursorLocationAssistance);
-        CHECK_EQ(host_fullscreen_presentation(proposed, false), proposed);
-    }
 }
 
 static void test_pointer_capture() {

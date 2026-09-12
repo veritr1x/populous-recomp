@@ -12,7 +12,7 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Live display settings | [display_settings.cpp](../src/recomp/mods/display_settings.cpp) | `mods_display_init`, `mods_display_set`, `apply_transition` |
 | Saved graphics choices, new resolutions | [game_settings.cpp](../src/recomp/mods/game_settings.cpp) | `flush_changed`, `enumerate_modes`, `enumerate_display_mode`, `scale_camera_for_resolution` |
 | Mouse edges, coordinate mapping | [input_gate.cpp](../src/recomp/host/input_gate.cpp) | `take_layout`, `host_gate_pointer_event`, `pointer_correction` |
-| macOS window, focus, quit | [main.mm](../src/recomp/host/main.mm) | `handle_event`, `apply_focus`, `apply_window_mode`, `pump`, `applicationShouldTerminate` |
+| Window, focus, quit (SDL3) | [sdl/main.cpp](../src/recomp/host/sdl/main.cpp) | `handle_event`, `apply_focus`, `apply_window_mode`, `pump`, `applicationShouldTerminate` |
 | Frame lifetime and pacing | [present_thread.cpp](../src/recomp/host/present_thread.cpp) | `acquire`, `host_frame_seal`, `sweep` |
 | World rendering, materials | [d3d_render.cpp](../src/recomp/host/d3d_render.cpp) | `host_d3d_expand`, `uploadTexture`, `drawSnapshot`, `d3d_fragment` |
 | UI separation and final composition | [ui_layer.cpp](../src/recomp/host/ui_layer.cpp), [compositor.cpp](../src/recomp/host/compositor.cpp) | `ui_layer_extract`, `replay`, `compositor_compose` |
@@ -60,7 +60,7 @@ gameplay meaning or replace a routine without a behavior comparison.
 
 ## Respect ownership boundaries
 
-- Guest memory changes happen on the scheduler baton holder. AppKit queues requests.
+- Guest memory changes happen on the scheduler baton holder. The window host queues requests.
 - The presenter receives immutable frame values and retained resources. Do not
   let it read mutable guest pointers after sealing.
 - A surface revision is a content version. Preserve leased bytes before writes;

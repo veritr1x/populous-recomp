@@ -67,11 +67,13 @@ if(TARGET recomp_gen)
   add_dependencies(pop_smoke core_mods smoke_probe)
 
   pop_host(PopRecomp GEN UI_LAYER OPT 2
-    SOURCES ${HOST}/main.mm ${HOST}/present.cpp ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES}
+    SOURCES ${HOST}/sdl/main.cpp ${HOST}/sdl/keymap.cpp ${HOST}/present.cpp ${HOST}/page_overlay.cpp
+            ${POP_PRESENT_SOURCES}
             ${HOST}/input.mm ${HOST}/input_gate.cpp
             ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp ${HOST}/midi.mm
     LIBS ${POP_CORE_LIBS}
-    FRAMEWORKS "-framework Cocoa" ${FW_METAL} ${FW_AUDIO})
+    FRAMEWORKS ${FW_METAL} ${FW_AUDIO})
+  pop_link_sdl(PopRecomp)
   pop_mac_bundle(PopRecomp)
 
   # Real loader, hooks and DirectDraw seal/service with fake GPU acks.

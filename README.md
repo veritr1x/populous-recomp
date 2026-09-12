@@ -55,7 +55,7 @@ the checked-in `.clang-format`; generated code remains a local build product.
 
 | Path | Purpose |
 | --- | --- |
-| `src/recomp/host/` | AppKit window, Metal rendering, audio, input and presentation |
+| `src/recomp/host/` | SDL3 window, the GPU interface and its Metal backend, audio, input and presentation |
 | `src/recomp/runtime/` | Guest memory, executable loading, imports and cooperative scheduling |
 | `src/recomp/dx/` | Original graphics, input and sound interfaces adapted to the native host |
 | `src/recomp/mods/` | Mod loading, hooks, settings, native Options controls and C/Lua API |

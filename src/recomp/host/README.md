@@ -5,7 +5,7 @@ Three programs run the same recompiled guest:
 | program | built by | what it does with a frame |
 | --- | --- | --- |
 | `build/recomp/pop_headless` | `tools/build.py --target headless` | writes `build/recomp/frames/frame_NNNN.ppm` |
-| `build/PopRecomp.app` | `tools/build.py`, `make all` | draws it in an AppKit window |
+| `build/PopRecomp.app` | `tools/build.py`, `make all` | draws it in an SDL3 window |
 | `build/recomp/pop_smoke` | `tools/build.py --target smoke`, `make recomp-smoke` | presses buttons from a script and measures what came out |
 
 All three boot the game from the real PE entry point (`0055d6c0`): CRT startup,
@@ -21,10 +21,10 @@ startup and never runs `WinMain`.
 | `boot.{h,cpp}` | the boot sequence all hosts share: the load, the heartbeat, the activation, the close, the unwind, the watchdog, the fault handler |
 | `report_lock.cpp` | the one mutex a host's run bookkeeping is written under |
 | `headless_main.cpp` | the frame-writing host and its caps |
-| `main.mm` | the window, the NSEvent pump and the lifetime |
+| `sdl/main.cpp` | the window, the SDL event pump and the lifetime |
 | `present.{h,mm}` | `host_present`: 8-bit and 5-6-5 expansion, the letterbox, the drawable |
 | `d3d_render.{h,mm}` | the Metal renderer behind `host_d3d_draw` |
-| `input.{h,mm}` | NSEvents to DirectInput scan codes, Win32 messages and `GetAsyncKeyState`, and waking the guest's input threads |
+| `input.{h,cpp}` | host key codes to DirectInput scan codes, Win32 messages and `GetAsyncKeyState`, and waking the guest's input threads |
 | `audio.{h,mm}` | `host_audio_play` on AVAudioEngine, and the lock order that keeps it out of a deadlock |
 | `Info.plist` | the app bundle's |
 | `tests/host_tests.mm` | the headless tests |
@@ -70,12 +70,12 @@ mem_init -> loader_load -> dx_register_shims -> loader_init_context
 ```
 
 The headless host synthesises the activation a window manager would send; the
-windowed host turns that off and delivers the real thing from the NSEvents that
+windowed host turns that off and delivers the real thing from the window events that
 carry it.
 
 The tick arrives on whichever guest thread read the clock. The runtime's
 cooperative scheduler hands the baton around real pthreads, so a worker holding
-it reads `GetTickCount` exactly as the main one does. AppKit and Metal belong
+it reads `GetTickCount` exactly as the main one does. The window and the GPU device belong
 to the thread that called `boot_run`, so `pump()` asks `boot_on_run_thread()`
 and returns immediately when the answer is no: the scheduler passes the baton
 on and the main thread pumps when its turn comes.
@@ -98,11 +98,11 @@ latency on every keystroke with no cause a person could see.
 While another guest thread holds the scheduler baton, the host instead polls
 events without sleeping. The main thread then waits on the scheduler condition
 variable, so the worker's return wakes it immediately. A 2 ms cap keeps events
-responsive if the worker runs longer. Sleeping inside AppKit for these short
+responsive if the worker runs longer. Sleeping inside SDL for these short
 handoffs used to add a full slice for every input worker wakeup, causing large
 frame spikes during ordinary pointer movement.
 
-Captured input in fullscreen and borderless uses AppKit's window-local mouse
+Captured input in fullscreen and borderless uses SDL's window-local mouse
 confinement, keeping the accelerated OS cursor four points inside the safe
 content bounds. This avoids desktop hot edges without decoupling the cursor
 or repeatedly warping it. The inset travel range maps onto the whole drawable,
@@ -150,7 +150,7 @@ yields to the system. It is rate limited to once per millisecond and guarded
 against re-entry, because posting a message timestamps it with the same clock.
 
 For the windowed host that is also the entire event loop: the guest owns the
-main thread, and `pump()` in `main.mm` drains the NSEvent queue from inside the
+main thread, and `pump()` in `sdl/main.cpp` drains the SDL event queue from inside the
 guest's clock read.
 
 ## Ending a run
@@ -224,8 +224,8 @@ an event rather than polling, so input nobody announces is input the game never
 sees - which is what a first live run looked like when the mouse and the
 keyboard did nothing at all.
 
-Every mutator in `input.mm` announces the change through a function the host
-installs: `main.mm` installs the shim's `dinput_host_input_changed()`, and a
+Every mutator in `input.cpp` announces the change through a function the host
+installs: `sdl/main.cpp` installs the shim's `dinput_host_input_changed()`, and a
 binary that links none of the shims installs its own or nothing. The
 indirection is not a preference. A weak declaration does not survive a static
 link, so the choice was a function pointer or a link-time dependency on the
@@ -332,7 +332,7 @@ did not rasterize bit-identical — rendered on the real GPU into an
 `MTLTexture` and read back. No window, no application object
 and no audio device is created.
 
-`main.mm` has no test: a window is the one thing a headless test cannot make.
+`sdl/main.cpp` has no test: a window is the one thing a headless test cannot make.
 
 ## The headless host in particular
 

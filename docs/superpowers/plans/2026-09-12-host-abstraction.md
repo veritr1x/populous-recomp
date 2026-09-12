@@ -1813,3 +1813,10 @@ Expected: only the pre-existing failures from `PROGRESS.md`. Commit `"Finish the
   which the renderer's argument pool, checkpoints and CPU uploads need. The Metal
   counter-sample timing columns read -1. The renderer tests remain inside
   `host_tests.mm` (converted call by call); the file becomes `.cpp` in Task 8.
+- Task 6: the host key code space stays the macOS virtual-key numbering that
+  `input.cpp`'s table, the input gate and its tests are keyed on; `sdl/keymap.cpp`
+  maps SDL scancodes and SDL_Keymod onto it, so `input.h`'s table and the modifier
+  flag layout did not change. `window_presentation.h` became a portable `HostRect`
+  header; AppKit's fullscreen presentation options have no SDL counterpart (SDL owns
+  the fullscreen chrome). The menu-bar Settings item is gone, as the spec accepted.
+  Not yet done by a person: the manual window checklist.

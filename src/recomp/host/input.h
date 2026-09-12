@@ -1,12 +1,13 @@
 // input.h - the keyboard and mouse translation the windowed host needs, split
-// so the part with no AppKit in it can be tested headlessly.
+// so the part with no window API in it can be tested headlessly.
 //
 // Three numbering systems meet here and none of them is the others:
 //
-//   * macOS virtual key codes (kVK_*), what an NSEvent carries. Positional,
-//     so they survive a non-US layout: kVK_ANSI_W is the key west of E
-//     whatever is printed on it, which is what a game that reads scan codes
-//     wants.
+//   * The host's key codes: positional, numbered as macOS virtual keys
+//     (kVK_*), which is where this table started. sdl/keymap.cpp turns SDL
+//     scancodes into them. Positional means they survive a non-US layout: the
+//     key west of E is the same code whatever is printed on it, which is what
+//     a game that reads scan codes wants.
 //   * DirectInput scan codes (DIK_*), what the guest's keyboard device
 //     reports through `HostInputState::keys`. These are PC set-1 scan codes.
 //   * Win32 virtual key codes (VK_*), what GetAsyncKeyState and the WM_KEYDOWN
@@ -18,7 +19,7 @@
 #pragma once
 #include <stdint.h>
 
-// One row per key this host can deliver. `mac` is the NSEvent keyCode.
+// One row per key this host can deliver. `mac` is the host key code.
 struct HostKeyMapping {
     uint16_t mac;
     uint8_t dik; // DirectInput scan code, 0 when there is no equivalent
@@ -42,8 +43,8 @@ int host_key_mapping_count();
 const HostKeyMapping *host_key_mapping_table();
 
 // ---------------------------------------------------------------------------
-// The live input state. main.mm feeds these from NSEvents; host_input_state()
-// in input.mm drains them for the DirectInput shims.
+// The live input state. sdl/main.cpp feeds these from SDL events;
+// host_input_state() in input.cpp drains them for the DirectInput shims.
 // ---------------------------------------------------------------------------
 // A key went down or came up. Updates the DirectInput key array and, through
 // host_set_key_state, GetAsyncKeyState.
@@ -64,7 +65,7 @@ void host_input_wheel(int32_t dz);
 void host_input_release_all();
 
 // ---------------------------------------------------------------------------
-// Win32 message translation. main.mm decodes the NSEvent and these build what
+// Win32 message translation. sdl/main.cpp decodes the event and these build what
 // the message carries, which is the part that can be checked without a window.
 // ---------------------------------------------------------------------------
 // The MK_ bits every mouse message's wParam carries. `buttons` is a bitmask of
@@ -76,7 +77,8 @@ uint32_t host_mouse_wparam(uint8_t buttons, uint8_t modifiers);
 // held, the previous key state, and the transition state on a key up.
 uint32_t host_key_lparam(struct HostKeyMapping mapping, bool down, bool alt, bool was_down);
 
-// Shift, Control and Alt as bits 0, 1 and 2, from an NSEvent's modifier flags.
+// Shift, Control and Alt as bits 0, 1 and 2, from the host's modifier flags
+// (sdl/keymap.cpp builds them; the layout is the one NSEvent used).
 // Either side counts: a game that finds Shift up because the right one was
 // released while the left is still held would misread a shift-click.
 uint8_t host_modifier_bits(uint32_t ns_event_modifier_flags);
@@ -138,7 +140,7 @@ uint32_t host_input_read_count(void);
 // that input, and making them wait would be latency with no visible cause.
 //
 // A separate function because it is the rule, and the rule is worth being able
-// to state and check on its own; the wait around it is AppKit and cannot be
+// to state and check on its own; the wait around it is the window and cannot be
 // run without a window.
 int host_idle_wait_result(uint32_t before, uint32_t after);
 

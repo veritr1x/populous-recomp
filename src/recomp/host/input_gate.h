@@ -6,9 +6,9 @@
 // host_gate_* is the decision on its own: true means the mod layer consumed
 // the input. host_key_event and host_modifier_event are the decision AND the
 // host's own delivery, which is what a window actually runs. The delivery
-// lives here rather than in main.mm so a headless test can drive exactly the
-// path the window drives; main.mm is left with NSEvent decoding and nothing
-// else, and smoke_main.mm keeps its own scripted delivery.
+// lives here rather than in sdl/main.cpp so a headless test can drive exactly
+// the path the window drives; sdl/main.cpp is left with event decoding and
+// nothing else, and smoke_main.mm keeps its own scripted delivery.
 //
 // PHYSICAL STATE IS NOT GUEST STATE. The keyboard's real transitions decide
 // what is offered to the filter, and the guest's delivered state decides what
@@ -186,7 +186,7 @@ void host_gate_end_drag(void);
 void host_gate_set_layout(const CompositorInput *layout);
 // Used only until the presenter publishes its first layout. Called under baton.
 void host_gate_fallback_layout(int drawable_w, int drawable_h);
-// Decoded positions/deltas are drawable pixels, never AppKit points. Produces
+// Decoded positions/deltas are drawable pixels, never window points. Produces
 // the relative correction as well as the absolute position: Populous ignores
 // absolute placement and integrates DirectInput motion for its hit tests.
 HitResult host_gate_pointer_event(int32_t x, int32_t y, double dx, double dy, int32_t *guest_dx,
@@ -197,7 +197,7 @@ void host_gate_pointer_tick();
 
 // Window motion production path: map, filter and deliver DirectInput once.
 // x/y are backing pixels. Device dx/dy are deliberately ignored: the window
-// pointer already includes OS acceleration. main.mm posts WM_MOUSEMOVE only
+// pointer already includes OS acceleration. sdl/main.cpp posts WM_MOUSEMOVE only
 // when this returns true. Buttons and wheel use the same position mapping.
 HitResult host_gate_window_pointer(int32_t x, int32_t y, int32_t *dx, int32_t *dy);
 bool host_gate_window_motion(int32_t x, int32_t y, double dx, double dy, HitResult *hit);

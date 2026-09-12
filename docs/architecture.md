@@ -13,7 +13,7 @@ flowchart TD
   Generated --> Runtime[Guest memory, imports and scheduler]
   Game --> Runtime
   Runtime --> DX[Graphics, sound and input adapters]
-  DX --> Host[Metal, AppKit and native audio]
+  DX --> Host[SDL3 window, GPU interface, audio]
   Runtime <--> Mods[C and Lua mod API]
 ```
 
@@ -38,7 +38,7 @@ memory concurrently with that thread.
 
 The presentation worker consumes completed immutable frames. GPU resources and
 texture revisions remain alive until commands that reference them complete.
-Audio queues use their own clock and synchronization. AppKit events publish
+Audio queues use their own clock and synchronization. Window events publish
 requests for the guest thread rather than directly executing guest functions.
 
 ## A frame through the host
