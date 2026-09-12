@@ -36,3 +36,17 @@ pop_optimize(dx_tests 1)
 pop_test_binary(dx_tests)
 add_test(NAME dx_tests COMMAND dx_tests WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(dx_tests PROPERTIES LABELS nogame)
+
+# No strong host callback anywhere: the weak defaults must carry the link.
+# page_overlay.cpp because every host links it beside boot.cpp; the dispatch
+# stub because no generated code is present.
+add_executable(null_host_link tests/null_host_link.cpp
+  ${POP_ROOT}/src/recomp/host/page_overlay.cpp
+  ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp)
+target_include_directories(null_host_link PRIVATE ${POP_ROOT}/src)
+target_link_libraries(null_host_link PRIVATE recomp_platform recomp_runtime recomp_dx host_common)
+target_compile_options(null_host_link PRIVATE ${POP_WARN_HOST})
+pop_optimize(null_host_link 1)
+pop_test_binary(null_host_link)
+add_test(NAME null_host_link COMMAND null_host_link WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(null_host_link PROPERTIES LABELS nogame)

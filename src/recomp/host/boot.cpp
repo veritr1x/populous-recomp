@@ -315,7 +315,7 @@ void *watchdog_main(void *) {
                 fprintf(stderr, "[host] the watchdog ended the run before the mod "
                                 "teardown: no pop_mod_exit ran\n");
             fflush(stderr);
-            _exit(4);
+            os_exit_immediately(4);
         }
         report(stdout, true);
         if (!g_mods_torn_down)
@@ -324,7 +324,7 @@ void *watchdog_main(void *) {
         fflush(stdout);
         fflush(stderr);
         boot_report_unlock();
-        _exit(4);
+        os_exit_immediately(4);
     }
 }
 
@@ -342,12 +342,20 @@ void *watchdog_main(void *) {
 // thread's, not the main thread's: naming the main thread's EIP for a worker's
 // fault points at the wrong instruction entirely.
 // ---------------------------------------------------------------------------
+// strcmp without the library, for the handler's sake.
+bool same_text(const char *a, const char *b) {
+    while (*a && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 void sig_write(const char *s_) {
     size_t n = 0;
     while (s_[n])
         ++n;
-    ssize_t ignored = write(2, s_, n);
-    (void)ignored;
+    os_write_stderr_raw(s_, n);
 }
 
 void sig_write_hex8(uint32_t v) {
@@ -402,7 +410,7 @@ void fault_handler(const char *name) {
     }
     sig_write("[host] no run report from a signal handler: printing one is not "
               "signal-safe and could hang instead of exiting\n");
-    _exit(sig == SIGABRT ? 6 : 5);
+    os_exit_immediately(same_text(name, "an abort from the runtime") ? 6 : 5);
 }
 
 } // namespace

@@ -240,6 +240,14 @@ int os_install_fault_handlers(OsFaultFn fn) {
     return 1;
 }
 
+void os_write_stderr_raw(const char *s, size_t n) {
+    ssize_t ignored = write(2, s, n);
+    (void)ignored;
+}
+void os_exit_immediately(int code) {
+    _exit(code);
+}
+
 uint64_t os_monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

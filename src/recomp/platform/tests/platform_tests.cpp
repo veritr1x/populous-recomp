@@ -159,6 +159,7 @@ void test_process_and_strings() {
     CHECK(os_dlopen_noload("/definitely/not/loaded") == nullptr);
     CHECK(os_dlopen("/definitely/not/a/plugin") == nullptr);
     CHECK(os_dlerror() != nullptr);
+    os_write_stderr_raw("platform_tests: raw stderr write ok\n", 35);
 }
 
 } // namespace
