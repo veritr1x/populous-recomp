@@ -239,38 +239,46 @@ void host_present_tick_for_test(double ts);
 }
 #endif
 
-#ifdef __OBJC__
-#import <Metal/Metal.h>
-#import <QuartzCore/CAMetalLayer.h>
-#import <CoreGraphics/CGDirectDisplay.h>
+#ifdef __cplusplus
 #include "compositor.h"
+#include "gpu/gpu.h"
+#include <functional>
+#include <memory>
 #include <vector>
 
-void host_present_start(CAMetalLayer *layer, CGDirectDisplayID display);
-void host_present_start_offscreen(id<MTLCommandQueue> queue, int w, int h);
+// The device every presenter texture and command buffer belongs to. Set once,
+// before start, to the renderer's device: one queue, so a present can never
+// run ahead of the scene it shows.
+void host_present_set_device(gpu::Device *device);
+gpu::Device *host_present_device(void);
+// `native_surface` is what the window layer hands over (a CAMetalLayer* on
+// macOS); the presenter makes its swapchain from it on the worker.
+void host_present_start(void *native_surface, int drawable_w, int drawable_h);
+void host_present_start_offscreen(int w, int h);
 // Main-thread messages. No GPU work or wait for the worker here.
-void host_present_resize(int drawable_w, int drawable_h, CGDirectDisplayID display);
-void host_present_install_layer(CAMetalLayer *layer, int w, int h, CGDirectDisplayID display);
-void host_present_set_shared_queue(id<MTLCommandQueue> queue);
-id<MTLCommandQueue> host_present_shared_queue(void);
+void host_present_resize(int drawable_w, int drawable_h);
+void host_present_install_surface(void *native_surface, int w, int h);
 
 struct HostSceneTarget {
-    id<MTLTexture> world = nil, overlay = nil;
+    gpu::Texture world, overlay;
     int w = 0, h = 0;
 };
 // Guest thread, first write only. Four slots; exhaustion drops the frame without waiting.
 bool host_present_running();
 void host_present_drop_current();
-#include <memory>
 // A dirty surface pins its pool storage until coherence or transfer to a new writer.
-std::shared_ptr<void> host_present_target_lease(id<MTLTexture> world);
+std::shared_ptr<void> host_present_target_lease(gpu::Texture world);
 HostSceneTarget host_present_acquire_target(int guest_w, int guest_h, int scene_w, int scene_h);
 // Copy the UI by value, never a pointer into a sealed frame. The world/overlay
 // must belong to the acquired target. Task 4/6 supplies this before seal.
 void host_present_set_input(const CompositorInput *input);
 // Register BEFORE committing each prefix buffer on the renderer's queue. Its
 // completion fences all earlier prefixes; dropped frames retire behind it.
-void host_present_track_command(id<MTLCommandBuffer> command);
+void host_present_track_command(gpu::CommandBuffer command);
+// The same fence for work submitted outside gpu.h: begin before commit, done
+// from the completion callback. A null handle means no frame is being written.
+void *host_present_prefix_begin(void);
+void host_present_prefix_done(void *handle, bool success);
 
 // Triple-buffered publication. T9 consumes a VALUE under the guest baton.
 bool host_present_copy_layout(LayoutSnapshot *out);
@@ -286,7 +294,6 @@ struct HostCompletedComposite {
 bool host_present_copy_composite(HostCompletedComposite *out);
 // Headless capture only: factory runs under the baton at seal; its returned
 // closure owns values and runs after that frame's GPU completion. No guest wait.
-#include <functional>
 using HostFrameCapture = std::function<void(const HostCompletedComposite &)>;
 using HostCaptureFactory = HostFrameCapture (*)(HostScreenClass);
 void host_present_set_capture_factory(HostCaptureFactory factory);

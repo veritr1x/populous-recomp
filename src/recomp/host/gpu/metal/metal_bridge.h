@@ -10,6 +10,10 @@ namespace gpu::metal {
 gpu::Texture import_texture(gpu::Device *d, id<MTLTexture> t);
 id<MTLTexture> export_texture(gpu::Device *d, gpu::Texture t); // nil for unknown ids
 id<MTLCommandBuffer> export_command(gpu::Device *d, gpu::CommandBuffer cb);
+// Lets portable code encode into a renderer-owned, uncommitted command buffer.
+// The caller commits it itself and calls forget_command afterwards.
+gpu::CommandBuffer import_command(gpu::Device *d, id<MTLCommandBuffer> cb);
+void forget_command(gpu::Device *d, gpu::CommandBuffer cb);
 id<MTLCommandQueue> queue(gpu::Device *d);
 id<MTLDevice> device(gpu::Device *d);
 } // namespace gpu::metal

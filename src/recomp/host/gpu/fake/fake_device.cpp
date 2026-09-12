@@ -239,8 +239,10 @@ void FakeDevice::commit(CommandBuffer cb) {
 void FakeDevice::complete_all() {
     std::vector<std::function<void(CommandStatus, double)>> run;
     std::vector<std::function<void()>> presents;
+    CommandStatus status;
     {
         std::lock_guard lock(mutex_);
+        status = completion_status_;
         for (uint64_t id : committed_order_) {
             auto &c = commands_[id];
             for (auto &fn : c.on_complete)
@@ -253,7 +255,7 @@ void FakeDevice::complete_all() {
     for (auto &p : presents)
         p();
     for (auto &fn : run)
-        fn(CommandStatus::Completed, 0.0);
+        fn(status, 0.0);
 }
 void FakeDevice::wait(CommandBuffer) {}
 CommandStatus FakeDevice::status(CommandBuffer) {

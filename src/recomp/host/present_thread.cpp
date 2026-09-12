@@ -1,7 +1,8 @@
 #include "page_overlay.h"
 #include "../runtime/display_seam.h"
-// Worker-owned layer and sealed-frame mailbox. No NSView or NSWindow here.
+// Worker-owned swapchain and sealed-frame mailbox, over gpu.h. No window code here.
 #include "present.h"
+#include "present_frame.h"
 #include "present_test.h"
 #include "performance_overlay.h"
 #include "d3d_render.h"
@@ -16,11 +17,6 @@
 #else
 #include "ui_frame_contract.h"
 #endif
-#import <CoreVideo/CoreVideo.h>
-// The replacement APIs suggested by the SDK require NSView/NSWindow ownership.
-// This service uses an active-displays link with a worker-owned layer; the
-// link only schedules work, never acknowledges a submitted drawable.
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -29,6 +25,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -63,34 +60,6 @@ template <class T> struct AtomicShared {
         return std::atomic_compare_exchange_weak(&value, &expected, std::move(desired));
     }
 };
-struct Fence {
-    bool done = true, success = true;
-};
-struct Target {
-    HostSceneTarget scene;
-    id<MTLTexture> pixels = nil;
-    std::vector<uint8_t> test_pixels;
-};
-struct Frame {
-    uint64_t frame_id = 0, epoch = 0;
-    HostScreenClass cls = HOST_SCREEN_MENU;
-    bool had_draws = false, supplied = false, gpu = false, shown = false;
-    bool released = false, dropped = false, success = true, repeat = false, staged_pixels = false;
-    bool completion_fallback = false;
-    double presented_ts = 0, gpu_ts = 0, submitted_ts = 0, sealed_ts = 0, gpu_ms = 0;
-    double acknowledgement_deadline = 0;
-    unsigned pending_prefixes = 0;
-    std::shared_ptr<Target> target;
-    // Scene history can advance before this drawable is acknowledged.
-    std::shared_ptr<Target> scene_lease;
-    std::shared_ptr<Fence> prefix = std::make_shared<Fence>();
-    // Kept independently of the arena: no frame pointer crosses threads.
-    UiFrame ui{};
-    CompositorInput input{};
-    LayoutSnapshot layout;
-    HostFrameCapture capture;
-    id<MTLTexture> composed = nil;
-};
 struct Metric {
     double origin = -1, latest = -1;
     // 10 warm-up seconds followed by the binding 30 second observation.
@@ -116,12 +85,6 @@ struct Metric {
         return span >= 40;
     }
 };
-struct Message {
-    CAMetalLayer *layer = nil;
-    int w = 640, h = 480;
-    CGDirectDisplayID display = 0;
-    bool install = false;
-};
 struct Service : std::enable_shared_from_this<Service> {
     HostCaptureFactory capture_factory = nullptr;
     std::mutex mutex;
@@ -138,11 +101,10 @@ struct Service : std::enable_shared_from_this<Service> {
             return;
         logged_faults |= bit;
         ++faults;
-        fprintf(
-            stderr,
-            "presenter: FAULT: %s (display=%u unique=%llu drops=%llu flight=%llu mailbox=%zu)\n",
-            reason, display, (unsigned long long)unique, (unsigned long long)drops,
-            (unsigned long long)(flights.empty() ? 0 : flights.front()->frame_id), mailbox.size());
+        fprintf(stderr, "presenter: FAULT: %s (unique=%llu drops=%llu flight=%llu mailbox=%zu)\n",
+                reason, (unsigned long long)unique, (unsigned long long)drops,
+                (unsigned long long)(flights.empty() ? 0 : flights.front()->frame_id),
+                mailbox.size());
     }
     bool window_ready() const { // mutex held; first submission needs no completion or link tick
         return tick_pending || message.load() != nullptr ||
@@ -165,10 +127,18 @@ struct Service : std::enable_shared_from_this<Service> {
     std::atomic<int> drawable_w{640}, drawable_h{480};
     int guest_w = 640, guest_h = 480, requested_w = 0;
     unsigned fail_allocations = 0;
-    CAMetalLayer *layer = nil;
-    CGDirectDisplayID display = 0;
-    CVDisplayLinkRef link = nullptr;
-    id<MTLCommandQueue> queue = nil;
+    gpu::Device *device = nullptr;
+    gpu::Swapchain chain;
+    void *surface = nullptr;
+    // The display pacer: a thread that wakes the worker once per refresh, in
+    // place of the CVDisplayLink the AppKit host used.
+    std::thread pacer;
+    bool pacer_stop = false;
+    std::condition_variable pacer_wake;
+    uint64_t fake_texture_ids = 0x100000000ull; // fake mode: scene handles with no device
+    double now() const {                        // mutex held
+        return fake ? fake_now : device ? device->now_seconds() : 0.0;
+    }
     // Up to three display submissions, two mailbox frames, a writer and history.
     // Offscreen and the single-flight control still use only four targets.
     std::array<std::shared_ptr<Target>, 7> targets;
@@ -179,7 +149,8 @@ struct Service : std::enable_shared_from_this<Service> {
     std::shared_ptr<Target> history_lease;
     CompositorSceneHistory history;
     uint64_t history_epoch = 0;
-    id<MTLTexture> cached = nil;
+    std::shared_ptr<Composite> cached;
+    std::shared_ptr<Composite> cached_settings;
     UiFrame cached_ui{};
 #ifdef POPM_PRESENT_HAS_UI_LAYER
     UiFrame previous_ui{}; // guest thread only, including sealed frames that were dropped
@@ -207,8 +178,7 @@ struct Service : std::enable_shared_from_this<Service> {
     void trace_ack(const Frame &f, const char *event, double ts) { // mutex held
         if (!ack_trace)
             return;
-        const double now =
-            fake ? fake_now : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+        const double now = this->now();
         fprintf(ack_trace, "%llu,%d,%d,%s,%.9f,%.9f,%.9f,%.9f,%.9f,%d,%d,%d\n",
                 (unsigned long long)f.frame_id, int(f.cls), int(f.repeat), event, now, ts,
                 f.submitted_ts, f.gpu_ts, f.acknowledgement_deadline, int(f.shown),
@@ -273,6 +243,7 @@ struct Service : std::enable_shared_from_this<Service> {
                         fflush(timings);
                 }
                 cached = f->composed;
+                cached_settings = f->settings_page;
                 last_id = f->frame_id;
                 cached_sealed_ts = f->sealed_ts;
                 cached_ui = f->ui;
@@ -286,20 +257,18 @@ struct Service : std::enable_shared_from_this<Service> {
                 layouts[layout_slot] = f->layout;
                 layout_valid = true;
                 host_gate_publish_layout(f->layout);
-                if (f->capture && f->composed) {
+                if (f->capture && f->composed && device) {
                     HostCompletedComposite result;
-                    result.w = int(f->composed.width);
-                    result.h = int(f->composed.height);
+                    result.w = f->composed->w;
+                    result.h = f->composed->h;
                     result.guest_w = f->input.guest_w;
                     result.guest_h = f->input.guest_h;
                     result.cls = f->cls;
                     result.frame_id = f->frame_id;
                     result.layout = f->layout;
                     result.rgba.resize(size_t(result.w) * result.h * 4);
-                    [f->composed getBytes:result.rgba.data()
-                              bytesPerRow:size_t(result.w) * 4
-                               fromRegion:MTLRegionMake2D(0, 0, result.w, result.h)
-                              mipmapLevel:0];
+                    device->readback(f->composed->texture, {0, 0, result.w, result.h},
+                                     result.rgba.data(), result.w * 4);
                     f->capture(result);
                     f->capture = {};
                 }
@@ -358,63 +327,50 @@ struct Service : std::enable_shared_from_this<Service> {
         f->presented_ts = ts;
         sweep();
     }
-    // Shared by real Metal and the fake layer/command test. Register both
-    // acknowledgements before presentDrawable, and enqueue present before commit.
-    // Pass the shared pointer by value: Objective-C blocks must retain a value,
-    // not capture a reference to the submitting worker's stack variable.
-    void commit_present(std::shared_ptr<Frame> f, id<CAMetalDrawable> drawable,
-                        id<MTLCommandBuffer> cb) {
+    // Shared by the real device and the fake-device test. Register both
+    // acknowledgements before present, and enqueue present before commit. The
+    // shared pointer is captured by value: callbacks run after the worker's
+    // stack frame is gone.
+    void commit_present(std::shared_ptr<Frame> f, gpu::Texture drawable, gpu::CommandBuffer cb) {
         auto self = shared_from_this();
         std::weak_ptr<Service> weak = self;
+        double period;
         {
             std::lock_guard lock(mutex);
             ++pending_commands;
             if (f->repeat)
                 ++repeats;
+            period = frame_period;
         }
-        if (drawable)
-            [drawable addPresentedHandler:^(id<MTLDrawable> d) {
-              const double ts = d.presentedTime;
-              if (auto service = weak.lock()) {
-                  if (ts > 0)
-                      service->ack_presented(f, ts);
-                  else {
-                      std::lock_guard lock(service->mutex);
-                      service->trace_ack(*f, "presented", ts);
-                  }
-              }
-            }];
-        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-          double ts;
-          {
-              std::lock_guard lock(self->mutex);
-              ts = self->fake ? self->fake_now
-                              : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
-          }
-          {
-              std::lock_guard lock(self->mutex);
-              f->gpu_ms = self->fake ? 0 : std::max(0.0, (c.GPUEndTime - c.GPUStartTime) * 1000);
-          }
-          self->ack_command(f, c.status == MTLCommandBufferStatusCompleted, ts);
-          std::lock_guard lock(self->mutex);
-          --self->pending_commands;
-          self->completed.notify_all();
-        }];
+        device->on_complete(cb, [self, f](gpu::CommandStatus status, double gpu_ms) {
+            double ts;
+            {
+                std::lock_guard lock(self->mutex);
+                ts = self->now();
+                f->gpu_ms = self->fake ? 0 : std::max(0.0, gpu_ms);
+            }
+            self->ack_command(f, status == gpu::CommandStatus::Completed, ts);
+            std::lock_guard lock(self->mutex);
+            --self->pending_commands;
+            self->completed.notify_all();
+        });
         if (drawable) {
             // Keep each drawable for a refresh. Combined with queue-aware
             // acknowledgement grace, this avoids retiring real displayed
             // frames on timeout without slowing the pipeline to one flight.
-            if (duration_pacing) {
-                double period;
-                {
-                    std::lock_guard lock(mutex);
-                    period = frame_period;
-                }
-                [cb presentDrawable:drawable afterMinimumDuration:period];
-            } else
-                [cb presentDrawable:drawable];
+            device->present(cb, chain, drawable, duration_pacing ? period : 0.0,
+                            [weak, f](double ts) {
+                                if (auto service = weak.lock()) {
+                                    if (ts > 0)
+                                        service->ack_presented(f, ts);
+                                    else {
+                                        std::lock_guard lock(service->mutex);
+                                        service->trace_ack(*f, "presented", ts);
+                                    }
+                                }
+                            });
         }
-        [cb commit];
+        device->commit(cb);
     }
     void seal(uint64_t id, HostScreenClass cls, bool had_draws, bool prefix_pending = false) {
         std::lock_guard lock(mutex);
@@ -424,7 +380,7 @@ struct Service : std::enable_shared_from_this<Service> {
         f->frame_id = id;
         f->cls = cls;
         f->had_draws = had_draws;
-        f->sealed_ts = fake ? fake_now : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+        f->sealed_ts = now();
         if (class_known && last_class != cls) {
             ++epoch;
             metric = {};
@@ -443,8 +399,8 @@ struct Service : std::enable_shared_from_this<Service> {
             f->input.legacy_frame = f->target->pixels;
             f->input.guest_w = guest_w;
             f->input.guest_h = guest_h;
-            f->input.world = nil;
-            f->input.overlay = nil;
+            f->input.world = {};
+            f->input.overlay = {};
             f->supplied = true;
         }
         f->input.scale_override = mods_display_scale();
@@ -493,16 +449,23 @@ struct Service : std::enable_shared_from_this<Service> {
         seal_pending = true;
         wake.notify_one();
     }
-    id<MTLTexture> texture(int w, int h, MTLPixelFormat format = MTLPixelFormatRGBA8Unorm) {
-        if (w <= 0 || h <= 0)
-            return nil;
-        auto d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
-                                                                    width:w
-                                                                   height:h
-                                                                mipmapped:NO];
-        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-        d.storageMode = MTLStorageModeShared;
-        return [queue.device newTextureWithDescriptor:d];
+    gpu::Texture texture(int w, int h, gpu::Format format = gpu::Format::RGBA8) {
+        if (!device || w <= 0 || h <= 0)
+            return {};
+        return device->create_texture(
+            {w, h, format, gpu::UsageSampled | gpu::UsageRenderTarget | gpu::UsageCpu, 1});
+    }
+    std::shared_ptr<Composite> composite(int w, int h, gpu::Format format) {
+        gpu::Texture t = texture(w, h, format);
+        if (!t)
+            return nullptr;
+        auto c = std::make_shared<Composite>();
+        c->device = device;
+        c->texture = t;
+        c->w = w;
+        c->h = h;
+        c->format = format;
+        return c;
     }
     // Acquire a writable scene target under the queue mutex using the selected guest mode
     // and requested render size. Pool exhaustion drops this frame until seal instead of retrying each draw.
@@ -544,23 +507,33 @@ struct Service : std::enable_shared_from_this<Service> {
         auto target = targets[slot];
         if (!target)
             target = std::make_shared<Target>();
+        target->device = fake ? nullptr : device;
+        const gpu::TextureDesc overlay_desc = !fake && target->scene.overlay
+                                                  ? device->describe(target->scene.overlay)
+                                                  : gpu::TextureDesc{};
         if (target->scene.w != w || target->scene.h != h ||
-            (!fake && (target->scene.overlay.width != NSUInteger(gw) ||
-                       target->scene.overlay.height != NSUInteger(gh)))) {
+            (!fake && (overlay_desc.width != gw || overlay_desc.height != gh))) {
+            target->release_scene();
             while (true) {
                 bool failed = fail_allocations > 0;
                 if (failed)
                     --fail_allocations;
-                id<MTLTexture> world = nil, overlay = nil;
+                gpu::Texture world, overlay;
                 if (!fake && !failed) {
-                    world = texture(w, h, MTLPixelFormatBGRA8Unorm);
-                    overlay = texture(gw, gh, MTLPixelFormatBGRA8Unorm);
+                    world = texture(w, h, gpu::Format::BGRA8);
+                    overlay = texture(gw, gh, gpu::Format::BGRA8);
                     failed = !world || !overlay;
+                    if (failed) {
+                        if (world)
+                            device->destroy(world);
+                        if (overlay)
+                            device->destroy(overlay);
+                    }
                 }
                 if (!failed) {
                     if (fake) {
-                        world = (id<MTLTexture>)[NSObject new];
-                        overlay = (id<MTLTexture>)[NSObject new];
+                        world = {fake_texture_ids++};
+                        overlay = {fake_texture_ids++};
                     }
                     target->scene = {world, overlay, w, h};
                     break;
@@ -596,7 +569,13 @@ struct Service : std::enable_shared_from_this<Service> {
             return;
         if (auto m = message.exchange(nullptr)) {
             if (m->install) {
-                layer = m->layer;
+                if (device && chain) {
+                    device->destroy(chain);
+                    chain = {};
+                }
+                surface = m->surface;
+                if (device && surface && !fake)
+                    chain = device->create_swapchain(surface, m->w, m->h);
                 std::lock_guard lock(mutex);
                 if (!flights.empty()) {
                     // A drawable on the detached layer may never present. Cancel
@@ -609,15 +588,8 @@ struct Service : std::enable_shared_from_this<Service> {
                     flights.clear();
                     sweep();
                 }
-            }
-            if (!fake && layer)
-                layer.drawableSize = CGSizeMake(m->w, m->h);
-            // The link is created over all active displays (start_link), so a
-            // display change only updates the id the acknowledgement is keyed on.
-            if (m->display != display) {
-                std::lock_guard lock(mutex);
-                display = m->display;
-            }
+            } else if (!fake && device && chain)
+                device->resize(chain, m->w, m->h);
         }
         std::shared_ptr<Frame> f;
         {
@@ -704,8 +676,8 @@ struct Service : std::enable_shared_from_this<Service> {
             std::lock_guard lock(mutex);
             if (!f->repeat) {
                 if (history_epoch != f->epoch) {
-                    history.world = nil;
-                    history.overlay = nil;
+                    history.world = {};
+                    history.overlay = {};
                     history_lease.reset();
                     history_epoch = f->epoch;
                 }
@@ -730,14 +702,14 @@ struct Service : std::enable_shared_from_this<Service> {
             }
             return;
         }
-        @autoreleasepool {
-            // The worker is the only caller of nextDrawable and presentDrawable.
-            id<CAMetalDrawable> drawable = offscreen ? nil : [layer nextDrawable];
+        {
+            // The worker is the only caller of acquire and present.
+            gpu::Texture drawable = offscreen || !chain ? gpu::Texture{} : device->acquire(chain);
             if (!offscreen && !drawable) {
                 if (f) {
                     std::lock_guard lock(mutex);
                     flights.erase(std::find(flights.begin(), flights.end(), f));
-                    fault(8, "layer returned no drawable; retrying newest frame");
+                    fault(8, "swapchain returned no drawable; retrying newest frame");
                     // Keep only a newest unpresented frame. A repeat has no arena.
                     if (f->repeat)
                         release(f);
@@ -749,15 +721,17 @@ struct Service : std::enable_shared_from_this<Service> {
                 return;
             }
             int w = drawable_w, h = drawable_h;
-            bool reuse_composition = f->repeat && cached && cached.width == NSUInteger(w) &&
-                                     cached.height == NSUInteger(h);
-            id<MTLTexture> out =
-                reuse_composition
-                    ? cached
-                    : texture(w, h,
-                              offscreen ? MTLPixelFormatRGBA8Unorm : drawable.texture.pixelFormat);
-            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            const gpu::TextureDesc drawable_desc =
+                drawable ? device->describe(drawable) : gpu::TextureDesc{};
+            const gpu::Format out_format = offscreen ? gpu::Format::RGBA8 : drawable_desc.format;
+            bool reuse_composition = f->repeat && cached && cached->w == w && cached->h == h &&
+                                     cached->format == out_format;
+            std::shared_ptr<Composite> out =
+                reuse_composition ? cached : composite(w, h, out_format);
+            gpu::CommandBuffer cb = device->begin();
             if (!cb || !out) {
+                if (drawable)
+                    device->release_drawable(chain, drawable);
                 if (f) {
                     std::lock_guard lock(mutex);
                     flights.erase(std::find(flights.begin(), flights.end(), f));
@@ -768,40 +742,29 @@ struct Service : std::enable_shared_from_this<Service> {
             auto start = Clock::now();
             prepare();
             if (!reuse_composition)
-                compositor_compose(&f->input, out, cb);
+                compositor_compose(device, &f->input, out->texture, cb);
             f->composed = out;
             if (drawable) {
-                if (out.width == drawable.texture.width && out.height == drawable.texture.height &&
-                    out.pixelFormat == drawable.texture.pixelFormat) {
-                    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-                    [blit copyFromTexture:out
-                              sourceSlice:0
-                              sourceLevel:0
-                             sourceOrigin:MTLOriginMake(0, 0, 0)
-                               sourceSize:MTLSizeMake(out.width, out.height, 1)
-                                toTexture:drawable.texture
-                         destinationSlice:0
-                         destinationLevel:0
-                        destinationOrigin:MTLOriginMake(0, 0, 0)];
-                    [blit endEncoding];
+                if (out->w == drawable_desc.width && out->h == drawable_desc.height &&
+                    out->format == drawable_desc.format) {
+                    device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, 0, 0);
                 } else {
                     CompositorInput in{};
                     in.legacy = true;
-                    in.legacy_frame = out;
-                    in.guest_w = int(out.width);
-                    in.guest_h = int(out.height);
-                    in.drawable_w = int(drawable.texture.width);
-                    in.drawable_h = int(drawable.texture.height);
-                    compositor_compose(&in, drawable.texture, cb);
+                    in.legacy_frame = out->texture;
+                    in.guest_w = out->w;
+                    in.guest_h = out->h;
+                    in.drawable_w = drawable_desc.width;
+                    in.drawable_h = drawable_desc.height;
+                    compositor_compose(device, &in, drawable, cb);
                 }
-            }
-            if (drawable) {
                 FramePacingSnapshot snapshot;
                 {
                     std::lock_guard lock(mutex);
                     snapshot = pacing.snapshot(ts, drops);
                 }
-                performance_overlay.draw(drawable.texture, cb, snapshot, ts, mods_display_overlay(),
+                performance_overlay.draw(device, cb, drawable, drawable_desc.width,
+                                         drawable_desc.height, snapshot, ts, mods_display_overlay(),
                                          mods_display_fps());
             }
             host_stats_note_phase(
@@ -810,45 +773,39 @@ struct Service : std::enable_shared_from_this<Service> {
             commit_present(f, drawable, cb);
         }
     }
-    static CVReturn link_tick(CVDisplayLinkRef, const CVTimeStamp *, const CVTimeStamp *output,
-                              CVOptionFlags, CVOptionFlags *, void *context) {
-        auto *s = static_cast<Service *>(context);
-        if (output->videoRefreshPeriod > 0 && output->videoTimeScale > 0) {
-            std::lock_guard lock(s->mutex);
-            s->frame_period = double(output->videoRefreshPeriod) / output->videoTimeScale;
-        }
-        double ts = double(output->hostTime) / CVGetHostClockFrequency();
-        s->signal_tick(ts);
-        return kCVReturnSuccess;
+    // One wake per refresh, on the device clock. Replaces CVDisplayLink: it
+    // only schedules work, never acknowledges a submitted drawable.
+    void start_pacer() {
+        pacer = std::thread([this] {
+            std::unique_lock lock(mutex);
+            while (!pacer_stop && !stop) {
+                const double period = chain ? device->refresh_period(chain) : frame_period;
+                frame_period = period > 0 ? period : 1.0 / 60;
+                const double now = device->now_seconds();
+                const double next = (std::floor(now / frame_period) + 1) * frame_period;
+                pacer_wake.wait_for(lock, std::chrono::duration<double>(std::max(0.0, next - now)),
+                                    [&] { return pacer_stop || stop; });
+                if (pacer_stop || stop)
+                    break;
+                last_link_tick = timestamp = device->now_seconds();
+                tick_pending = true;
+                wake.notify_one();
+            }
+        });
     }
-    void start_link() { // main thread, after the host has shown the window
-        NSCAssert([NSThread isMainThread], @"display link starts on main thread");
-        CVReturn status = CVDisplayLinkCreateWithActiveCGDisplays(&link);
-        if (status == kCVReturnSuccess)
-            status = CVDisplayLinkSetOutputCallback(link, link_tick, this);
-        if (status == kCVReturnSuccess) {
-            CVTime period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
-            if (period.timeValue > 0 && period.timeScale > 0)
-                frame_period = double(period.timeValue) / period.timeScale;
+    void stop_pacer() {
+        {
+            std::lock_guard lock(mutex);
+            pacer_stop = true;
+            pacer_wake.notify_all();
         }
-        if (status == kCVReturnSuccess)
-            status = CVDisplayLinkStart(link);
-        if (status != kCVReturnSuccess || !link || !CVDisplayLinkIsRunning(link)) {
-            {
-                std::lock_guard lock(mutex);
-                fault(32, "display link startup failed; timed fallback enabled");
-            }
-            if (link) {
-                CVDisplayLinkStop(link);
-                CVDisplayLinkRelease(link);
-                link = nullptr;
-            }
-        }
+        if (pacer.joinable())
+            pacer.join();
     }
     void run() {
-        @autoreleasepool {
+        {
             auto synthetic_start = Clock::now();
-            double synthetic_origin = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+            double synthetic_origin = device ? device->now_seconds() : 0.0;
             uint64_t synthetic_index = 0;
             while (true) {
                 double ts;
@@ -870,7 +827,7 @@ struct Service : std::enable_shared_from_this<Service> {
                         // Seal is a bootstrap event, not an acknowledgement. A
                         // bounded wait also services a stopped link and checks
                         // lost presented callbacks without blocking the guest.
-                        double now = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+                        double now = this->now();
                         double delay = 0.016;
                         for (auto &pending : flights)
                             if (!pending->shown &&
@@ -881,7 +838,7 @@ struct Service : std::enable_shared_from_this<Service> {
                         // without a display-link callback or a new guest seal.
                         if (!window_ready())
                             wake.wait_for(lock, std::chrono::duration<double>(delay));
-                        ts = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+                        ts = this->now();
                         tick_pending = false;
                     }
                     if (stop)
@@ -889,25 +846,23 @@ struct Service : std::enable_shared_from_this<Service> {
                 }
                 tick(ts);
             }
-            if (link) {
-                CVDisplayLinkStop(link);
-                CVDisplayLinkRelease(link);
-                link = nullptr;
-            }
         }
     }
 };
 AtomicShared<Service> active;
-id<MTLCommandQueue> shared_queue = nil;
+gpu::Device *g_device = nullptr;
 
-std::shared_ptr<Service> begin(bool fake, bool automatic, bool offscreen,
-                               id<MTLCommandQueue> queue) {
+std::shared_ptr<Service> begin(bool fake, bool automatic, bool offscreen) {
     host_present_stop();
     auto s = std::make_shared<Service>();
     s->fake = fake;
     s->automatic = automatic;
     s->offscreen = offscreen;
-    s->queue = queue;
+    s->device = g_device;
+    if (!fake && !s->device) {
+        fprintf(stderr, "presenter: no GPU device installed; call host_present_set_device first\n");
+        abort();
+    }
     if (const char *mode = getenv("POP_HOST_PRESENT_PACING"))
         s->duration_pacing = strcmp(mode, "immediate") != 0;
     if (!fake)
@@ -976,17 +931,16 @@ void test_ack(uint64_t id, int kind, double ts) {
 }
 } // namespace
 
-void host_present_set_shared_queue(id<MTLCommandQueue> queue) {
-    shared_queue = queue;
+void host_present_set_device(gpu::Device *device) {
+    g_device = device;
 }
-id<MTLCommandQueue> host_present_shared_queue() {
-    return shared_queue;
+gpu::Device *host_present_device() {
+    return g_device;
 }
-void host_present_start(CAMetalLayer *layer, CGDirectDisplayID display) {
-    NSCAssert([NSThread isMainThread], @"layer installation starts on main thread");
-    auto s = begin(false, true, false, shared_queue ?: [layer.device newCommandQueue]);
+void host_present_start(void *native_surface, int w, int h) {
+    auto s = begin(false, true, false);
     // Display acknowledgements can arrive three refreshes after submission.
-    // Match the layer's three drawables so that delay does not cap a 120 Hz
+    // Match the swapchain's three drawables so that delay does not cap a 120 Hz
     // producer near 80 FPS. Keep smaller queues available for comparisons.
     s->flight_limit = 3;
     if (const char *value = getenv("POP_HOST_PRESENT_FRAMES")) {
@@ -995,24 +949,28 @@ void host_present_start(CAMetalLayer *layer, CGDirectDisplayID display) {
         else if (!strcmp(value, "2"))
             s->flight_limit = 2;
     }
-    s->layer = layer;
-    s->display = display;
-    s->drawable_w = int(layer.drawableSize.width);
-    s->drawable_h = int(layer.drawableSize.height);
+    s->surface = native_surface;
+    s->drawable_w = w;
+    s->drawable_h = h;
+    s->chain =
+        native_surface ? s->device->create_swapchain(native_surface, w, h) : gpu::Swapchain{};
     fprintf(stderr, "presenter: %dx%d drawable, at most %zu display submissions in flight\n",
             int(s->drawable_w), int(s->drawable_h), s->flight_limit);
-    NSCAssert(layer && layer.device == s->queue.device && s->drawable_w > 0 && s->drawable_h > 0,
-              @"presenter requires an attached, sized layer on the renderer device");
-    s->start_link();
+    if (!s->chain || w <= 0 || h <= 0) {
+        fprintf(stderr, "presenter: requires an attached, sized surface on the renderer device\n");
+        abort();
+    }
+    s->frame_period = s->device->refresh_period(s->chain);
+    s->start_pacer();
     s->worker = std::thread([s] { s->run(); });
 }
-void host_present_start_offscreen(id<MTLCommandQueue> queue, int w, int h) {
-    auto s = begin(false, true, true, queue);
+void host_present_start_offscreen(int w, int h) {
+    auto s = begin(false, true, true);
     s->drawable_w = w;
     s->drawable_h = h;
     s->worker = std::thread([s] { s->run(); });
 }
-void host_present_resize(int w, int h, CGDirectDisplayID display) {
+void host_present_resize(int w, int h) {
     auto s = active.load();
     if (!s || w <= 0 || h <= 0)
         return;
@@ -1022,17 +980,15 @@ void host_present_resize(int w, int h, CGDirectDisplayID display) {
     auto m = std::make_shared<Message>();
     m->w = w;
     m->h = h;
-    m->display = display;
     // Preserve an undelivered migration when a resize follows it in the same pump.
     auto old = s->message.load();
     do {
         m->install = old && old->install;
-        m->layer = m->install ? old->layer : nil;
+        m->surface = m->install ? old->surface : nullptr;
     } while (!s->message.compare_exchange_weak(old, m));
     s->wake.notify_one();
 }
-void host_present_install_layer(CAMetalLayer *layer, int w, int h, CGDirectDisplayID display) {
-    NSCAssert([NSThread isMainThread], @"layer installation belongs to main thread");
+void host_present_install_surface(void *native_surface, int w, int h) {
     auto s = active.load();
     if (!s)
         return;
@@ -1040,10 +996,9 @@ void host_present_install_layer(CAMetalLayer *layer, int w, int h, CGDirectDispl
     s->drawable_h = h;
     host_gate_publish_drawable_size(w, h);
     auto m = std::make_shared<Message>();
-    m->layer = layer;
+    m->surface = native_surface;
     m->w = w;
     m->h = h;
-    m->display = display;
     m->install = true;
     s->message.store(m);
     s->wake.notify_one();
@@ -1058,6 +1013,7 @@ extern "C" void host_present_stop() {
         s->wake.notify_all();
         s->completed.notify_all();
     }
+    s->stop_pacer();
     if (s->worker.joinable())
         s->worker.join();
     {
@@ -1087,12 +1043,17 @@ extern "C" void host_present_stop() {
         s->writing.reset();
         s->history_lease.reset();
         s->cached_target.reset();
-        s->history.world = nil;
-        s->history.overlay = nil;
-        s->cached = nil;
+        s->history.world = {};
+        s->history.overlay = {};
+        s->cached.reset();
+        s->cached_settings.reset();
         s->cached_input = {};
         s->cached_ui = {};
         s->targets = {};
+        if (s->device && s->chain) {
+            s->device->destroy(s->chain);
+            s->chain = {};
+        }
     }
     if (!s->fake) {
         ddraw_set_present_callbacks(nullptr, nullptr);
@@ -1117,7 +1078,7 @@ bool host_present_running() {
     std::lock_guard lock(s->mutex);
     return !s->stop && !s->fake;
 }
-std::shared_ptr<void> host_present_target_lease(id<MTLTexture> world) {
+std::shared_ptr<void> host_present_target_lease(gpu::Texture world) {
     auto s = active.load();
     if (!s || !world)
         return {};
@@ -1171,13 +1132,16 @@ extern "C" void host_present_stage_rgba(const uint8_t *rgba, int w, int h) {
     if (s->fake)
         t.test_pixels.assign(rgba, rgba + size_t(w) * h * 4);
     else {
-        if (!t.pixels || t.pixels.pixelFormat != MTLPixelFormatRGBA8Unorm ||
-            t.pixels.width != NSUInteger(w) || t.pixels.height != NSUInteger(h))
+        t.device = s->device;
+        if (!t.pixels || t.pixels_w != w || t.pixels_h != h) {
+            if (t.pixels)
+                s->device->destroy(t.pixels);
             t.pixels = s->texture(w, h);
-        [t.pixels replaceRegion:MTLRegionMake2D(0, 0, w, h)
-                    mipmapLevel:0
-                      withBytes:rgba
-                    bytesPerRow:size_t(w) * 4];
+            t.pixels_w = w;
+            t.pixels_h = h;
+        }
+        if (t.pixels)
+            s->device->upload(t.pixels, {0, 0, w, h}, rgba, w * 4);
     }
 }
 void host_present_set_input(const CompositorInput *input) {
@@ -1202,32 +1166,54 @@ void host_present_set_input(const CompositorInput *input) {
         f.ui = {};
     f.input.ui = &f.ui;
 }
-void host_present_track_command(id<MTLCommandBuffer> cb) {
+namespace {
+struct PrefixHandle {
+    std::shared_ptr<Service> service;
+    std::shared_ptr<Fence> fence;
+    std::shared_ptr<Frame> frame;
+};
+} // namespace
+void *host_present_prefix_begin() {
     auto s = active.load();
-    if (!s || !cb)
-        return;
+    if (!s)
+        return nullptr;
     auto fence = std::make_shared<Fence>();
     fence->done = false;
     std::shared_ptr<Frame> frame;
     {
         std::lock_guard lock(s->mutex);
         if (!s->writing)
-            return;
+            return nullptr;
         frame = s->writing;
         frame->prefix = fence;
         ++frame->pending_prefixes;
         ++s->pending_commands;
     }
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-      std::lock_guard lock(s->mutex);
-      fence->done = true;
-      fence->success = c.status == MTLCommandBufferStatusCompleted;
-      frame->success = frame->success && fence->success;
-      --frame->pending_prefixes;
-      --s->pending_commands;
-      s->sweep();
-      s->completed.notify_all();
-    }];
+    return new PrefixHandle{s, fence, frame};
+}
+void host_present_prefix_done(void *handle, bool success) {
+    std::unique_ptr<PrefixHandle> h(static_cast<PrefixHandle *>(handle));
+    if (!h)
+        return;
+    std::lock_guard lock(h->service->mutex);
+    h->fence->done = true;
+    h->fence->success = success;
+    h->frame->success = h->frame->success && h->fence->success;
+    --h->frame->pending_prefixes;
+    --h->service->pending_commands;
+    h->service->sweep();
+    h->service->completed.notify_all();
+}
+void host_present_track_command(gpu::CommandBuffer cb) {
+    auto s = active.load();
+    if (!s || !cb || !s->device)
+        return;
+    void *handle = host_present_prefix_begin();
+    if (!handle)
+        return;
+    s->device->on_complete(cb, [handle](gpu::CommandStatus status, double) {
+        host_present_prefix_done(handle, status == gpu::CommandStatus::Completed);
+    });
 }
 // Seal guest-owned frame state and extract UI before publishing to the presentation worker.
 // Only immutable snapshots cross that boundary; guest surface leases are resolved here.
@@ -1273,7 +1259,8 @@ extern "C" void host_frame_seal() {
                 // image. Sparse UI records need not cover unchanged menu pixels.
                 writer.supplied = true;
                 writer.input.legacy = writer.staged_pixels;
-                writer.input.legacy_frame = writer.staged_pixels ? writer.target->pixels : nil;
+                writer.input.legacy_frame =
+                    writer.staged_pixels ? writer.target->pixels : gpu::Texture{};
                 writer.input.guest_w = writer.staged_pixels ? s->guest_w : writer.ui.guest_w;
                 writer.input.guest_h = writer.staged_pixels ? s->guest_h : writer.ui.guest_h;
             }
@@ -1298,12 +1285,12 @@ extern "C" void host_frame_seal() {
     if (host_page_rgba(&page)) {
         std::lock_guard lock(s->mutex);
         if (s->writing && !s->fake) {
-            auto texture = s->texture(640, 480);
-            [texture replaceRegion:MTLRegionMake2D(0, 0, 640, 480)
-                       mipmapLevel:0
-                         withBytes:page.data()
-                       bytesPerRow:640 * 4];
-            s->writing->input.settings_page = texture;
+            auto texture = s->composite(640, 480, gpu::Format::RGBA8);
+            if (texture) {
+                s->device->upload(texture->texture, {0, 0, 640, 480}, page.data(), 640 * 4);
+                s->writing->settings_page = texture;
+                s->writing->input.settings_page = texture->texture;
+            }
         }
     }
     s->seal(f.id, host_frame_class(f), host_frame_had_draws(f) != 0);
@@ -1383,7 +1370,7 @@ bool host_present_copy_layout(LayoutSnapshot *out) {
     return true;
 }
 void host_present_test_begin(bool automatic, bool offscreen, unsigned display_frames) {
-    auto s = begin(true, automatic, offscreen, nil);
+    auto s = begin(true, automatic, offscreen);
     s->flight_limit = !offscreen && display_frames >= 2 && display_frames <= 3 ? display_frames : 1;
 }
 unsigned host_present_test_flight_count() {
@@ -1437,37 +1424,34 @@ int host_present_test_requested_width() {
 
 bool host_present_test_read_rgba(uint8_t *out, size_t bytes) {
     auto s = active.load();
-    if (!s || !out)
+    if (!s || !out || !s->device)
         return false;
-    id<MTLTexture> texture = nil;
+    std::shared_ptr<Composite> texture;
     {
         std::lock_guard lock(s->mutex);
         texture = s->cached;
     }
-    if (!texture || texture.pixelFormat != MTLPixelFormatRGBA8Unorm ||
-        bytes < texture.width * texture.height * 4)
+    if (!texture || texture->format != gpu::Format::RGBA8 ||
+        bytes < size_t(texture->w) * texture->h * 4)
         return false;
     // cached is published only after completion, so no GPU wait is needed.
-    [texture getBytes:out
-          bytesPerRow:texture.width * 4
-           fromRegion:MTLRegionMake2D(0, 0, texture.width, texture.height)
-          mipmapLevel:0];
-    return true;
+    return s->device->readback(texture->texture, {0, 0, texture->w, texture->h}, out,
+                               texture->w * 4);
 }
 
 bool host_present_copy_composite(HostCompletedComposite *out) {
     auto s = active.load();
-    if (!s || !out)
+    if (!s || !out || !s->device)
         return false;
     HostCompletedComposite result;
-    id<MTLTexture> texture = nil;
+    std::shared_ptr<Composite> texture;
     {
         std::lock_guard lock(s->mutex);
         texture = s->cached;
-        if (!texture || texture.pixelFormat != MTLPixelFormatRGBA8Unorm)
+        if (!texture || texture->format != gpu::Format::RGBA8)
             return false;
-        result.w = int(texture.width);
-        result.h = int(texture.height);
+        result.w = texture->w;
+        result.h = texture->h;
         result.guest_w = s->cached_input.guest_w;
         result.guest_h = s->cached_input.guest_h;
         result.cls = s->cached_input.cls;
@@ -1475,10 +1459,9 @@ bool host_present_copy_composite(HostCompletedComposite *out) {
         result.layout = s->layouts[s->layout_slot];
     }
     result.rgba.resize(size_t(result.w) * result.h * 4);
-    [texture getBytes:result.rgba.data()
-          bytesPerRow:size_t(result.w) * 4
-           fromRegion:MTLRegionMake2D(0, 0, result.w, result.h)
-          mipmapLevel:0];
+    if (!s->device->readback(texture->texture, {0, 0, result.w, result.h}, result.rgba.data(),
+                             result.w * 4))
+        return false;
     *out = std::move(result);
     return true;
 }
@@ -1533,9 +1516,9 @@ bool host_present_test_input_legacy() {
     std::lock_guard lock(s->mutex);
     return !s->flights.empty() && s->flights.front()->input.legacy;
 }
-void host_present_test_commit_layer(id layer, id command) {
+void host_present_test_commit_swapchain(gpu::Swapchain chain) {
     auto s = active.load();
-    if (!s || !s->fake)
+    if (!s || !s->fake || !s->device)
         return;
     std::shared_ptr<Frame> f;
     {
@@ -1543,8 +1526,12 @@ void host_present_test_commit_layer(id layer, id command) {
         if (!s->flights.empty())
             f = s->flights.back();
     }
-    if (f)
-        s->commit_present(f, [layer nextDrawable], command);
+    if (!f)
+        return;
+    s->chain = chain;
+    gpu::Texture drawable = s->device->acquire(chain);
+    gpu::CommandBuffer cb = s->device->begin();
+    s->commit_present(f, drawable, cb);
 }
 extern "C" int32_t host_display_anchor(uint64_t id, int8_t h, int8_t v, int clear) {
     if (clear)

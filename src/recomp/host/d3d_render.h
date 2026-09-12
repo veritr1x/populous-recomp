@@ -84,6 +84,9 @@ double host_d3d_peak_nonblack(void);
 
 @interface PopD3DRenderer : NSObject
 - (instancetype)initWithDevice:(id<MTLDevice>)device;
+// The host's queue, so renderer and presenter share one: commands on one
+// queue run in submission order and nothing orders two queues against each other.
+- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue;
 - (HostHDTextureStats)hdTextureStats;
 // The renderer the host_d3d_* callbacks use. main.mm sets it once the Metal
 // device exists; the tests set their own.

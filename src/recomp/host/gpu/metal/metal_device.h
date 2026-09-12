@@ -83,6 +83,8 @@ class MetalDevice final : public Device {
     Texture import_texture(id<MTLTexture> t);
     id<MTLTexture> native_texture(Texture t);
     id<MTLCommandBuffer> native_command(CommandBuffer cb);
+    CommandBuffer import_command(id<MTLCommandBuffer> cb);
+    void forget_command(CommandBuffer cb);
 
   private:
     struct Tex {

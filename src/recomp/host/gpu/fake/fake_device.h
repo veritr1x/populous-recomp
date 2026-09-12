@@ -83,6 +83,10 @@ class FakeDevice final : public Device {
         manual_completion_ = manual;
     }
     void complete_all();
+    // The status complete_all() reports for every pending command buffer.
+    void set_completion_status(CommandStatus status) {
+        completion_status_ = status;
+    }
     // The last present's minimum duration, for the pacing selector test.
     double last_present_min_duration() const {
         return last_min_duration_;
@@ -126,6 +130,7 @@ class FakeDevice final : public Device {
     double clock_ = 0;
     int fail_allocations_ = 0;
     bool manual_completion_ = false;
+    CommandStatus completion_status_ = CommandStatus::Completed;
     double last_min_duration_ = -1;
     std::function<void(double)> last_presented_;
 };

@@ -23,7 +23,23 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 - Branch: `host-abstraction` (forked from `main` at 920de70).
 - Plan: `plans/2026-09-12-host-abstraction.md` (10 tasks, written and committed).
-- Executing inline (superpowers:executing-plans). Tasks 1-3 done (dependencies; gpu.h + fake backend; Metal backend + gpu_metal_tests); next Task 4 (presenter/compositor/overlay over gpu.h).
+- Executing inline (superpowers:executing-plans). Tasks 1-4 done (dependencies; gpu.h + fake backend; Metal backend; presenter/compositor/overlay over gpu.h with a temporary Metal bridge for the renderer and main.mm); next Task 5 (D3D renderer over gpu.h).
+
+## Environment gotcha found during Task 4
+
+- `build/recomp/profile/` is the default profile every run without
+  `POPM_PROFILE_DIR` shares, and the game writes its own options into
+  `POP3.CD/SAVE/CONFIG00.DAT` there. A run that changed the resolution left
+  1024x768 behind, and the pinned `level1.script` then clicked into a message
+  box instead of a brave ("EXPECT watch_selected FAILED ... got 0"). It looks
+  like a presenter/input regression; it is not. Delete `build/recomp/profile`
+  (or run with a fresh `POPM_PROFILE_DIR`) before trusting the pinned
+  integration checks. Verified: `main` and this branch both pass with a fresh
+  profile, both fail with the drifted one.
+- `mods_tests` needs the snapshot `tools/test.py --mods` generates; a plain
+  `ctest -L mods` fails in `game_view_tests` on `load_snapshot()`.
+- The fixture checks in `integration_tests.sh` fail because
+  `tools/recomp/parity.py` is not in the repo: pre-existing.
 
 ## How to resume
 

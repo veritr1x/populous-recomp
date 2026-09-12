@@ -30,6 +30,8 @@ static void post_drawable_size();
 #include "window_presentation.h"
 #include "midi.h"
 #include "d3d_render.h"
+#include "gpu/gpu_factory.h"
+#include "gpu/metal/metal_bridge.h"
 #include "../runtime/loader.h"
 #include "../runtime/win32.h"
 #include "../runtime/mods_seam.h"
@@ -1102,8 +1104,9 @@ static void post_drawable_size() {
     last_w = int(size.width);
     last_h = int(size.height);
     last_display = display;
-    host_present_resize(last_w, last_h, display);
+    host_present_resize(last_w, last_h);
 }
+static std::unique_ptr<gpu::Device> g_gpu;
 static CAMetalLayer *install_metal_layer() {
     CAMetalLayer *layer = [CAMetalLayer layer];
     layer.device = g_device;
@@ -1201,7 +1204,7 @@ static CAMetalLayer *install_metal_layer() {
         return;
     CAMetalLayer *layer = install_metal_layer();
     CGSize size = [g_view convertRectToBacking:g_view.bounds].size;
-    host_present_install_layer(layer, int(size.width), int(size.height), current_display());
+    host_present_install_surface((__bridge void *)layer, int(size.width), int(size.height));
 }
 @end
 
@@ -1222,7 +1225,8 @@ int main(int argc, char **argv) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        g_gpu = gpu::create_default_device();
+        id<MTLDevice> device = g_gpu ? gpu::metal::device(g_gpu.get()) : nil;
         if (!device) {
             fprintf(stderr, "PopRecomp: no Metal device is available\n");
             return 3;
@@ -1249,11 +1253,12 @@ int main(int argc, char **argv) {
 
         // The renderer first: the presenter takes its command queue so a
         // present cannot run ahead of the scene it is showing.
-        PopD3DRenderer *renderer = [[PopD3DRenderer alloc] initWithDevice:device];
+        PopD3DRenderer *renderer =
+            [[PopD3DRenderer alloc] initWithDevice:device queue:gpu::metal::queue(g_gpu.get())];
         if (!renderer)
             return 3;
         [PopD3DRenderer setShared:renderer];
-        host_present_set_shared_queue(renderer.commandQueue);
+        host_present_set_device(g_gpu.get());
 
         CAMetalLayer *layer = install_metal_layer();
         fprintf(stderr, "Mouse capture: click inside to capture; hold Escape to release; drag to "
@@ -1305,7 +1310,8 @@ int main(int argc, char **argv) {
                   @"presenter must start on the visible window's attached, nonzero Metal layer");
         NSCAssert(layer.device == renderer.commandQueue.device,
                   @"presenter and renderer must share a Metal device");
-        host_present_start(layer, current_display());
+        host_present_start((__bridge void *)layer, int(layer.drawableSize.width),
+                           int(layer.drawableSize.height));
         // Said out loud, because "the keyboard does nothing" and "the window
         // never became key" look identical from the outside.
         printf("PopRecomp: window key %s, app active %s, first responder %s\n",

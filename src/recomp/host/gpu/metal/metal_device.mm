@@ -257,6 +257,42 @@ id<MTLCommandBuffer> MetalDevice::native_command(CommandBuffer cb) {
     auto it = committed_.find(cb.id);
     return it == committed_.end() ? nil : it->second;
 }
+CommandBuffer MetalDevice::import_command(id<MTLCommandBuffer> buffer) {
+    if (!buffer)
+        return {};
+    std::lock_guard lock(mutex_);
+    uint64_t id = next_id_++;
+    Cmd c;
+    c.buffer = buffer;
+    commands_[id] = std::move(c);
+    return {id};
+}
+void MetalDevice::forget_command(CommandBuffer cb) {
+    std::vector<std::function<void(CommandStatus, double)>> callbacks;
+    id<MTLCommandBuffer> buffer;
+    {
+        std::lock_guard lock(mutex_);
+        Cmd *c = cmd(cb);
+        if (!c)
+            return;
+        end_encoders(*c);
+        buffer = c->buffer;
+        callbacks.swap(c->on_complete);
+        commands_.erase(cb.id);
+    }
+    // Completion callbacks registered through gpu.h still run when the owner commits.
+    if (!callbacks.empty()) {
+        auto shared = std::make_shared<std::vector<std::function<void(CommandStatus, double)>>>(
+            std::move(callbacks));
+        [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
+          const CommandStatus status = done.status == MTLCommandBufferStatusCompleted
+                                           ? CommandStatus::Completed
+                                           : CommandStatus::Error;
+          for (auto &fn : *shared)
+              fn(status, (done.GPUEndTime - done.GPUStartTime) * 1000.0);
+        }];
+    }
+}
 bool MetalDevice::upload(Texture t, Region r, const void *bytes, int pitch, int level) {
     id<MTLTexture> texture = native_texture(t);
     if (!texture || !bytes || level < 0 || level >= int(texture.mipmapLevelCount))
@@ -920,6 +956,14 @@ id<MTLTexture> export_texture(Device *d, Texture t) {
 id<MTLCommandBuffer> export_command(Device *d, CommandBuffer cb) {
     MetalDevice *m = as_metal(d);
     return m ? m->native_command(cb) : nil;
+}
+gpu::CommandBuffer import_command(Device *d, id<MTLCommandBuffer> cb) {
+    MetalDevice *m = as_metal(d);
+    return m ? m->import_command(cb) : CommandBuffer{};
+}
+void forget_command(Device *d, CommandBuffer cb) {
+    if (MetalDevice *m = as_metal(d))
+        m->forget_command(cb);
 }
 id<MTLCommandQueue> queue(Device *d) {
     MetalDevice *m = as_metal(d);

@@ -34,6 +34,8 @@
 #include "audio.h"
 #include "present.h"
 #include "d3d_render.h"
+#include "gpu/gpu_factory.h"
+#include "gpu/metal/metal_bridge.h"
 #include "../runtime/guest.h"
 #include "../runtime/loader.h"
 #include "../runtime/win32.h"
@@ -2244,12 +2246,15 @@ int main(int argc, char **argv) {
     printf("[smoke] %s: %d steps\n", script_path, g_step_count);
 
     @autoreleasepool {
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        auto gpu_device = gpu::create_default_device();
+        id<MTLDevice> device = gpu_device ? gpu::metal::device(gpu_device.get()) : nil;
         if (!device) {
             fprintf(stderr, "smoke: no Metal device\n");
             return 3;
         }
-        g_renderer = [[PopD3DRenderer alloc] initWithDevice:device];
+        g_renderer = [[PopD3DRenderer alloc] initWithDevice:device
+                                                      queue:gpu::metal::queue(gpu_device.get())];
+        host_present_set_device(gpu_device.get());
         if (!g_renderer) {
             fprintf(stderr, "smoke: no renderer\n");
             return 3;
@@ -2264,7 +2269,7 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        host_present_start_offscreen(g_renderer.commandQueue, drawable_w, drawable_h);
+        host_present_start_offscreen(drawable_w, drawable_h);
         if (getenv("POP_SMOKE_DRAWABLE"))
             host_present_set_capture_factory(capture_at_seal);
         host_input_set_notify(dinput_host_input_changed);
@@ -2306,7 +2311,7 @@ int main(int argc, char **argv) {
                 return 2;
             if (!ddraw_set_modes(getenv("POPM_DDRAW_MODES")))
                 return 2;
-            host_present_resize(w, h, 0);
+            host_present_resize(w, h);
             printf("[smoke] Classic probe active: %dx%dx%d\n", w, h, bpp);
         }
         printf("[smoke] %s, entry %08x\n", loader_exe_path().c_str(), loader_entry_point());

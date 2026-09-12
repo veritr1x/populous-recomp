@@ -24,6 +24,7 @@ bool host_present_test_window_wake(double ts, bool display_tick = false, bool ti
 uint64_t host_present_test_in_flight();
 unsigned host_present_test_faults();
 bool host_present_test_input_legacy();
-// Fake NSObject layer/command implement the Metal selectors used by the
-// production commit path; no CAMetalLayer, GPU or window is instantiated.
-void host_present_test_commit_layer(id layer, id command);
+// Drive the production commit path (present handlers, minimum duration,
+// completion acknowledgement) through the installed gpu::Device - a
+// gpu::FakeDevice in tests - with a drawable from `chain`.
+void host_present_test_commit_swapchain(gpu::Swapchain chain);

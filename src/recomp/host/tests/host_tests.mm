@@ -46,6 +46,9 @@
 #include "../../runtime/mods_seam.h"
 
 #import <Metal/Metal.h>
+#include "../gpu/fake/fake_device.h"
+#include "../gpu/gpu_factory.h"
+#include "../gpu/metal/metal_bridge.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -57,6 +60,15 @@
 
 static int g_checks = 0, g_failures = 0;
 
+// The host's GPU device: the renderer and the presenter share its queue.
+static std::unique_ptr<gpu::Device> g_gpu;
+static PopD3DRenderer *make_renderer() {
+    return [[PopD3DRenderer alloc] initWithDevice:gpu::metal::device(g_gpu.get())
+                                            queue:gpu::metal::queue(g_gpu.get())];
+}
+static id<MTLTexture> present_native(gpu::Texture t) {
+    return gpu::metal::export_texture(g_gpu.get(), t);
+}
 static void check(bool ok, const char *what, const char *file, int line) {
     ++g_checks;
     if (!ok) {
@@ -3210,7 +3222,7 @@ static void test_readback_kernel_parity(PopD3DRenderer *original) {
     [original discard];
     for (const char *mode : {"fused", "tiled"}) {
         setenv("POP_HOST_READBACK_KERNEL", mode, 1);
-        PopD3DRenderer *r = [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+        PopD3DRenderer *r = make_renderer();
         CHECK(r != nil);
         if (!r)
             continue;
@@ -3239,7 +3251,7 @@ static void test_surface_upload_pixels(PopD3DRenderer *original) {
             Readback reference;
             for (const char *mode : {"cpu", "gpu"}) {
                 setenv("POP_HOST_SURFACE_UPLOAD", mode, 1);
-                auto r = [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+                auto r = make_renderer();
                 CHECK(r != nil);
                 if (!r)
                     continue;
@@ -3333,8 +3345,7 @@ static void test_bounded_submission_pixels(PopD3DRenderer *original) {
         std::vector<uint8_t> guest;
         for (int interval : {0, 1, 256}) {
             setenv("POP_HOST_D3D_SUBMIT_DRAWS", std::to_string(interval).c_str(), 1);
-            PopD3DRenderer *r =
-                [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+            PopD3DRenderer *r = make_renderer();
             CHECK(r != nil);
             if (!r)
                 continue;
@@ -3406,8 +3417,7 @@ static void test_parallel_readback_pixels(PopD3DRenderer *original) {
         std::vector<uint8_t> partial_reference, full_reference;
         for (int workers : {1, 4}) {
             setenv("POP_HOST_READBACK_WORKERS", std::to_string(workers).c_str(), 1);
-            PopD3DRenderer *r =
-                [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+            PopD3DRenderer *r = make_renderer();
             CHECK(r != nil);
             if (!r)
                 continue;
@@ -4923,88 +4933,45 @@ static void test_windowed_first_blit_presents_without_prior_completion() {
     host_present_stop();
     g_present_test_current = {};
 }
-// NSObject doubles exercise the actual handler registration / present / commit
-// selectors. A silent fake display link advances only the worker's deadline.
-@interface FakePresentDrawable : NSObject
-@property(copy) MTLDrawablePresentedHandler handler;
-@property double presentedTime;
-- (void)addPresentedHandler:(MTLDrawablePresentedHandler)handler;
-- (void)fire;
-@end
-@implementation FakePresentDrawable
-- (void)addPresentedHandler:(MTLDrawablePresentedHandler)handler {
-    self.handler = handler;
-}
-- (void)fire {
-    if (self.handler)
-        self.handler((id<MTLDrawable>)self);
-}
-@end
-@interface FakePresentLayer : NSObject
-@property(strong) FakePresentDrawable *drawable;
-- (id<CAMetalDrawable>)nextDrawable;
-@end
-@implementation FakePresentLayer
-- (id<CAMetalDrawable>)nextDrawable {
-    return (id<CAMetalDrawable>)self.drawable;
-}
-@end
-@interface FakePresentCommand : NSObject
-@property(copy) MTLCommandBufferHandler handler;
-@property MTLCommandBufferStatus status;
-@property bool enqueued;
-@property bool committed;
-@property double minimumDuration;
-- (void)addCompletedHandler:(MTLCommandBufferHandler)handler;
-- (void)presentDrawable:(id<MTLDrawable>)drawable;
-- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration;
-- (void)commit;
-- (void)complete;
-@end
-@implementation FakePresentCommand
-- (void)addCompletedHandler:(MTLCommandBufferHandler)handler {
-    CHECK(!self.committed);
-    self.handler = handler;
-}
-- (void)presentDrawable:(id<MTLDrawable>)drawable {
-    CHECK(!self.committed);
-    CHECK(self.handler != nil);
-    CHECK(((FakePresentDrawable *)drawable).handler != nil);
-    self.enqueued = true;
-}
-- (void)presentDrawable:(id<MTLDrawable>)drawable afterMinimumDuration:(CFTimeInterval)duration {
-    self.minimumDuration = duration;
-    [self presentDrawable:drawable];
-}
-- (void)commit {
-    CHECK(self.enqueued);
-    self.committed = true;
-}
-- (void)complete {
-    CHECK(self.committed);
-    if (self.handler) {
-        auto handler = self.handler;
-        self.handler = nil;
-        handler((id<MTLCommandBuffer>)self);
+// A gpu::FakeDevice exercises the production handler registration / present /
+// commit path. A silent fake display link advances only the worker's deadline.
+struct PresentFake {
+    gpu::FakeDevice device;
+    gpu::Swapchain chain;
+    PresentFake() {
+        device.set_manual_completion(true);
+        chain = device.create_swapchain(nullptr, 4, 4);
+        host_present_set_device(&device);
     }
-}
-@end
+    ~PresentFake() {
+        host_present_stop();
+        host_present_set_device(g_gpu.get());
+    }
+    void commit() {
+        host_present_test_commit_swapchain(chain);
+    }
+    void complete(bool success = true) {
+        device.set_completion_status(success ? gpu::CommandStatus::Completed
+                                             : gpu::CommandStatus::Error);
+        device.complete_all();
+    }
+    void presented(double ts) {
+        device.fire_presented(ts);
+    }
+};
 static void test_windowed_duration_pacing_selector() {
     const char *saved = getenv("POP_HOST_PRESENT_PACING");
     std::string old = saved ? saved : "";
     bool had = saved != nullptr;
     for (bool paced : {false, true}) {
         setenv("POP_HOST_PRESENT_PACING", paced ? "duration" : "immediate", 1);
+        PresentFake fake;
         host_present_test_begin(false, false);
         host_present_test_seal(1, HOST_SCREEN_MENU, false);
         CHECK(host_present_test_window_wake(0));
-        auto layer = [FakePresentLayer new];
-        layer.drawable = [FakePresentDrawable new];
-        auto command = [FakePresentCommand new];
-        command.status = MTLCommandBufferStatusCompleted;
-        host_present_test_commit_layer(layer, command);
-        CHECK_NEAR(command.minimumDuration, paced ? 1.0 / 60 : 0, 1e-12);
-        [command complete];
+        fake.commit();
+        CHECK_NEAR(fake.device.last_present_min_duration(), paced ? 1.0 / 60 : 0, 1e-12);
+        fake.complete();
         CHECK_EQ(host_present_unique_completed(), 0u);
         // Real queued frames can present later than the old two-refresh
         // timeout. Keep their storage and count their real acknowledgement.
@@ -5012,8 +4979,7 @@ static void test_windowed_duration_pacing_selector() {
         CHECK_EQ(host_present_unique_completed(), 0u);
         CHECK_EQ(host_present_faults(), 0u);
         CHECK(!host_present_test_released(1));
-        layer.drawable.presentedTime = 2.6 / 60;
-        [layer.drawable fire];
+        fake.presented(2.6 / 60);
         CHECK_EQ(host_present_unique_completed(), 1u);
         host_present_stop();
     }
@@ -5024,22 +4990,16 @@ static void test_windowed_duration_pacing_selector() {
 }
 static void test_windowed_drawable_handler_and_completion_fallback() {
     for (bool missing : {false, true}) {
+        PresentFake fake;
         host_present_test_begin(false, false);
         host_present_test_seal(1, HOST_SCREEN_MENU, false);
         CHECK(host_present_test_window_wake(0));
-        FakePresentLayer *layer = [FakePresentLayer new];
-        layer.drawable = [FakePresentDrawable new];
-        FakePresentCommand *command = [FakePresentCommand new];
-        command.status = MTLCommandBufferStatusCompleted;
-        host_present_test_commit_layer(layer, command);
-        CHECK(command.committed);
-        [command complete]; // production command handler at t=0
-        CHECK_EQ(host_present_unique_completed(), 0u);
-        [layer.drawable fire]; // zero presentedTime must not acknowledge
+        fake.commit();
+        fake.complete(); // production command handler at t=0; a zero presented
+                         // time arrives with it and must not acknowledge
         CHECK_EQ(host_present_unique_completed(), 0u);
         if (!missing) {
-            layer.drawable.presentedTime = 0.01;
-            [layer.drawable fire];
+            fake.presented(0.01);
             CHECK_EQ(host_present_unique_completed(), 1u);
             CHECK_EQ(host_present_faults(), 0u);
         }
@@ -5057,9 +5017,8 @@ static void test_windowed_drawable_handler_and_completion_fallback() {
             CHECK(strstr(stats, " faults=1") != nullptr);
             CHECK_EQ(host_present_test_in_flight(), 2u);
             // Deliver the original registered callback after slot reuse.
-            layer.drawable.presentedTime = 0.06;
-            [layer.drawable fire];
-            [layer.drawable fire];
+            fake.presented(0.06);
+            fake.presented(0.06);
             CHECK_EQ(host_present_unique_completed(), 1u);
             CHECK_EQ(host_present_test_in_flight(), 2u);
             host_present_test_command_done(2);
@@ -5081,29 +5040,25 @@ static void test_windowed_drawable_handler_and_completion_fallback() {
     // A deadline cannot release GPU/prefix-owned storage. Slow GPU completion
     // earns a new display grace; its real callback needs no display-link tick.
     for (bool success : {false, true}) {
+        PresentFake fake;
         host_present_test_begin(false, false);
         host_present_test_seal(1, HOST_SCREEN_MENU, false, true);
         CHECK(host_present_test_window_wake(0));
-        FakePresentLayer *layer = [FakePresentLayer new];
-        layer.drawable = [FakePresentDrawable new];
-        FakePresentCommand *command = [FakePresentCommand new];
-        command.status = success ? MTLCommandBufferStatusCompleted : MTLCommandBufferStatusError;
-        host_present_test_commit_layer(layer, command);
+        fake.commit();
         CHECK(host_present_test_window_wake(2.0 / 60, false, true));
         CHECK_EQ(host_present_unique_completed(), 0u);
         CHECK(!host_present_test_released(1));
         CHECK(host_present_test_window_wake(1.1, false, true));
         CHECK(host_present_test_faults() != 0);
         CHECK_EQ(host_present_test_in_flight(), 1u);
-        [command complete];
+        fake.complete(success);
         CHECK_EQ(host_present_unique_completed(), 0u);
         CHECK(!host_present_test_released(1));
         host_present_test_prefix_done(1);
         if (success) {
             CHECK(!host_present_test_released(1));
             CHECK_EQ(host_present_unique_completed(), 0u);
-            layer.drawable.presentedTime = 1.11;
-            [layer.drawable fire];
+            fake.presented(1.11);
         }
         CHECK(host_present_test_released(1));
         CHECK_EQ(host_present_unique_completed(), success ? 1u : 0u);
@@ -5377,7 +5332,7 @@ static void test_presenter_layout_and_transitions() {
     in.cls = HOST_SCREEN_GAMEPLAY;
     in.scene = {6, 4.5, 0, 0, 640};
     host_present_set_input(&in);
-    host_present_resize(3840, 2160, 1);
+    host_present_resize(3840, 2160);
     host_present_test_seal(1);
     ui.elements.clear();
     host_present_tick_for_test(0);
@@ -5388,7 +5343,7 @@ static void test_presenter_layout_and_transitions() {
     CHECK_EQ(snapshot.elements[0].drawable.y, 2032);
     CHECK_EQ(snapshot.elements[0].last_seq, 23);
     CHECK_EQ(snapshot.ui_scale, 4);
-    host_present_resize(1920, 1080, 1);
+    host_present_resize(1920, 1080);
     host_present_tick_for_test(0.5);
     LayoutSnapshot resized;
     CHECK(host_present_copy_layout(&resized));
@@ -5452,7 +5407,7 @@ static void test_presenter_migration_cancels_old_drawable() {
     host_present_test_begin(false);
     host_present_test_seal(1);
     host_present_tick_for_test(0);
-    host_present_install_layer(nil, 1920, 1080, 2);
+    host_present_install_surface(nullptr, 1920, 1080);
     host_present_tick_for_test(0.01);
     CHECK_EQ(host_present_drops(), 1u);
     CHECK(!host_present_test_released(1));
@@ -5469,7 +5424,7 @@ static void test_presenter_migration_cancels_old_drawable() {
 }
 
 static void test_presenter_real_offscreen(PopD3DRenderer *renderer) {
-    host_present_start_offscreen(renderer.commandQueue, 4, 4);
+    host_present_start_offscreen(4, 4);
     uint8_t rgba[64];
     for (int i = 0; i < 16; ++i) {
         rgba[i * 4] = 207;
@@ -5570,7 +5525,7 @@ static void test_wide_scene_pixels(PopD3DRenderer *renderer) {
         [renderer discard];
         [PopD3DRenderer setShared:renderer];
         host_d3d_reset_coherence();
-        host_present_start_offscreen(renderer.commandQueue, domain * 2, height * 2);
+        host_present_start_offscreen(domain * 2, height * 2);
         Surface surface(881, width, height);
         host_d3d_bind_generation(&surface.desc, 1, 9002);
         host_present_acquire_target(width, height, domain * 2, height * 2);
@@ -5672,7 +5627,7 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
     std::string savedLimit = limit ? limit : "";
     setenv("POPM_TEXTURE_BUDGET_MB", "32", 1);
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
-    auto r = [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+    auto r = make_renderer();
     CHECK(r != nil);
     [PopD3DRenderer setShared:r];
     for (int variant = 0; r && variant < 5; ++variant) {
@@ -5681,7 +5636,7 @@ static void test_hd_pack_and_classic_isolation(PopD3DRenderer *original) {
         test_hd = variant != 0;
         test_classic = variant == 2;
         g_t5_legacy_frame = variant == 3 ? 9987 : 0;
-        host_present_start_offscreen(r.commandQueue, 128, 128);
+        host_present_start_offscreen(128, 128);
         Surface surface(883, 64, 64);
         host_d3d_bind_generation(&surface.desc, 1, 9987);
         uint16_t red = 0xf800;
@@ -5767,7 +5722,7 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
     bool had = env;
     std::string saved = env ? env : "";
     setenv("POPM_TEXTURE_PACK_DIR", dir, 1);
-    auto renderer = [[PopD3DRenderer alloc] initWithDevice:MTLCreateSystemDefaultDevice()];
+    auto renderer = make_renderer();
     CHECK(renderer != nil);
     [PopD3DRenderer setShared:renderer];
     for (int variant = 0; renderer && variant < 8; ++variant) {
@@ -5776,7 +5731,7 @@ static void test_terrain_material_detail(PopD3DRenderer *original) {
         test_hd = variant != 1;
         test_classic = variant == 2;
         g_t5_legacy_frame = variant == 3 ? 9988 : 0;
-        host_present_start_offscreen(renderer.commandQueue, 128, 128);
+        host_present_start_offscreen(128, 128);
         Surface surface(884, 64, 64);
         host_d3d_bind_generation(&surface.desc, 1, 9988);
         const uint16_t color = variant == 4 ? 0x19b0 : 0x6c23; // blue water / olive land
@@ -5843,7 +5798,7 @@ static void test_native_tile_borders(PopD3DRenderer *renderer) {
         [PopD3DRenderer setShared:renderer];
         host_d3d_reset_coherence();
         test_classic = variant == 3;
-        host_present_start_offscreen(renderer.commandQueue, 128, 128);
+        host_present_start_offscreen(128, 128);
         Surface surface(882, 64, 64);
         host_d3d_bind_generation(&surface.desc, 1, 9003 + variant);
         uint16_t pixels[4] = {0xf800, 0x07e0, 0xf800, 0x07e0};
@@ -5889,11 +5844,11 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     [renderer discard];
     [PopD3DRenderer setShared:renderer];
     host_d3d_reset_coherence();
-    host_present_start_offscreen(renderer.commandQueue, 128, 128);
+    host_present_start_offscreen(128, 128);
     Surface surface(880, 64, 64);
     host_d3d_bind_generation(&surface.desc, 1, 9000);
     auto target = host_present_acquire_target(64, 64, 128, 128);
-    CHECK(renderer.colorTarget == target.world);
+    CHECK(renderer.colorTarget == present_native(target.world));
     CHECK_EQ(target.w, 128);
     HostD3DDrawSnapshot clear{};
     clear.kind = HOST_DRAW_CLEAR;
@@ -5974,12 +5929,12 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     // the same guest-resolution surface, then aspect-fits it at presentation.
     test_classic = 1;
     host_d3d_reset_coherence();
-    host_present_start_offscreen(renderer.commandQueue, 128, 96);
+    host_present_start_offscreen(128, 96);
     host_d3d_bind_generation(&surface.desc, 2, 9001);
     target = host_present_acquire_target(64, 64, 128, 96);
     CHECK_EQ(target.w, 64);
     CHECK_EQ(target.h, 64);
-    CHECK(renderer.colorTarget == target.world);
+    CHECK(renderer.colorTarget == present_native(target.world));
     g_t5_mapping = HOST_MAPPING_SCENE;
     host_d3d_draw(&clear);
     cpu.dst_generation = 2;
@@ -6019,7 +5974,7 @@ static void test_presenter_incremental_world_and_overlay(PopD3DRenderer *rendere
     CHECK_EQ(repeat.guest_w, 64);
     CHECK_EQ(repeat.scene.domain_w, 64);
     CHECK_NEAR(repeat.scene.scale_x, 1.5, .001);
-    host_present_resize(192, 128, 0);
+    host_present_resize(192, 128);
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     do {
         host_present_copy_layout(&repeat);
@@ -8309,9 +8264,9 @@ static void test_t9_resize_without_ack_round1() {
     host_present_tick_for_test(0);
     // Leave flight outstanding, never acknowledge it or tick the presenter.
     // Only the latest resize is consumed by the next input event.
-    host_present_resize(3000, 1800, 1);
-    host_present_resize(2560, 1440, 1);
-    host_present_resize(1920, 1080, 1);
+    host_present_resize(3000, 1800);
+    host_present_resize(2560, 1440);
+    host_present_resize(1920, 1080);
     auto hit = host_gate_hit_test(nullptr, 1880, 1040);
     CHECK_EQ(hit.element, 9u);
     CHECK_EQ(hit.gx, 620);
@@ -8324,7 +8279,7 @@ static void test_t9_resize_without_ack_round1() {
     host_pointer_capture(true);
     host_pointer_center();
     int32_t dx, dy;
-    host_present_resize(3840, 2160, 1);
+    host_present_resize(3840, 2160);
     host_gate_pointer_event(0, 0, 0, 0, &dx, &dy);
     CHECK_EQ(dx, 0);
     CHECK_EQ(dy, 0); // Layout change alone is never motion.
@@ -8333,7 +8288,7 @@ static void test_t9_resize_without_ack_round1() {
     CHECK_EQ(dy, 2);
     host_pointer_capture(false);
     host_gate_pointer_event(1920, 1080, 0, 0, &dx, &dy);
-    host_present_resize(1920, 1080, 1);
+    host_present_resize(1920, 1080);
     // A backing/display change changes absolute coordinates under a stationary
     // OS pointer. It must not invent a centre-to-corner relative displacement.
     host_gate_pointer_event(960, 540, 0, 0, &dx, &dy);
@@ -8374,7 +8329,7 @@ static void test_display_settings_bridge() {
     CHECK(display_offered_modes == "640x480x8,640x480x16,1920x1080x16");
     CHECK_NEAR(host_display_aspect(), 4.0 / 3.0, 0.00001);
     host_present_test_begin(false);
-    host_present_resize(3840, 2160, 1);
+    host_present_resize(3840, 2160);
     host_present_tick_for_test(0);
     CHECK_NEAR(host_display_aspect(), 16.0 / 9.0, 0.00001);
     UiFrame ui{};
@@ -8425,7 +8380,7 @@ static void test_display_settings_bridge() {
     host_display_request_window(1);
     host_display_request_window(2);
     CHECK_EQ(host_display_take_window(), 2);
-    host_present_resize(1920, 1080, 1);
+    host_present_resize(1920, 1080);
     CHECK_NEAR(host_display_aspect(), 16.0 / 9.0, 0.00001);
     CHECK(!host_present_test_released(2));
     host_present_test_command_done(2);
@@ -8723,51 +8678,38 @@ static void test_pointer_reaches_scrolling_edges() {
     memcpy(gm_ptr(base), saved, sizeof saved);
 }
 static void test_native_overlay_pixels() {
-    @autoreleasepool {
-        auto device = MTLCreateSystemDefaultDevice();
-        CHECK(device != nil);
-        if (!device)
-            return;
-        auto d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                    width:640
-                                                                   height:480
-                                                                mipmapped:NO];
-        d.storageMode = MTLStorageModeShared;
-        d.usage = MTLTextureUsageRenderTarget;
-        auto target = [device newTextureWithDescriptor:d];
-        std::vector<uint8_t> pixels(640 * 480 * 4, 40);
-        [target replaceRegion:MTLRegionMake2D(0, 0, 640, 480)
-                  mipmapLevel:0
-                    withBytes:pixels.data()
-                  bytesPerRow:640 * 4];
-        auto q = [device newCommandQueue];
-        auto cb = [q commandBuffer];
-        PerformanceOverlay overlay;
-        FramePacingSnapshot snapshot;
-        snapshot.new_fps = 60;
-        snapshot.display_fps = 120;
-        snapshot.intervals_ms = {8, 16, 33, 50};
-        overlay.draw(target, cb, snapshot, 1, 2, 60);
-        [cb commit];
-        [cb waitUntilCompleted];
-        CHECK_EQ(cb.status, MTLCommandBufferStatusCompleted);
-        [target getBytes:pixels.data()
-             bytesPerRow:640 * 4
-              fromRegion:MTLRegionMake2D(0, 0, 640, 480)
-             mipmapLevel:0];
-        CHECK_EQ(pixels[(400 * 640 + 20) * 4], 40); // HUD never clears the game below it
-        int changed = 0;
-        for (int y = 10; y < 146; ++y)
-            for (int x = 300; x < 630; ++x)
-                changed += pixels[(y * 640 + x) * 4] != 40;
-        CHECK(changed > 10000);
-        FILE *f = fopen("build/recomp/performance-overlay.ppm", "wb");
-        if (f) {
-            fprintf(f, "P6\n640 480\n255\n");
-            for (size_t i = 0; i < pixels.size(); i += 4)
-                fwrite(&pixels[i], 1, 3, f);
-            fclose(f);
-        }
+    auto device = gpu::create_default_device();
+    CHECK(device != nullptr);
+    if (!device)
+        return;
+    gpu::Texture target =
+        device->create_texture({640, 480, gpu::Format::RGBA8,
+                                gpu::UsageRenderTarget | gpu::UsageSampled | gpu::UsageCpu, 1});
+    std::vector<uint8_t> pixels(640 * 480 * 4, 40);
+    device->upload(target, {0, 0, 640, 480}, pixels.data(), 640 * 4);
+    gpu::CommandBuffer cb = device->begin();
+    PerformanceOverlay overlay;
+    FramePacingSnapshot snapshot;
+    snapshot.new_fps = 60;
+    snapshot.display_fps = 120;
+    snapshot.intervals_ms = {8, 16, 33, 50};
+    overlay.draw(device.get(), cb, target, 640, 480, snapshot, 1, 2, 60);
+    device->commit(cb);
+    device->wait(cb);
+    CHECK(device->status(cb) == gpu::CommandStatus::Completed);
+    device->readback(target, {0, 0, 640, 480}, pixels.data(), 640 * 4);
+    CHECK_EQ(pixels[(400 * 640 + 20) * 4], 40); // HUD never clears the game below it
+    int changed = 0;
+    for (int y = 10; y < 146; ++y)
+        for (int x = 300; x < 630; ++x)
+            changed += pixels[(y * 640 + x) * 4] != 40;
+    CHECK(changed > 10000);
+    FILE *f = fopen("build/recomp/performance-overlay.ppm", "wb");
+    if (f) {
+        fprintf(f, "P6\n640 480\n255\n");
+        for (size_t i = 0; i < pixels.size(); i += 4)
+            fwrite(&pixels[i], 1, 3, f);
+        fclose(f);
     }
 }
 
@@ -8795,12 +8737,13 @@ int main(int argc, char **argv) {
     }
     if (argc > 1 && !strcmp(argv[1], "--presenter-gpu")) {
         @autoreleasepool {
-            id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-            if (!device) {
+            g_gpu = gpu::create_default_device();
+            if (!g_gpu) {
                 printf("no Metal device: presenter offscreen pixel test did not run\n");
                 return 2;
             }
-            PopD3DRenderer *renderer = [[PopD3DRenderer alloc] initWithDevice:device];
+            host_present_set_device(g_gpu.get());
+            PopD3DRenderer *renderer = make_renderer();
             if (!renderer)
                 return 1;
             test_presenter_real_offscreen(renderer);
@@ -8915,13 +8858,14 @@ int main(int argc, char **argv) {
     }
 
     @autoreleasepool {
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) {
+        g_gpu = gpu::create_default_device();
+        if (!g_gpu) {
             printf("\nno Metal device: the renderer tests did not run\n");
             printf("%d checks, %d failures\n", g_checks, g_failures);
             return g_failures ? 1 : 2;
         }
-        PopD3DRenderer *renderer = [[PopD3DRenderer alloc] initWithDevice:device];
+        host_present_set_device(g_gpu.get());
+        PopD3DRenderer *renderer = make_renderer();
         if (!renderer) {
             fprintf(stderr, "FAIL: the renderer would not initialise\n");
             return 1;

@@ -1,10 +1,8 @@
 #pragma once
 
 #include "../dx/host_api.h"
+#include "gpu/gpu.h"
 #include <vector>
-#ifdef __OBJC__
-#import <Metal/Metal.h>
-#endif
 
 struct UiElement;
 struct UiFrame;
@@ -43,30 +41,31 @@ LayoutSnapshot compositor_resize_layout(const LayoutSnapshot &layout, int w, int
 // Host pointer in drawable pixels. Cursors keep UI-scaled size and no anchor.
 void compositor_set_pointer_position(bool valid, int32_t x, int32_t y);
 
-#ifdef __OBJC__
 struct CompositorInput {
     HostScreenClass cls;
     const UiFrame *ui;
-    id<MTLTexture> world;
+    gpu::Texture world;
     // Amendment 5: guest UI-space texture, possibly already at UI scale,
     // with premultiplied alpha (rendered by blending onto transparent black).
     // Scene-mapped overlays have already been rendered into world.
-    id<MTLTexture> overlay;
+    gpu::Texture overlay;
     int guest_w, guest_h;
     int drawable_w, drawable_h;
     int scale_override;
     SceneMapping scene;
     bool legacy;
-    id<MTLTexture> legacy_frame;
-    id<MTLTexture> settings_page = nil; // immutable host-rendered 640x480 page, alpha outside panel
+    gpu::Texture legacy_frame;
+    gpu::Texture settings_page; // immutable host-rendered 640x480 page, alpha outside panel
     bool classic = false; // guest-resolution layered scene, aspect-preserving whole-frame mapping
 };
 
-// Encode only: never commits, waits, presents, or touches AppKit. The caller
-// supplies a retaining command buffer, a shader-readable input and a distinct
-// single-sample render target of drawable_w x drawable_h. World is the already
-// mapped scene target; it is scaled to the drawable without a second mapping.
-void compositor_compose(const CompositorInput *in, id<MTLTexture> out, id<MTLCommandBuffer> cb);
+// Encode only: never commits, waits or presents. The caller supplies an open
+// command buffer, shader-readable inputs and a distinct render target of
+// drawable_w x drawable_h. World is the already mapped scene target; it is
+// scaled to the drawable without a second mapping. Textures the compositor
+// allocates for UI elements are destroyed when `cb` completes.
+void compositor_compose(gpu::Device *device, const CompositorInput *in, gpu::Texture out,
+                        gpu::CommandBuffer cb);
 int compositor_ui_scale(int drawable_h, int guest_h, int override_);
 Anchor compositor_default_anchor(const UiElement *e, int guest_w, int guest_h);
 // Overrides preserve the guest margin to the chosen edge (or centre offset).
@@ -80,12 +79,12 @@ bool compositor_element_rect_on_drawable(const CompositorInput *in, uint64_t id,
 uint32_t compositor_element_ids(const UiFrame *ui, uint64_t *out, uint32_t max);
 
 // One instance per presenter. Amendment 16 needs had_draws, deliberately kept
-// outside the binding CompositorInput interface. ARC holds the texture objects;
-// the presenter must also pin their frame/target lease against pool reuse, and
-// retire that lease after outstanding GPU work completes (T8).
+// outside the binding CompositorInput interface. The handles here are leases'
+// keys only: the presenter pins the frame/target lease against pool reuse and
+// retires that lease after outstanding GPU work completes (T8).
 struct CompositorSceneHistory {
-    id<MTLTexture> world = nil;
-    id<MTLTexture> overlay = nil;
+    gpu::Texture world;
+    gpu::Texture overlay;
     uint64_t scene_reused = 0;
     int guest_w = 0, guest_h = 0, domain_w = 0;
     bool classic = false;
@@ -95,5 +94,3 @@ struct CompositorSceneHistory {
 // the old scene, as does a guest resolution/domain change; the lifetime counter
 // remains available to the presenter.
 bool compositor_resolve_scene(CompositorSceneHistory *history, CompositorInput *in, bool had_draws);
-
-#endif // __OBJC__

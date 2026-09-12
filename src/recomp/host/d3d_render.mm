@@ -30,6 +30,7 @@
 //
 // Nothing here opens a window.
 #include "d3d_render.h"
+#include "gpu/metal/metal_bridge.h"
 #include "texture_pixels.h"
 #include "texture_pack.h"
 #include <mach-o/dyld.h>
@@ -927,9 +928,39 @@ struct SceneSlot {
     bool separateLayers = false, materializedLayers = false;
     int scene_domain_w = 0;
     HostSceneTarget presentTarget;
+    gpu::Texture legacyImport;
     std::shared_ptr<void> coherenceLease;
     id<MTLTexture> overlayDepth = nil, overlayCoverage = nil;
 };
+
+// Until the renderer itself runs over gpu.h (plan Task 5), the presenter's
+// texture handles become Metal objects here and the renderer's Metal command
+// buffers report their completion through the presenter's prefix fence.
+static id<MTLTexture> present_texture(gpu::Texture t) {
+    return t ? gpu::metal::export_texture(host_present_device(), t) : nil;
+}
+static void track_native_command(id<MTLCommandBuffer> cb) {
+    void *handle = host_present_prefix_begin();
+    if (!handle)
+        return;
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+      host_present_prefix_done(handle, c.status == MTLCommandBufferStatusCompleted);
+    }];
+}
+// A compose with renderer-owned textures. Importing an object the presenter
+// already owns returns the presenter's handle, so imports are never destroyed
+// here: the few long-lived slot textures simply stay registered.
+static void compose_native(const CompositorInput &in, id<MTLTexture> world, id<MTLTexture> out,
+                           id<MTLCommandBuffer> cb) {
+    gpu::Device *dev = host_present_device();
+    if (!dev)
+        return;
+    CompositorInput copy = in;
+    copy.world = gpu::metal::import_texture(dev, world);
+    gpu::CommandBuffer command = gpu::metal::import_command(dev, cb);
+    compositor_compose(dev, &copy, gpu::metal::import_texture(dev, out), command);
+    gpu::metal::forget_command(dev, command);
+}
 
 @implementation PopD3DRenderer {
     id<MTLDevice> device_;
@@ -1032,11 +1063,14 @@ struct SceneSlot {
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device {
+    return [self initWithDevice:device queue:[device newCommandQueue]];
+}
+- (instancetype)initWithDevice:(id<MTLDevice>)device queue:(id<MTLCommandQueue>)queue {
     self = [super init];
     if (!self)
         return nil;
     device_ = device;
-    queue_ = [device newCommandQueue];
+    queue_ = queue;
     NSError *error = nil;
     library_ = [device newLibraryWithSource:kShader options:nil error:&error];
     if (!library_) {
@@ -1298,7 +1332,7 @@ struct SceneSlot {
         return;
     if (color_ && width == width_ && height == height_) {
         if (acquiringTarget_.world)
-            color_ = acquiringTarget_.world;
+            color_ = present_texture(acquiringTarget_.world);
         return;
     }
     [self endEncoding];
@@ -1312,7 +1346,8 @@ struct SceneSlot {
                                                        mipmapped:NO];
     c.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     c.storageMode = MTLStorageModePrivate;
-    color_ = acquiringTarget_.world ?: [device_ newTextureWithDescriptor:c];
+    color_ = acquiringTarget_.world ? present_texture(acquiringTarget_.world)
+                                    : [device_ newTextureWithDescriptor:c];
     if (color_ && !acquiringTarget_.world)
         ++storage_stats_.scene_textures;
 
@@ -1383,7 +1418,7 @@ struct SceneSlot {
     [self endEncoding];
     if (command_) {
         last_command_ = command_;
-        host_present_track_command(command_);
+        track_native_command(command_);
         [command_ commit];
         command_ = nil;
     }
@@ -1668,7 +1703,7 @@ struct SceneSlot {
          destinationLevel:0
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
-    host_present_track_command(cb);
+    track_native_command(cb);
     [cb commit];
     assert(!host_d3d_appkit_pending());
     [cb waitUntilCompleted];
@@ -1807,7 +1842,7 @@ struct SceneSlot {
     [self endEncoding];
     if (command_) {
         last_command_ = command_;
-        host_present_track_command(command_);
+        track_native_command(command_);
         [command_ commit];
         command_ = nil;
     }
@@ -2049,7 +2084,7 @@ struct SceneSlot {
         if (!command_)
             command_ = [queue_ commandBuffer];
         auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = target.overlay;
+        pass.colorAttachments[0].texture = present_texture(target.overlay);
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
@@ -2088,12 +2123,11 @@ struct SceneSlot {
         if (!sameSize) {
             CompositorInput in{};
             in.cls = HOST_SCREEN_GAMEPLAY;
-            in.world = old.color;
             in.guest_w = s->width;
             in.guest_h = s->height;
             in.drawable_w = width_;
             in.drawable_h = height_;
-            compositor_compose(&in, color_, command_);
+            compose_native(in, old.color, color_, command_);
         }
         needs_upload_ = false;
         pending_clear_color_ = false;
@@ -2135,9 +2169,14 @@ struct SceneSlot {
                 in.legacy =
                     mods_display_classic() || host_frame_legacy({f}) || slot.materializedLayers;
                 if (in.legacy) {
-                    in.world = nil;
-                    in.overlay = nil;
-                    in.legacy_frame = slot.color;
+                    in.world = {};
+                    in.overlay = {};
+                    // The renderer's own colour texture. Importing the same
+                    // object again returns the same handle, so the presenter's
+                    // cached input stays valid across frames.
+                    slot.legacyImport =
+                        gpu::metal::import_texture(host_present_device(), slot.color);
+                    in.legacy_frame = slot.legacyImport;
                 }
                 host_present_set_input(&in);
             }
@@ -2304,7 +2343,7 @@ struct SceneSlot {
         }
     }
     [compute endEncoding];
-    host_present_track_command(cb);
+    track_native_command(cb);
     double wait_begin = readback_timings_ ? CACurrentMediaTime() : 0;
     [cb commit];
     assert(!host_d3d_appkit_pending());
@@ -3212,7 +3251,7 @@ struct SceneSlot {
         id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
         [blit generateMipmapsForTexture:texture];
         [blit endEncoding];
-        host_present_track_command(cb);
+        track_native_command(cb);
         [cb commit];
     }
     ++g_total_textures;
@@ -3514,7 +3553,7 @@ struct SceneSlot {
                                  size:j.checkpoint[k].length];
             }
             [blit endEncoding];
-            host_present_track_command(ready);
+            track_native_command(ready);
             [ready commit];
         }
         assert(!host_d3d_appkit_pending());
@@ -3752,7 +3791,7 @@ struct SceneSlot {
         int w = width_, h = height_;
         bool upload = needs_upload_, cc = pending_clear_color_, cd = pending_clear_depth_,
              cr = coverage_reset_pending_;
-        color_ = slot.presentTarget.overlay;
+        color_ = present_texture(slot.presentTarget.overlay);
         depth_ = slot.overlayDepth;
         coverage_ = slot.overlayCoverage;
         width_ = (int)color_.width;
@@ -3797,7 +3836,7 @@ struct SceneSlot {
          destinationLevel:0
         destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
-    host_present_track_command(cb);
+    track_native_command(cb);
     [cb commit];
     [cb waitUntilCompleted];
     if (cb.status == MTLCommandBufferStatusError)

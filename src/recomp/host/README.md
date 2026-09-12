@@ -190,7 +190,7 @@ guest produced them, and a composite at present time cannot reproduce that.
 
 `src/recomp/dx/ddraw.cpp` and `d3d.cpp` make those calls, and they are a
 comparison and a return for every surface that is not the current render
-target. `present.mm` then has nothing to decide: it expands the surface and
+target. `present.cpp` then has nothing to decide: it expands the surface and
 puts it on the drawable.
 
 The write-back touches only what the device rasterized. The mirror is BGRA8

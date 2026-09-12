@@ -1,4 +1,6 @@
 #include "../compositor.h"
+#include "../gpu/gpu_factory.h"
+#include <memory>
 #ifdef POPM_COMPOSITOR_TEST_UI_DOUBLE
 #include "compositor_ui_double.h"
 #else
@@ -13,7 +15,7 @@ static void check(bool ok, const char *expr, int line) {
     ++checks;
     if (!ok) {
         ++failures;
-        fprintf(stderr, "FAIL compositor_tests.mm:%d: %s\n", line, expr);
+        fprintf(stderr, "FAIL compositor_tests.cpp:%d: %s\n", line, expr);
     }
 }
 #define CHECK(e) check((e), #e, __LINE__)
@@ -179,54 +181,49 @@ static void test_ids_and_empty_inputs() {
     auto in = input(&ui);
     in.drawable_w = 0;
     CHECK(!compositor_element_rect_on_drawable(&in, 1, nullptr, nullptr, nullptr, nullptr));
-    compositor_compose(nullptr, nil, nil);
+    compositor_compose(nullptr, nullptr, {}, {});
 }
 
 static void test_scene_reuse_policy_without_gpu() {
-    // Reference-counted identity tokens exercise the presenter's policy even
-    // when Metal is unavailable. These doubles are NEVER sent to compose.
+    // Handle values exercise the presenter's policy without a device. These
+    // doubles are NEVER sent to compose.
     CompositorSceneHistory history{};
     auto in = input(nullptr, 640, 480);
     CHECK(!compositor_resolve_scene(&history, &in, false));
     CHECK_EQ(history.scene_reused, 0u);
-    __weak id old_world, old_overlay;
-    @autoreleasepool {
-        in.world = (id<MTLTexture>)[NSObject new];
-        in.overlay = (id<MTLTexture>)[NSObject new];
-        old_world = in.world;
-        old_overlay = in.overlay;
-        CHECK(!compositor_resolve_scene(&history, &in, true));
-        in.world = nil;
-        in.overlay = nil;
-    }
-    CHECK(old_world != nil);
-    CHECK(old_overlay != nil);
+    const gpu::Texture old_world{101}, old_overlay{102};
+    in.world = old_world;
+    in.overlay = old_overlay;
+    CHECK(!compositor_resolve_scene(&history, &in, true));
+    in.world = {};
+    in.overlay = {};
+    CHECK(history.world == old_world);
+    CHECK(history.overlay == old_overlay);
     CHECK(compositor_resolve_scene(&history, &in, false));
     CHECK(in.world == old_world);
     CHECK(in.overlay == old_overlay);
     CHECK_EQ(history.scene_reused, 1u);
     // A real draw replaces both textures, including an absent overlay.
-    in.world = (id<MTLTexture>)[NSObject new];
-    in.overlay = nil;
+    in.world = gpu::Texture{103};
+    in.overlay = {};
     CHECK(!compositor_resolve_scene(&history, &in, true));
-    CHECK(old_world == nil);
-    CHECK(old_overlay == nil);
-    CHECK(history.overlay == nil);
+    CHECK(history.world == gpu::Texture{103});
+    CHECK(!history.overlay);
     CHECK(compositor_resolve_scene(&history, &in, false));
     CHECK_EQ(history.scene_reused, 2u);
     in.cls = HOST_SCREEN_MENU;
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(history.world == nil);
-    CHECK(history.overlay == nil);
+    CHECK(!history.world);
+    CHECK(!history.overlay);
     in.cls = HOST_SCREEN_GAMEPLAY;
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(in.world == nil);
-    CHECK(in.overlay == nil);
-    in.world = (id<MTLTexture>)[NSObject new];
+    CHECK(!in.world);
+    CHECK(!in.overlay);
+    in.world = gpu::Texture{104};
     CHECK(!compositor_resolve_scene(&history, &in, true));
     in.legacy = true;
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(history.world == nil);
+    CHECK(!history.world);
     CHECK_EQ(history.scene_reused, 2u);
 }
 
@@ -238,31 +235,25 @@ static void test_scene_reuse_resolution_changes() {
         in.guest_h = height;
         in.scene.domain_w = in.guest_w;
         CHECK(!compositor_resolve_scene(&history, &in, false));
-        CHECK(in.world == nil && in.overlay == nil);
-        in.world = (id<MTLTexture>)[NSObject new];
-        in.overlay = (id<MTLTexture>)[NSObject new];
+        CHECK(!in.world && !in.overlay);
+        in.world = gpu::Texture{uint64_t(200 + height)};
+        in.overlay = gpu::Texture{uint64_t(300 + height)};
         CHECK(!compositor_resolve_scene(&history, &in, true));
         CHECK(compositor_resolve_scene(&history, &in, false));
     }
     in.scene.domain_w += 200;
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(in.world == nil && in.overlay == nil);
+    CHECK(!in.world && !in.overlay);
 }
 
-static id<MTLDevice> device;
-static id<MTLCommandQueue> queue;
-static id<MTLTexture> texture(int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255,
-                              MTLPixelFormat format = MTLPixelFormatRGBA8Unorm) {
-    auto d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
-                                                                width:w
-                                                               height:h
-                                                            mipmapped:NO];
-    d.storageMode = MTLStorageModeShared;
-    d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-    id<MTLTexture> tex = [device newTextureWithDescriptor:d];
-    CHECK(tex != nil);
+static std::unique_ptr<gpu::Device> device;
+static gpu::Texture texture(int w, int h, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255,
+                            gpu::Format format = gpu::Format::RGBA8) {
+    gpu::Texture tex = device->create_texture(
+        {w, h, format, gpu::UsageSampled | gpu::UsageRenderTarget | gpu::UsageCpu, 1});
+    CHECK(bool(tex));
     if (!tex)
-        return nil;
+        return {};
     std::vector<uint8_t> pixels(size_t(w) * h * 4);
     for (size_t i = 0; i < pixels.size(); i += 4) {
         pixels[i] = r;
@@ -270,48 +261,45 @@ static id<MTLTexture> texture(int w, int h, uint8_t r, uint8_t g, uint8_t b, uin
         pixels[i + 2] = b;
         pixels[i + 3] = a;
     }
-    [tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
-           mipmapLevel:0
-             withBytes:pixels.data()
-           bytesPerRow:w * 4];
+    device->upload(tex, {0, 0, w, h}, pixels.data(), w * 4);
     return tex;
 }
-static void pixel(id<MTLTexture> tex, int x, int y, int r, int g, int b) {
+static void put(gpu::Texture tex, int x, int y, const uint8_t rgba[4]) {
+    device->upload(tex, {x, y, 1, 1}, rgba, 4);
+}
+static void pixel(gpu::Texture tex, int x, int y, int r, int g, int b) {
     uint8_t p[4] = {};
-    CHECK(tex != nil);
+    CHECK(bool(tex));
     if (!tex)
         return;
-    [tex getBytes:p bytesPerRow:4 fromRegion:MTLRegionMake2D(x, y, 1, 1) mipmapLevel:0];
-    if (tex.pixelFormat == MTLPixelFormatBGRA8Unorm)
+    device->readback(tex, {x, y, 1, 1}, p, 4);
+    if (device->describe(tex).format == gpu::Format::BGRA8)
         std::swap(p[0], p[2]);
     CHECK_EQ(p[0], r);
     CHECK_EQ(p[1], g);
     CHECK_EQ(p[2], b);
 }
-static id<MTLTexture> compose(const CompositorInput &in,
-                              MTLPixelFormat format = MTLPixelFormatRGBA8Unorm) {
-    id<MTLTexture> out = texture(in.drawable_w, in.drawable_h, 255, 0, 255, 255, format);
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
-    CHECK(cb != nil);
-    compositor_compose(&in, out, cb);
-    CHECK_EQ(cb.status, MTLCommandBufferStatusNotEnqueued);
-    [cb commit];
-    [cb waitUntilCompleted]; // test readback only
-    CHECK_EQ(cb.status, MTLCommandBufferStatusCompleted);
-    if (cb.error)
-        fprintf(stderr, "Metal: %s\n", cb.error.description.UTF8String);
+static gpu::Texture compose(const CompositorInput &in, gpu::Format format = gpu::Format::RGBA8) {
+    gpu::Texture out = texture(in.drawable_w, in.drawable_h, 255, 0, 255, 255, format);
+    gpu::CommandBuffer cb = device->begin();
+    CHECK(bool(cb));
+    compositor_compose(device.get(), &in, out, cb);
+    device->commit(cb);
+    device->wait(cb); // test readback only
+    CHECK(device->status(cb) == gpu::CommandStatus::Completed);
     return out;
 }
-static void bounds(id<MTLTexture> tex, int x, int y, int w, int h) {
+static void bounds(gpu::Texture tex, int x, int y, int w, int h) {
+    const gpu::TextureDesc desc = device->describe(tex);
     pixel(tex, x, y, 0, 0, 255);
     pixel(tex, x + w - 1, y + h - 1, 0, 0, 255);
     if (x > 0)
         pixel(tex, x - 1, y + h / 2, 0, 0, 0);
     if (y > 0)
         pixel(tex, x + w / 2, y - 1, 0, 0, 0);
-    if (x + w < int(tex.width))
+    if (x + w < desc.width)
         pixel(tex, x + w, y + h / 2, 0, 0, 0);
-    if (y + h < int(tex.height))
+    if (y + h < desc.height)
         pixel(tex, x + w / 2, y + h, 0, 0, 0);
 }
 
@@ -338,15 +326,12 @@ static void test_layer_order_gameplay() {
     in.world = texture(640, 480, 255, 0, 0);
     in.overlay = texture(640, 480, 0, 0, 0, 0);
     uint8_t green[4] = {0, 255, 0, 255};
-    [in.overlay replaceRegion:MTLRegionMake2D(4, 4, 1, 1)
-                  mipmapLevel:0
-                    withBytes:green
-                  bytesPerRow:4];
+    put(in.overlay, 4, 4, green);
     auto out = compose(in);
     pixel(out, 2, 2, 0, 0, 255);
     pixel(out, 4, 4, 0, 255, 0);
     pixel(out, 40, 40, 255, 0, 0);
-    out = compose(in, MTLPixelFormatBGRA8Unorm);
+    out = compose(in, gpu::Format::BGRA8);
     pixel(out, 2, 2, 0, 0, 255);
     pixel(out, 4, 4, 0, 255, 0);
 }
@@ -358,10 +343,7 @@ static void test_anchored_overlay_mask_and_order() {
     in.world = texture(1, 1, 255, 0, 0);
     in.overlay = texture(2560, 1920, 0, 0, 0, 0); // already UI-scaled
     uint8_t green[4] = {0, 255, 0, 255};
-    [in.overlay replaceRegion:MTLRegionMake2D(2440, 1800, 1, 1)
-                  mipmapLevel:0
-                    withBytes:green
-                  bytesPerRow:4];
+    put(in.overlay, 2440, 1800, green);
     compositor_set_anchor(4, {-1, -1});
     auto out = compose(in);
     pixel(out, 2432, 1792, 255, 0, 0);
@@ -411,10 +393,7 @@ static void test_overlay_alpha_and_overlapping_owners() {
     in.world = texture(1, 1, 255, 0, 0);
     in.overlay = texture(640, 480, 0, 0, 0, 0);
     const uint8_t translucent_green[4] = {0, 128, 0, 128}; // premultiplied render target
-    [in.overlay replaceRegion:MTLRegionMake2D(4, 4, 1, 1)
-                  mipmapLevel:0
-                    withBytes:translucent_green
-                  bytesPerRow:4];
+    put(in.overlay, 4, 4, translucent_green);
     auto out = compose(in);
     pixel(out, 4, 4, 0, 128, 127); // no second multiplication by alpha
     ui = {{element(1, 608, 448, 32, 32), element(2, 608, 448, 32, 32, 255, 255, 0)}, 640, 480};
@@ -422,10 +401,7 @@ static void test_overlay_alpha_and_overlapping_owners() {
     in.world = texture(1, 1, 255, 0, 0);
     in.overlay = texture(640, 480, 0, 0, 0, 0);
     const uint8_t green[4] = {0, 255, 0, 255};
-    [in.overlay replaceRegion:MTLRegionMake2D(610, 450, 1, 1)
-                  mipmapLevel:0
-                    withBytes:green
-                  bytesPerRow:4];
+    put(in.overlay, 610, 450, green);
     compositor_set_anchor(1, {-1, -1});
     compositor_set_anchor(2, {1, 1});
     out = compose(in);
@@ -444,7 +420,7 @@ static void test_legacy_frame_scaled() {
     in.overlay = texture(1, 1, 0, 255, 0);
     bounds(compose(in), 480, 0, 2880, 2160);
     rect(in, 1, 480, 0, 2880, 2160);
-    in.legacy_frame = nil;
+    in.legacy_frame = {};
     auto out = compose(in);
     pixel(out, 600, 100, 0, 0, 0);
     pixel(out, 2000, 1000, 0, 0, 0);
@@ -456,44 +432,41 @@ static void test_previous_scene_reused() {
     auto in = input(&ui, 640, 480);
     CHECK(!compositor_resolve_scene(&history, &in, false));
     CHECK_EQ(history.scene_reused, 0u);
-    __weak id<MTLTexture> weak_world, weak_overlay;
-    @autoreleasepool {
+    gpu::Texture weak_world, weak_overlay;
+    {
         in.world = texture(640, 480, 255, 0, 0);
         in.overlay = texture(640, 480, 0, 0, 0, 0);
         uint8_t green[4] = {0, 255, 0, 255};
-        [in.overlay replaceRegion:MTLRegionMake2D(4, 4, 1, 1)
-                      mipmapLevel:0
-                        withBytes:green
-                      bytesPerRow:4];
+        put(in.overlay, 4, 4, green);
         weak_world = in.world;
         weak_overlay = in.overlay;
         CHECK(!compositor_resolve_scene(&history, &in, true));
-        in.world = nil;
-        in.overlay = nil;
+        in.world = {};
+        in.overlay = {};
     }
-    CHECK(weak_world != nil);
-    CHECK(weak_overlay != nil);
+    CHECK(history.world == weak_world);
+    CHECK(history.overlay == weak_overlay);
     in.world = texture(1, 1, 255, 255, 0); // a no-draw frame's empty targets are ignored
     CHECK(compositor_resolve_scene(&history, &in, false));
     CHECK_EQ(history.scene_reused, 1u);
     CHECK(in.world == weak_world);
     CHECK(in.overlay == weak_overlay);
-    @autoreleasepool {
+    {
         auto out = compose(in);
         pixel(out, 40, 40, 255, 0, 0);
         pixel(out, 2, 2, 0, 0, 255);
         pixel(out, 4, 4, 0, 255, 0);
     }
-    in.world = nil;
-    in.overlay = nil;
+    in.world = {};
+    in.overlay = {};
     CHECK(compositor_resolve_scene(&history, &in, false));
     CHECK_EQ(history.scene_reused, 2u);
     in.cls = HOST_SCREEN_MENU;
-    in.world = nil;
-    in.overlay = nil;
+    in.world = {};
+    in.overlay = {};
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(history.world == nil);
-    CHECK(history.overlay == nil);
+    CHECK(!history.world);
+    CHECK(!history.overlay);
     in.cls = HOST_SCREEN_GAMEPLAY;
     CHECK(!compositor_resolve_scene(&history, &in, false));
     in.world = texture(1, 1, 255, 255, 0);
@@ -501,7 +474,7 @@ static void test_previous_scene_reused() {
     CHECK_EQ(history.scene_reused, 2u);
     in.legacy = true;
     CHECK(!compositor_resolve_scene(&history, &in, false));
-    CHECK(history.world == nil);
+    CHECK(!history.world);
 }
 
 static void test_classic_framing_and_settings_overlay() {
@@ -538,10 +511,7 @@ static void test_classic_framing_and_settings_overlay() {
     in.drawable_h = 480;
     in.settings_page = texture(640, 480, 0, 0, 0, 0);
     uint8_t red[4] = {255, 0, 0, 255};
-    [in.settings_page replaceRegion:MTLRegionMake2D(10, 10, 1, 1)
-                        mipmapLevel:0
-                          withBytes:red
-                        bytesPerRow:4];
+    put(in.settings_page, 10, 10, red);
     out = compose(in);
     pixel(out, 10, 10, 255, 0, 0);
     pixel(out, 11, 10, 0, 0, 255);
@@ -565,7 +535,7 @@ int main() {
         {"registry bottom right at 4x", test_registry_override_places_bottom_right_at_4x},
         {"class layout and cursor", test_class_layout_and_cursor},
         {"ids and empty inputs", test_ids_and_empty_inputs},
-        {"scene reuse policy and ARC leases", test_scene_reuse_policy_without_gpu},
+        {"scene reuse policy and leases", test_scene_reuse_policy_without_gpu},
         {"scene reuse resolution changes", test_scene_reuse_resolution_changes},
     };
     for (auto t : cpu) {
@@ -573,17 +543,13 @@ int main() {
         t.run();
         printf("%-38s %s\n", t.name, before == failures ? "ok" : "FAILED");
     }
-    @autoreleasepool {
-        device = MTLCreateSystemDefaultDevice();
+    {
+        device = gpu::create_default_device();
         if (!device) {
-            printf("no Metal device: compositor pixel and texture-lease tests did not run\n");
+            printf("no GPU device: compositor pixel and texture-lease tests did not run\n");
             printf("%d checks, %d failures\n", checks, failures);
             return failures ? 1 : 2;
         }
-        queue = [device newCommandQueue];
-        CHECK(queue != nil);
-        if (!queue)
-            return 1;
         Test gpu[] = {
             {"Classic framing and settings page", test_classic_framing_and_settings_overlay},
             {"menu centred and FMV letterboxed", test_menu_centred_and_fmv_letterboxed},
@@ -595,11 +561,9 @@ int main() {
             {"previous world and overlay reused", test_previous_scene_reused},
         };
         for (auto t : gpu) {
-            @autoreleasepool {
-                int before = failures;
-                t.run();
-                printf("%-38s %s\n", t.name, before == failures ? "ok" : "FAILED");
-            }
+            int before = failures;
+            t.run();
+            printf("%-38s %s\n", t.name, before == failures ? "ok" : "FAILED");
         }
     }
     printf("%d checks, %d failures\n", checks, failures);

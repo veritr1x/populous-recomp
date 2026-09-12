@@ -7,12 +7,12 @@
 #include "ui_frame_contract.h"
 #endif
 
-#include <simd/simd.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -116,120 +116,71 @@ std::vector<const UiElement *> ordered(const UiFrame *ui) {
     return result;
 }
 
-NSString *const shader = @R"metal(
-#include <metal_stdlib>
-using namespace metal;
-struct Quad { float4 rect; float4 uv; float2 drawable; uint opaque; uint pad; };
-struct Varying { float4 position [[position]]; float2 uv; };
-vertex Varying compositor_vertex(uint id [[vertex_id]], constant Quad& q [[buffer(0)]]) {
-    const float2 corners[4]={float2(0,0),float2(1,0),float2(0,1),float2(1,1)};
-    float2 p=q.rect.xy+corners[id]*q.rect.zw;
-    Varying v;
-    v.position=float4(p.x/q.drawable.x*2-1,1-p.y/q.drawable.y*2,0,1);
-    v.uv=q.uv.xy+corners[id]*q.uv.zw;
-    return v;
-}
-fragment float4 compositor_fragment(Varying v [[stage_in]],
-                                    constant Quad& q [[buffer(0)]],
-                                    texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler nearest(coord::normalized,address::clamp_to_edge,filter::nearest);
-    float4 c=tex.sample(nearest,v.uv);
-    if(q.opaque) c.a=1;
-    return c;
-}
-)metal";
-
 enum Blend { Opaque, Straight, Premultiplied };
-struct Pipelines {
-    id<MTLDevice> device;
-    MTLPixelFormat format;
-    id<MTLRenderPipelineState> state[3];
-};
-std::mutex pipeline_mutex;
-std::vector<Pipelines> pipeline_cache;
-Pipelines pipelines(id<MTLDevice> device, MTLPixelFormat format) {
-    std::lock_guard lock(pipeline_mutex);
-    for (const auto &p : pipeline_cache)
-        if (p.device == device && p.format == format)
-            return p;
-    Pipelines p{};
-    p.device = device;
-    p.format = format;
-    NSError *error = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:shader options:nil error:&error];
-    if (!lib) {
-        fprintf(stderr, "compositor: shader compile failed: %s\n", error.description.UTF8String);
-        return p;
-    }
-    auto desc = [[MTLRenderPipelineDescriptor alloc] init];
-    desc.vertexFunction = [lib newFunctionWithName:@"compositor_vertex"];
-    desc.fragmentFunction = [lib newFunctionWithName:@"compositor_fragment"];
-    auto color = desc.colorAttachments[0];
-    color.pixelFormat = format;
-    for (int blend = Opaque; blend <= Premultiplied; ++blend) {
-        color.blendingEnabled = blend != Opaque;
-        color.sourceRGBBlendFactor =
-            blend == Straight ? MTLBlendFactorSourceAlpha : MTLBlendFactorOne;
-        color.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-        color.sourceAlphaBlendFactor = MTLBlendFactorOne;
-        color.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-        p.state[blend] = [device newRenderPipelineStateWithDescriptor:desc error:&error];
-        if (!p.state[blend]) {
-            fprintf(stderr, "compositor: pipeline failed: %s\n", error.description.UTF8String);
-            return p;
-        }
-    }
-    pipeline_cache.push_back(p);
-    return p;
-}
 struct Quad {
-    simd_float4 rect, uv;
-    simd_float2 drawable;
+    float rect[4], uv[4];
+    float drawable[2];
     uint32_t opaque, pad;
 };
+// One pipeline per blend convention and target format; the device caches by
+// the render state, so asking every compose is free.
+gpu::Pipeline pipeline(gpu::Device *device, gpu::Format format, Blend blend) {
+    gpu::RenderState state;
+    state.color_format[0] = format;
+    state.color_count = 1;
+    state.blend_enabled = blend != Opaque;
+    state.src_rgb = blend == Straight ? gpu::Blend::SrcAlpha : gpu::Blend::One;
+    state.dst_rgb = gpu::Blend::OneMinusSrcAlpha;
+    state.src_alpha = gpu::Blend::One;
+    state.dst_alpha = gpu::Blend::OneMinusSrcAlpha;
+    return device->render_pipeline("compositor", state);
+}
+struct Pass {
+    gpu::Device *device;
+    gpu::CommandBuffer cb;
+    gpu::Format format;
+    std::vector<gpu::Texture> transient; // destroyed when cb completes
+};
 // Encode a textured compositor quad with explicit destination, UVs and alpha convention.
-// Reject empty or wholly offscreen rectangles before issuing Metal draw commands.
-void draw(id<MTLRenderCommandEncoder> encoder, const Pipelines &p, const CompositorInput &in,
-          id<MTLTexture> tex, CompositeRect dst, CompositeRect uv, Blend blend) {
-    if (!tex || !p.state[blend] || dst.w <= 0 || dst.h <= 0 || dst.x >= in.drawable_w ||
-        dst.y >= in.drawable_h || dst.x + dst.w <= 0 || dst.y + dst.h <= 0)
+// Reject empty or wholly offscreen rectangles before issuing draw commands.
+void draw(Pass &pass, const CompositorInput &in, gpu::Texture tex, CompositeRect dst,
+          CompositeRect uv, Blend blend) {
+    if (!tex || dst.w <= 0 || dst.h <= 0 || dst.x >= in.drawable_w || dst.y >= in.drawable_h ||
+        dst.x + dst.w <= 0 || dst.y + dst.h <= 0)
+        return;
+    gpu::Pipeline p = pipeline(pass.device, pass.format, blend);
+    if (!p)
         return;
     Quad q{{float(dst.x), float(dst.y), float(dst.w), float(dst.h)},
            {float(uv.x), float(uv.y), float(uv.w), float(uv.h)},
            {float(in.drawable_w), float(in.drawable_h)},
            uint32_t(blend == Opaque),
            0};
-    [encoder setRenderPipelineState:p.state[blend]];
-    [encoder setVertexBytes:&q length:sizeof q atIndex:0];
-    [encoder setFragmentBytes:&q length:sizeof q atIndex:0];
-    [encoder setFragmentTexture:tex atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    pass.device->set_pipeline(pass.cb, p);
+    pass.device->set_bytes(pass.cb, gpu::Stage::Vertex, 0, &q, sizeof q);
+    pass.device->set_bytes(pass.cb, gpu::Stage::Fragment, 0, &q, sizeof q);
+    pass.device->set_texture(pass.cb, gpu::Stage::Fragment, 0, tex);
+    pass.device->set_sampler(pass.cb, gpu::Stage::Fragment, 0, gpu::SamplerState{});
+    pass.device->draw(pass.cb, gpu::Primitive::TriangleStrip, 0, 4);
 }
-id<MTLTexture> upload(id<MTLDevice> device, const UiElement &e) {
+gpu::Texture upload(Pass &pass, const UiElement &e) {
     if (e.w <= 0 || e.h <= 0)
-        return nil;
+        return {};
     const size_t n = size_t(e.w) * size_t(e.h);
     if (n > std::numeric_limits<size_t>::max() / 4 || e.rgba.size() < n * 4 || e.mask.size() < n)
-        return nil;
+        return {};
     std::vector<uint8_t> pixels(e.rgba.begin(), e.rgba.begin() + n * 4);
     for (size_t i = 0; i < n; ++i)
         if (!e.mask[i])
             pixels[4 * i + 3] = 0;
-    auto desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                   width:e.w
-                                                                  height:e.h
-                                                               mipmapped:NO];
-    desc.storageMode = MTLStorageModeShared;
-    desc.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> tex = [device newTextureWithDescriptor:desc];
+    gpu::Texture tex = pass.device->create_texture(
+        {e.w, e.h, gpu::Format::RGBA8, gpu::UsageSampled | gpu::UsageCpu, 1});
     if (!tex) {
         fprintf(stderr, "compositor: UI texture allocation failed (%dx%d)\n", e.w, e.h);
-        return nil;
+        return {};
     }
-    [tex replaceRegion:MTLRegionMake2D(0, 0, e.w, e.h)
-           mipmapLevel:0
-             withBytes:pixels.data()
-           bytesPerRow:size_t(e.w) * 4];
+    pass.device->upload(tex, {0, 0, e.w, e.h}, pixels.data(), e.w * 4);
+    pass.transient.push_back(tex);
     return tex;
 }
 
@@ -319,8 +270,8 @@ bool compositor_resolve_scene(CompositorSceneHistory *history, CompositorInput *
     const bool changed = history->guest_w != in->guest_w || history->guest_h != in->guest_h ||
                          history->domain_w != domain || history->classic != in->classic;
     if (in->cls != HOST_SCREEN_GAMEPLAY || in->legacy || changed) {
-        history->world = nil;
-        history->overlay = nil;
+        history->world = {};
+        history->overlay = {};
         if (in->cls != HOST_SCREEN_GAMEPLAY || in->legacy)
             return false;
     }
@@ -341,38 +292,49 @@ bool compositor_resolve_scene(CompositorSceneHistory *history, CompositorInput *
     return true;
 }
 
-void compositor_compose(const CompositorInput *in, id<MTLTexture> out, id<MTLCommandBuffer> cb) {
-    if (!valid(in) || !out || !cb || out.width != NSUInteger(in->drawable_w) ||
-        out.height != NSUInteger(in->drawable_h) || out.sampleCount != 1)
+void compositor_compose(gpu::Device *device, const CompositorInput *in, gpu::Texture out,
+                        gpu::CommandBuffer cb) {
+    if (!device || !valid(in) || !out || !cb)
         return;
-    const auto p = pipelines(out.device, out.pixelFormat);
-    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = out;
-    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-    id<MTLRenderCommandEncoder> encoder = [cb renderCommandEncoderWithDescriptor:pass];
-    if (!encoder)
+    const gpu::TextureDesc desc = device->describe(out);
+    if (desc.width != in->drawable_w || desc.height != in->drawable_h)
         return;
-    encoder.label = @"Populous compositor";
+    Pass pass{device, cb, desc.format, {}};
+    gpu::RenderPass rp;
+    rp.color_count = 1;
+    rp.color[0].texture = out;
+    rp.color[0].load = gpu::Load::Clear;
+    rp.color[0].store = gpu::Store::Store;
+    rp.color[0].clear[0] = rp.color[0].clear[1] = rp.color[0].clear[2] = 0;
+    rp.color[0].clear[3] = 1;
+    device->begin_render_pass(cb, rp);
     const CompositeRect full_uv{0, 0, 1, 1};
+    auto finish = [&] {
+        device->end_render_pass(cb);
+        if (!pass.transient.empty()) {
+            auto transient = std::make_shared<std::vector<gpu::Texture>>(std::move(pass.transient));
+            device->on_complete(cb, [device, transient](gpu::CommandStatus, double) {
+                for (gpu::Texture t : *transient)
+                    device->destroy(t);
+            });
+        }
+    };
     if (in->legacy) {
-        draw(encoder, p, *in, in->legacy_frame, pixel_rect(whole_rect(*in, false)), full_uv,
-             Opaque);
+        draw(pass, *in, in->legacy_frame, pixel_rect(whole_rect(*in, false)), full_uv, Opaque);
         if (in->settings_page) {
             auto page = *in;
             page.guest_w = 640;
             page.guest_h = 480;
-            draw(encoder, p, page, in->settings_page, pixel_rect(whole_rect(page, true)), full_uv,
+            draw(pass, page, in->settings_page, pixel_rect(whole_rect(page, true)), full_uv,
                  Straight);
         }
-        [encoder endEncoding];
+        finish();
         return;
     }
     const auto elements = ordered(in->ui);
     const auto registry = registry_snapshot();
     if (in->cls == HOST_SCREEN_GAMEPLAY)
-        draw(encoder, p, *in, in->world,
+        draw(pass, *in, in->world,
              in->classic ? pixel_rect(whole_rect(*in, false))
                          : CompositeRect{0, 0, double(in->drawable_w), double(in->drawable_h)},
              full_uv, Opaque);
@@ -381,7 +343,7 @@ void compositor_compose(const CompositorInput *in, id<MTLTexture> out, id<MTLCom
         if (dst.x >= in->drawable_w || dst.y >= in->drawable_h || dst.x + dst.w <= 0 ||
             dst.y + dst.h <= 0)
             continue;
-        draw(encoder, p, *in, upload(out.device, *e), dst, full_uv, Straight);
+        draw(pass, *in, upload(pass, *e), dst, full_uv, Straight);
     }
     if (in->cls == HOST_SCREEN_GAMEPLAY && in->overlay) {
         for (size_t i = 0; i < elements.size(); ++i) {
@@ -403,7 +365,7 @@ void compositor_compose(const CompositorInput *in, id<MTLTexture> out, id<MTLCom
             const auto dst = element_rect(*in, e, registry);
             const double sx = dst.w / e.w, sy = dst.h / e.h;
             for (auto part : pieces) {
-                draw(encoder, p, *in, in->overlay,
+                draw(pass, *in, in->overlay,
                      {dst.x + (part.x - e.x) * sx, dst.y + (part.y - e.y) * sy, part.w * sx,
                       part.h * sy},
                      {part.x / in->guest_w, part.y / in->guest_h, part.w / in->guest_w,
@@ -416,10 +378,9 @@ void compositor_compose(const CompositorInput *in, id<MTLTexture> out, id<MTLCom
         auto page = *in;
         page.guest_w = 640;
         page.guest_h = 480;
-        draw(encoder, p, page, in->settings_page, pixel_rect(whole_rect(page, true)), full_uv,
-             Straight);
+        draw(pass, page, in->settings_page, pixel_rect(whole_rect(page, true)), full_uv, Straight);
     }
-    [encoder endEncoding];
+    finish();
 }
 
 void compositor_set_pointer_position(bool valid, int32_t x, int32_t y) {

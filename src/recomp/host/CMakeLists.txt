@@ -31,7 +31,8 @@ function(pop_host target)
   cmake_parse_arguments(ARG "GEN;UI_LAYER" "OPT" "SOURCES;FRAMEWORKS;LIBS" ${ARGN})
   add_executable(${target} ${ARG_SOURCES})
   target_link_libraries(${target} PRIVATE ${ARG_LIBS} ${ARG_FRAMEWORKS})
-  target_include_directories(${target} PRIVATE ${POP_ROOT} ${POP_ROOT}/src ${POP_ROOT}/src/recomp/runtime ${POP_ROOT}/third_party/lua)
+  target_include_directories(${target} PRIVATE ${POP_ROOT} ${POP_ROOT}/src ${POP_ROOT}/src/recomp/runtime
+                                               ${POP_ROOT}/src/recomp/host ${POP_ROOT}/third_party/lua)
   target_compile_options(${target} PRIVATE ${POP_WARN_HOST} ${POP_OBJC_ARC})
   if(ARG_UI_LAYER)
     target_compile_definitions(${target} PRIVATE POPM_PRESENT_HAS_UI_LAYER=1)
@@ -45,9 +46,10 @@ function(pop_host target)
   endif()
 endfunction()
 
-set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common)
-set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.mm ${HOST}/compositor.mm
-                        ${HOST}/ui_layer.mm ${HOST}/d3d_render.mm ${BACKENDS}/indexed_frame.cpp)
+set(POP_CORE_LIBS recomp_platform recomp_runtime recomp_snapshot recomp_dx recomp_mods lua host_common gpu_metal)
+set(POP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.cpp ${HOST}/compositor.cpp
+                        ${HOST}/ui_layer.cpp ${HOST}/performance_overlay.cpp ${HOST}/d3d_render.mm
+                        ${BACKENDS}/indexed_frame.cpp)
 
 if(TARGET recomp_gen)
   pop_host(pop_headless GEN
@@ -65,7 +67,7 @@ if(TARGET recomp_gen)
   add_dependencies(pop_smoke core_mods smoke_probe)
 
   pop_host(PopRecomp GEN UI_LAYER OPT 2
-    SOURCES ${HOST}/main.mm ${HOST}/present.mm ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES}
+    SOURCES ${HOST}/main.mm ${HOST}/present.cpp ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES}
             ${HOST}/input.mm ${HOST}/input_gate.cpp
             ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp ${HOST}/midi.mm
     LIBS ${POP_CORE_LIBS}
@@ -76,7 +78,7 @@ if(TARGET recomp_gen)
   pop_host(present_events_tests GEN UI_LAYER
     SOURCES ${POP_ROOT}/src/recomp/mods/tests/present_events_tests.mm
             ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.mm ${HOST}/input_gate.cpp
-    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua
+    LIBS recomp_platform recomp_runtime_testing recomp_snapshot recomp_dx recomp_mods_testing lua gpu_metal
     FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
   add_test(NAME present_events_tests COMMAND present_events_tests ${POP_ROOT} WORKING_DIRECTORY ${POP_ROOT})
   set_tests_properties(present_events_tests PROPERTIES LABELS mods)
@@ -88,29 +90,30 @@ endif()
 # report_lock.cpp is a source here rather than host_common, because the script
 # never linked boot.cpp into this suite.
 pop_host(host_tests UI_LAYER
-  SOURCES ${HOST}/tests/host_tests.mm ${HOST}/tests/test_frame_builder.mm
+  SOURCES ${HOST}/tests/host_tests.mm ${HOST}/tests/test_frame_builder.cpp
           ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp
-          ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/midi.mm ${HOST}/present.mm
+          ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/midi.mm ${HOST}/present.cpp
+          ${POP_ROOT}/src/recomp/mods/font6x8.cpp
           ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.mm ${HOST}/input_gate.cpp
           ${HOST}/audio.mm ${HOST}/audio_math.cpp ${HOST}/audio_capture.cpp
           ${POP_ROOT}/src/recomp/dx/com.cpp ${POP_ROOT}/src/recomp/dx/host_api.cpp
           ${POP_ROOT}/src/recomp/dx/display_stubs.cpp ${POP_ROOT}/src/recomp/dx/dinput.cpp
-  LIBS recomp_platform recomp_runtime
+  LIBS recomp_platform recomp_runtime gpu_metal gpu_fake
   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL} ${FW_AUDIO})
 pop_test_binary(host_tests)
 add_test(NAME host_tests COMMAND host_tests WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(host_tests PROPERTIES LABELS device)
 
-add_executable(compositor_tests ${HOST}/compositor.mm ${HOST}/tests/compositor_tests.mm)
-target_include_directories(compositor_tests PRIVATE ${POP_ROOT})
-target_compile_options(compositor_tests PRIVATE ${POP_WARN_WERROR} ${POP_OBJC_ARC})
-target_link_libraries(compositor_tests PRIVATE ${FW_FOUNDATION} "-framework Metal")
+add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
+target_include_directories(compositor_tests PRIVATE ${POP_ROOT} ${HOST})
+target_compile_options(compositor_tests PRIVATE ${POP_WARN_WERROR})
+target_link_libraries(compositor_tests PRIVATE gpu_metal)
 pop_optimize(compositor_tests 1)
 pop_test_binary(compositor_tests)
 add_test(NAME compositor_tests COMMAND compositor_tests WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(compositor_tests PROPERTIES LABELS gpu)
 
-add_executable(ui_layer_tests ${HOST}/ui_layer.mm ${HOST}/tests/test_frame_builder.mm ${HOST}/tests/ui_layer_tests.mm)
+add_executable(ui_layer_tests ${HOST}/ui_layer.cpp ${HOST}/tests/test_frame_builder.cpp ${HOST}/tests/ui_layer_tests.cpp)
 target_compile_options(ui_layer_tests PRIVATE ${POP_WARN_WERROR})
 pop_optimize(ui_layer_tests 1)
 pop_test_binary(ui_layer_tests)
