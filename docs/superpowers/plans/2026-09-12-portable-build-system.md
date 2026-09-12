@@ -3825,3 +3825,9 @@ its own shell scripts in a temporary worktree, on the same machine:
   `core.display`), "the run record names every loaded mod" and "every api call
   the documentation names exists" fail identically on the parent commit.
 - `test_translate.py -n 50`: 11/11 passed through `tools/build.py --target gen`.
+- `tools/test.py --native` (12/12), `--gameplay` and a 60-frame headless boot
+  pass. `--mods` failed one check of 144,228 because the new
+  `loader_plugin_extension_substitution` suite had been appended after the
+  empty-run suite; suites run in reverse definition order and the run-record
+  writer refuses an empty record once the process has recorded loaded mods.
+  Moved above it; `--mods` passes (2/2 CTest entries).
