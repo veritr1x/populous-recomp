@@ -1,0 +1,1575 @@
+#include "page_overlay.h"
+#include "../runtime/display_seam.h"
+// Worker-owned layer and sealed-frame mailbox. No NSView or NSWindow here.
+#include "present.h"
+#include "present_test.h"
+#include "performance_overlay.h"
+#include "d3d_render.h"
+#include "input_gate.h"
+#include "../dx/passes.h"
+#include "../dx/ddraw.h"
+#include "../runtime/mods_seam.h"
+#if defined(POPM_COMPOSITOR_TEST_UI_DOUBLE)
+#include "tests/compositor_ui_double.h"
+#elif __has_include("ui_layer.h")
+#include "ui_layer.h"
+#else
+#include "ui_frame_contract.h"
+#endif
+#import <CoreVideo/CoreVideo.h>
+// The replacement APIs suggested by the SDK require NSView/NSWindow ownership.
+// This service uses an active-displays link with a worker-owned layer; the
+// link only schedules work, never acknowledges a submitted drawable.
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <thread>
+
+// Minimal hosts can link the service without the app's present.mm. Unknown
+// mode keeps first-write acquisition on the service's last guest dimensions.
+// App and smoke hosts override this with their current display mode.
+extern "C" __attribute__((weak)) void host_present_mode(int *w, int *h, int *bpp) {
+    if (w)
+        *w = 0;
+    if (h)
+        *h = 0;
+    if (bpp)
+        *bpp = 0;
+}
+
+namespace {
+using Clock = std::chrono::steady_clock;
+template <class T> struct AtomicShared {
+    std::shared_ptr<T> value;
+    std::shared_ptr<T> load() const {
+        return std::atomic_load(&value);
+    }
+    void store(std::shared_ptr<T> p) {
+        std::atomic_store(&value, std::move(p));
+    }
+    std::shared_ptr<T> exchange(std::shared_ptr<T> p) {
+        return std::atomic_exchange(&value, std::move(p));
+    }
+    bool compare_exchange_weak(std::shared_ptr<T> &expected, std::shared_ptr<T> desired) {
+        return std::atomic_compare_exchange_weak(&value, &expected, std::move(desired));
+    }
+};
+struct Fence {
+    bool done = true, success = true;
+};
+struct Target {
+    HostSceneTarget scene;
+    id<MTLTexture> pixels = nil;
+    std::vector<uint8_t> test_pixels;
+};
+struct Frame {
+    uint64_t frame_id = 0, epoch = 0;
+    HostScreenClass cls = HOST_SCREEN_MENU;
+    bool had_draws = false, supplied = false, gpu = false, shown = false;
+    bool released = false, dropped = false, success = true, repeat = false, staged_pixels = false;
+    bool completion_fallback = false;
+    double presented_ts = 0, gpu_ts = 0, submitted_ts = 0, sealed_ts = 0, gpu_ms = 0;
+    double acknowledgement_deadline = 0;
+    unsigned pending_prefixes = 0;
+    std::shared_ptr<Target> target;
+    // Scene history can advance before this drawable is acknowledged.
+    std::shared_ptr<Target> scene_lease;
+    std::shared_ptr<Fence> prefix = std::make_shared<Fence>();
+    // Kept independently of the arena: no frame pointer crosses threads.
+    UiFrame ui{};
+    CompositorInput input{};
+    LayoutSnapshot layout;
+    HostFrameCapture capture;
+    id<MTLTexture> composed = nil;
+};
+struct Metric {
+    double origin = -1, latest = -1;
+    // 10 warm-up seconds followed by the binding 30 second observation.
+    std::array<uint64_t, 30> buckets{};
+    void tick(double ts) {
+        if (origin < 0)
+            origin = ts;
+        latest = std::max(latest, ts);
+    }
+    void complete(double ts) {
+        if (origin < 0 || ts < origin)
+            return;
+        const int bucket = int(std::floor(ts - origin + 1e-7));
+        if (bucket >= 10 && bucket < 40)
+            ++buckets[bucket - 10];
+    }
+    int read(double *minimum, double *elapsed) const {
+        const double span = origin < 0 ? 0 : latest - origin;
+        if (elapsed)
+            *elapsed = span;
+        if (minimum)
+            *minimum = span >= 40 ? *std::min_element(buckets.begin(), buckets.end()) : 0;
+        return span >= 40;
+    }
+};
+struct Message {
+    CAMetalLayer *layer = nil;
+    int w = 640, h = 480;
+    CGDirectDisplayID display = 0;
+    bool install = false;
+};
+struct Service : std::enable_shared_from_this<Service> {
+    HostCaptureFactory capture_factory = nullptr;
+    std::mutex mutex;
+    std::condition_variable wake, completed;
+    std::thread worker;
+    bool stop = false, fake = false, automatic = true, offscreen = false;
+    bool duration_pacing = true;
+    bool tick_pending = false, seal_pending = false;
+    double last_link_tick = -1, window_started = -1;
+    unsigned faults = 0, logged_faults = 0;
+    double frame_period = 1.0 / 60, fake_now = 0;
+    void fault(unsigned bit, const char *reason) { // mutex held
+        if (logged_faults & bit)
+            return;
+        logged_faults |= bit;
+        ++faults;
+        fprintf(
+            stderr,
+            "presenter: FAULT: %s (display=%u unique=%llu drops=%llu flight=%llu mailbox=%zu)\n",
+            reason, display, (unsigned long long)unique, (unsigned long long)drops,
+            (unsigned long long)(flights.empty() ? 0 : flights.front()->frame_id), mailbox.size());
+    }
+    bool window_ready() const { // mutex held; first submission needs no completion or link tick
+        return tick_pending || message.load() != nullptr ||
+               (flights.size() < flight_limit && seal_pending && !mailbox.empty());
+    }
+    void signal_tick(double ts) {
+        std::lock_guard lock(mutex);
+        last_link_tick = timestamp = ts;
+        tick_pending = true;
+        wake.notify_one();
+    }
+    double timestamp = 0;
+    // A queued drawable can take several refreshes to reach the display. The
+    // old two-refresh deadline retired real frames before their positive
+    // presented callbacks arrived, making the native FPS counter undercount.
+    double acknowledgement_grace() const {
+        return (flight_limit + 2) * frame_period;
+    }
+    AtomicShared<Message> message;
+    std::atomic<int> drawable_w{640}, drawable_h{480};
+    int guest_w = 640, guest_h = 480, requested_w = 0;
+    unsigned fail_allocations = 0;
+    CAMetalLayer *layer = nil;
+    CGDirectDisplayID display = 0;
+    CVDisplayLinkRef link = nullptr;
+    id<MTLCommandQueue> queue = nil;
+    // Up to three display submissions, two mailbox frames, a writer and history.
+    // Offscreen and the single-flight control still use only four targets.
+    std::array<std::shared_ptr<Target>, 7> targets;
+    size_t flight_limit = 1;
+    std::shared_ptr<Frame> writing;
+    std::deque<std::shared_ptr<Frame>> flights;
+    std::deque<std::shared_ptr<Frame>> mailbox, retiring;
+    std::shared_ptr<Target> history_lease;
+    CompositorSceneHistory history;
+    uint64_t history_epoch = 0;
+    id<MTLTexture> cached = nil;
+    UiFrame cached_ui{};
+#ifdef POPM_PRESENT_HAS_UI_LAYER
+    UiFrame previous_ui{}; // guest thread only, including sealed frames that were dropped
+    uint64_t previous_ui_epoch = 0;
+#endif
+    CompositorInput cached_input{};
+    std::shared_ptr<Target> cached_target;
+    uint8_t last_pixel = 0;
+    uint64_t unique = 0, repeats = 0, drops = 0, waits = 0, last_id = 0;
+    double cached_sealed_ts = 0;
+    uint64_t epoch = 0;
+    bool class_known = false;
+    HostScreenClass last_class = HOST_SCREEN_MENU;
+    Metric metric;
+    FramePacing pacing;
+    FILE *timings = nullptr;
+    unsigned timing_rows = 0;
+    FILE *ack_trace = nullptr;
+    ~Service() {
+        if (timings)
+            fclose(timings);
+        if (ack_trace)
+            fclose(ack_trace);
+    }
+    void trace_ack(const Frame &f, const char *event, double ts) { // mutex held
+        if (!ack_trace)
+            return;
+        const double now =
+            fake ? fake_now : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+        fprintf(ack_trace, "%llu,%d,%d,%s,%.9f,%.9f,%.9f,%.9f,%.9f,%d,%d,%d\n",
+                (unsigned long long)f.frame_id, int(f.cls), int(f.repeat), event, now, ts,
+                f.submitted_ts, f.gpu_ts, f.acknowledgement_deadline, int(f.shown),
+                int(f.completion_fallback), int(f.released));
+    }
+    PerformanceOverlay performance_overlay;
+    std::array<LayoutSnapshot, 3> layouts;
+    unsigned layout_slot = 0;
+    bool layout_valid = false;
+    std::set<uint64_t> test_released;
+    unsigned pending_commands = 0;
+
+    void release(const std::shared_ptr<Frame> &f) { // mutex held; never guest data access
+        if (f->released)
+            return;
+        f->released = true;
+        if (!f->repeat) {
+            if (fake)
+                test_released.insert(f->frame_id);
+            else
+                ddraw_present_release({f->frame_id});
+        }
+        // The target history lease is separate from the retired frame arena.
+        f->target.reset();
+        f->scene_lease.reset();
+        completed.notify_all();
+    }
+    // Retire completed submissions in order and release their retained frame resources.
+    // Late completion callbacks must never replace the cached image with an older frame.
+    void sweep() {
+        for (auto it = retiring.begin(); it != retiring.end();) {
+            if ((*it)->prefix->done && (*it)->pending_prefixes == 0 && (*it)->gpu) {
+                release(*it);
+                it = retiring.erase(it);
+            } else
+                ++it;
+        }
+        // Retire in submission order even if callbacks arrive out of order.
+        // An older acknowledgement must never replace a newer cached image.
+        while (!flights.empty() && flights.front()->gpu && flights.front()->shown &&
+               flights.front()->prefix->done && flights.front()->pending_prefixes == 0) {
+            auto f = flights.front();
+            if (f->success && f->prefix->success && !stop) {
+                if (!f->repeat)
+                    ++unique;
+                if (!offscreen && !f->completion_fallback)
+                    pacing.displayed(f->presented_ts, f->repeat, f->gpu_ms,
+                                     (f->presented_ts - f->sealed_ts) * 1000);
+                if (!f->repeat && !f->completion_fallback && f->cls == HOST_SCREEN_GAMEPLAY &&
+                    f->epoch == epoch)
+                    metric.complete(std::max(f->presented_ts, f->gpu_ts));
+                if (timings) {
+                    fprintf(timings, "%llu,%d,%d,%.9f,%.9f,%.9f,%.3f,%llu,%d,%d,%d\n",
+                            (unsigned long long)f->frame_id, int(f->cls), int(f->repeat),
+                            f->sealed_ts, f->submitted_ts, f->presented_ts, f->gpu_ms,
+                            (unsigned long long)drops, int(!offscreen && !f->completion_fallback),
+                            f->input.drawable_w, f->input.drawable_h);
+                    // Keep diagnostics live without a synchronous write on
+                    // every display callback while holding the queue mutex.
+                    // fclose flushes the remaining rows during shutdown.
+                    if (++timing_rows % 60 == 0)
+                        fflush(timings);
+                }
+                cached = f->composed;
+                last_id = f->frame_id;
+                cached_sealed_ts = f->sealed_ts;
+                cached_ui = f->ui;
+                cached_input = f->input;
+                cached_input.ui = &cached_ui;
+                if (!f->repeat)
+                    cached_target = f->input.legacy ? f->target : f->scene_lease;
+                if (fake && f->target && !f->target->test_pixels.empty())
+                    last_pixel = f->target->test_pixels[0];
+                layout_slot = (layout_slot + 1) % layouts.size();
+                layouts[layout_slot] = f->layout;
+                layout_valid = true;
+                host_gate_publish_layout(f->layout);
+                if (f->capture && f->composed) {
+                    HostCompletedComposite result;
+                    result.w = int(f->composed.width);
+                    result.h = int(f->composed.height);
+                    result.guest_w = f->input.guest_w;
+                    result.guest_h = f->input.guest_h;
+                    result.cls = f->cls;
+                    result.frame_id = f->frame_id;
+                    result.layout = f->layout;
+                    result.rgba.resize(size_t(result.w) * result.h * 4);
+                    [f->composed getBytes:result.rgba.data()
+                              bytesPerRow:size_t(result.w) * 4
+                               fromRegion:MTLRegionMake2D(0, 0, result.w, result.h)
+                              mipmapLevel:0];
+                    f->capture(result);
+                    f->capture = {};
+                }
+            }
+            release(f);
+            flights.pop_front();
+            wake.notify_one();
+        }
+    }
+    void drop(const std::shared_ptr<Frame> &f) {
+        ++drops;
+        f->dropped = true;
+        f->gpu = true;
+        retiring.push_back(f);
+        sweep();
+    }
+    void completion_fallback(const std::shared_ptr<Frame> &f, double ts) { // mutex held
+        if (!f || f->released || f->dropped || f->shown || !f->gpu || !f->success ||
+            ts < f->acknowledgement_deadline)
+            return;
+        fault(4,
+              "drawable acknowledgement exceeded queue grace; using command completion fallback");
+        f->shown = true;
+        f->completion_fallback = true;
+        f->presented_ts = f->gpu_ts;
+        trace_ack(*f, "timeout", ts);
+    }
+    void ack_command(const std::shared_ptr<Frame> &f, bool success, double ts) {
+        std::lock_guard lock(mutex);
+        if (f->released)
+            return;
+        f->gpu = true;
+        f->success = f->success && success;
+        f->gpu_ts = ts;
+        // Slow GPU work is not a lost display callback. Give the ready
+        // drawable two more refreshes without releasing its target early.
+        f->acknowledgement_deadline = std::max(f->acknowledgement_deadline, ts + 2 * frame_period);
+        trace_ack(*f, "gpu", ts);
+        if (offscreen || !success || stop) {
+            f->shown = true;
+            f->presented_ts = ts;
+        } else
+            completion_fallback(f, ts);
+        sweep();
+        completed.notify_all();
+        wake.notify_one();
+    }
+    void ack_presented(const std::shared_ptr<Frame> &f, double ts) {
+        std::lock_guard lock(mutex);
+        trace_ack(*f, "presented", ts);
+        if (!(ts > 0) && !fake)
+            return; // zero presentedTime is not presentation
+        if (f->released || f->dropped || f->shown)
+            return;
+        f->shown = true;
+        f->presented_ts = ts;
+        sweep();
+    }
+    // Shared by real Metal and the fake layer/command test. Register both
+    // acknowledgements before presentDrawable, and enqueue present before commit.
+    // Pass the shared pointer by value: Objective-C blocks must retain a value,
+    // not capture a reference to the submitting worker's stack variable.
+    void commit_present(std::shared_ptr<Frame> f, id<CAMetalDrawable> drawable,
+                        id<MTLCommandBuffer> cb) {
+        auto self = shared_from_this();
+        std::weak_ptr<Service> weak = self;
+        {
+            std::lock_guard lock(mutex);
+            ++pending_commands;
+            if (f->repeat)
+                ++repeats;
+        }
+        if (drawable)
+            [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+              const double ts = d.presentedTime;
+              if (auto service = weak.lock()) {
+                  if (ts > 0)
+                      service->ack_presented(f, ts);
+                  else {
+                      std::lock_guard lock(service->mutex);
+                      service->trace_ack(*f, "presented", ts);
+                  }
+              }
+            }];
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+          double ts;
+          {
+              std::lock_guard lock(self->mutex);
+              ts = self->fake ? self->fake_now
+                              : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+          }
+          {
+              std::lock_guard lock(self->mutex);
+              f->gpu_ms = self->fake ? 0 : std::max(0.0, (c.GPUEndTime - c.GPUStartTime) * 1000);
+          }
+          self->ack_command(f, c.status == MTLCommandBufferStatusCompleted, ts);
+          std::lock_guard lock(self->mutex);
+          --self->pending_commands;
+          self->completed.notify_all();
+        }];
+        if (drawable) {
+            // Keep each drawable for a refresh. Combined with queue-aware
+            // acknowledgement grace, this avoids retiring real displayed
+            // frames on timeout without slowing the pipeline to one flight.
+            if (duration_pacing) {
+                double period;
+                {
+                    std::lock_guard lock(mutex);
+                    period = frame_period;
+                }
+                [cb presentDrawable:drawable afterMinimumDuration:period];
+            } else
+                [cb presentDrawable:drawable];
+        }
+        [cb commit];
+    }
+    void seal(uint64_t id, HostScreenClass cls, bool had_draws, bool prefix_pending = false) {
+        std::lock_guard lock(mutex);
+        if (stop || !writing)
+            return;
+        auto f = std::move(writing);
+        f->frame_id = id;
+        f->cls = cls;
+        f->had_draws = had_draws;
+        f->sealed_ts = fake ? fake_now : double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+        if (class_known && last_class != cls) {
+            ++epoch;
+            metric = {};
+        }
+        class_known = true;
+        last_class = cls;
+        f->epoch = epoch;
+        // This frame was produced with the old mode. Apply live rendering
+        // changes only after taking its snapshot, for the next producer frame.
+        f->input.classic = mods_display_classic() != 0;
+        mods_display_transition(epoch, cls);
+        // CPU-only Classic classes use the entire guest surface, including
+        // menu backgrounds that Enhanced extracts as individual UI records.
+        if (f->input.classic && cls != HOST_SCREEN_GAMEPLAY && f->staged_pixels) {
+            f->input.legacy = true;
+            f->input.legacy_frame = f->target->pixels;
+            f->input.guest_w = guest_w;
+            f->input.guest_h = guest_h;
+            f->input.world = nil;
+            f->input.overlay = nil;
+            f->supplied = true;
+        }
+        f->input.scale_override = mods_display_scale();
+        if (prefix_pending)
+            f->prefix->done = false;
+        if (f->dropped) {
+            f->gpu = true;
+            retiring.push_back(f);
+            sweep();
+            return;
+        }
+        f->input.cls = cls;
+        f->input.drawable_w = drawable_w;
+        f->input.drawable_h = drawable_h;
+        if (f->input.world && f->input.guest_w > 0 && f->input.guest_h > 0) {
+            const int domain =
+                f->input.scene.domain_w > 0 ? f->input.scene.domain_w : f->input.guest_w;
+            f->input.scene = {float(drawable_w) / domain, float(drawable_h) / f->input.guest_h, 0,
+                              0, domain};
+        }
+        if (!f->supplied) {
+            // Explicit CPU-staged/legacy compatibility input. Incremental
+            // gameplay and the UI extractor supply their layered inputs.
+            f->input.legacy = true;
+            f->input.legacy_frame = f->target->pixels;
+            f->input.guest_w = guest_w;
+            f->input.guest_h = guest_h;
+        }
+        f->input.ui = &f->ui;
+        if (!f->target->scene.w || (!fake && !f->supplied && !f->target->pixels)) {
+            drop(f);
+            return;
+        }
+        if (mailbox.size() == 2) {
+            auto old = std::find_if(mailbox.begin(), mailbox.end(),
+                                    [](const auto &v) { return !v->capture; });
+            if (old == mailbox.end()) {
+                drop(f);
+                return;
+            }
+            auto discarded = *old;
+            mailbox.erase(old);
+            drop(discarded);
+        }
+        mailbox.push_back(std::move(f));
+        seal_pending = true;
+        wake.notify_one();
+    }
+    id<MTLTexture> texture(int w, int h, MTLPixelFormat format = MTLPixelFormatRGBA8Unorm) {
+        if (w <= 0 || h <= 0)
+            return nil;
+        auto d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                    width:w
+                                                                   height:h
+                                                                mipmapped:NO];
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        d.storageMode = MTLStorageModeShared;
+        return [queue.device newTextureWithDescriptor:d];
+    }
+    // Acquire a writable scene target under the queue mutex using the selected guest mode
+    // and requested render size. Pool exhaustion drops this frame until seal instead of retrying each draw.
+    HostSceneTarget acquire(int gw, int gh, int rw, int rh) {
+        std::unique_lock lock(mutex);
+        if (stop || gw <= 0 || gh <= 0)
+            return {};
+        if (writing)
+            return writing->target ? writing->target->scene : HostSceneTarget{};
+        if (rw <= 0)
+            rw = drawable_w;
+        if (rh <= 0)
+            rh = drawable_h;
+        if (mods_display_classic()) {
+            rw = gw;
+            rh = gh;
+        }
+        guest_w = gw;
+        guest_h = gh;
+        requested_w = rw;
+        auto free_slot = [&]() -> int {
+            for (size_t i = 0; i < (flight_limit == 1 ? 4 : flight_limit + 4); ++i)
+                if (!targets[i] || targets[i].use_count() == 1)
+                    return int(i);
+            return -1;
+        };
+        int slot = free_slot();
+        if (slot < 0) {
+            // Latch the drop until seal: later draws/CPU staging in this same
+            // guest frame must neither retry acquisition nor count it twice.
+            ++drops;
+            fault(1, "target pool exhausted; guest frame dropped, check worker/GPU/presentation "
+                     "progress");
+            writing = std::make_shared<Frame>();
+            writing->dropped = true;
+            return {};
+        }
+        int w = std::max(gw, rw), h = std::max(gh, rh);
+        auto target = targets[slot];
+        if (!target)
+            target = std::make_shared<Target>();
+        if (target->scene.w != w || target->scene.h != h ||
+            (!fake && (target->scene.overlay.width != NSUInteger(gw) ||
+                       target->scene.overlay.height != NSUInteger(gh)))) {
+            while (true) {
+                bool failed = fail_allocations > 0;
+                if (failed)
+                    --fail_allocations;
+                id<MTLTexture> world = nil, overlay = nil;
+                if (!fake && !failed) {
+                    world = texture(w, h, MTLPixelFormatBGRA8Unorm);
+                    overlay = texture(gw, gh, MTLPixelFormatBGRA8Unorm);
+                    failed = !world || !overlay;
+                }
+                if (!failed) {
+                    if (fake) {
+                        world = (id<MTLTexture>)[NSObject new];
+                        overlay = (id<MTLTexture>)[NSObject new];
+                    }
+                    target->scene = {world, overlay, w, h};
+                    break;
+                }
+                if (w == gw && h == gh) {
+                    fprintf(stderr,
+                            "presenter: allocation failed at guest size %dx%d; frame target "
+                            "unavailable\n",
+                            gw, gh);
+                    target->scene = {};
+                    break; // reserve a failed writer too; its GPU prefixes still retire safely
+                }
+                w = std::max(gw, w / 2);
+                h = std::max(gh, h / 2);
+                fprintf(
+                    stderr,
+                    "presenter: scene allocation failed; retry %dx%d (requested %dx%d unchanged)\n",
+                    w, h, rw, rh);
+            }
+        }
+        targets[slot] = target;
+        writing = std::make_shared<Frame>();
+        writing->target = target;
+        return target->scene;
+    }
+    void publish_layout(Frame &f) {
+        f.layout = compositor_layout_snapshot(&f.input);
+        f.layout.frame_id = f.frame_id;
+    }
+
+    void tick(double ts) {
+        if (!std::isfinite(ts) || ts < 0)
+            return;
+        if (auto m = message.exchange(nullptr)) {
+            if (m->install) {
+                layer = m->layer;
+                std::lock_guard lock(mutex);
+                if (!flights.empty()) {
+                    // A drawable on the detached layer may never present. Cancel
+                    // that presentation, retaining its slot until its GPU work ends.
+                    for (auto &f : flights) {
+                        ++drops;
+                        f->dropped = true;
+                        retiring.push_back(f);
+                    }
+                    flights.clear();
+                    sweep();
+                }
+            }
+            if (!fake && layer)
+                layer.drawableSize = CGSizeMake(m->w, m->h);
+            // The link is created over all active displays (start_link), so a
+            // display change only updates the id the acknowledgement is keyed on.
+            if (m->display != display) {
+                std::lock_guard lock(mutex);
+                display = m->display;
+            }
+        }
+        std::shared_ptr<Frame> f;
+        {
+            std::lock_guard lock(mutex);
+            if (stop)
+                return;
+            if (fake)
+                fake_now = ts;
+            if (class_known && last_class == HOST_SCREEN_GAMEPLAY)
+                metric.tick(ts);
+            sweep();
+            if (!offscreen) {
+                if (window_started < 0)
+                    window_started = ts;
+                if ((!flights.empty() || !mailbox.empty()) &&
+                    ts - std::max(window_started, last_link_tick) >= 1.0)
+                    fault(2, "display link is not firing; worker is using timed fallback");
+                for (auto &pending : flights) {
+                    completion_fallback(pending, ts);
+                    if (!pending->gpu && ts - pending->submitted_ts >= 1.0)
+                        fault(16, "GPU completion timed out; retaining target until completion");
+                }
+                sweep();
+            }
+            if (flights.size() >= flight_limit)
+                return;
+            if (mailbox.empty()) {
+                // cached is the last acknowledged image. Repeating it behind
+                // a newer queued image would visibly move the game backwards.
+                if (!flights.empty())
+                    return;
+                if (!last_id)
+                    return;
+                f = std::make_shared<Frame>();
+                f->repeat = true;
+                f->frame_id = last_id;
+                f->sealed_ts = cached_sealed_ts;
+                f->cls = cached_input.cls;
+                f->epoch = epoch;
+                f->input = cached_input;
+                f->ui = cached_ui;
+                f->input.ui = &f->ui;
+                f->target = cached_target;
+                // Retain the original guest domain and source texture. The
+                // cached composite is already drawable-sized; declaring that
+                // size to be guest coordinates corrupts picking on repeats.
+                // cached_target keeps the original texture out of the pool.
+                if (cached_input.drawable_w > 0 && cached_input.drawable_h > 0) {
+                    float sx = float(drawable_w) / cached_input.drawable_w;
+                    float sy = float(drawable_h) / cached_input.drawable_h;
+                    f->input.scene.scale_x *= sx;
+                    f->input.scene.offset_x *= sx;
+                    f->input.scene.scale_y *= sy;
+                    f->input.scene.offset_y *= sy;
+                }
+            } else {
+                auto requested = std::find_if(mailbox.begin(), mailbox.end(),
+                                              [](const auto &v) { return bool(v->capture); });
+                if (requested != mailbox.end()) {
+                    f = *requested;
+                    mailbox.erase(requested);
+                } else {
+                    f = mailbox.back();
+                    mailbox.pop_back();
+                }
+                for (auto it = mailbox.begin(); it != mailbox.end();) {
+                    if ((*it)->capture) {
+                        ++it;
+                        continue;
+                    }
+                    auto old = *it;
+                    it = mailbox.erase(it);
+                    drop(old);
+                }
+            }
+            flights.push_back(f);
+            seal_pending = !mailbox.empty();
+            f->submitted_ts = ts;
+            f->acknowledgement_deadline = ts + acknowledgement_grace();
+            f->input.drawable_w = drawable_w;
+            f->input.drawable_h = drawable_h;
+        }
+        auto prepare = [&] {
+            std::lock_guard lock(mutex);
+            if (!f->repeat) {
+                if (history_epoch != f->epoch) {
+                    history.world = nil;
+                    history.overlay = nil;
+                    history_lease.reset();
+                    history_epoch = f->epoch;
+                }
+                bool reused = compositor_resolve_scene(&history, &f->input, f->had_draws);
+                if (!reused)
+                    history_lease = history.world ? f->target : nullptr;
+                f->scene_lease = history_lease;
+            }
+            publish_layout(*f);
+        };
+        if (fake) {
+            prepare();
+            {
+                std::lock_guard lock(mutex);
+                if (f->repeat)
+                    ++repeats;
+            }
+            if (automatic) {
+                ack_command(f, true, ts);
+                if (!offscreen)
+                    ack_presented(f, ts);
+            }
+            return;
+        }
+        @autoreleasepool {
+            // The worker is the only caller of nextDrawable and presentDrawable.
+            id<CAMetalDrawable> drawable = offscreen ? nil : [layer nextDrawable];
+            if (!offscreen && !drawable) {
+                if (f) {
+                    std::lock_guard lock(mutex);
+                    flights.erase(std::find(flights.begin(), flights.end(), f));
+                    fault(8, "layer returned no drawable; retrying newest frame");
+                    // Keep only a newest unpresented frame. A repeat has no arena.
+                    if (f->repeat)
+                        release(f);
+                    else if (!mailbox.empty())
+                        drop(f);
+                    else
+                        mailbox.push_front(f);
+                }
+                return;
+            }
+            int w = drawable_w, h = drawable_h;
+            bool reuse_composition = f->repeat && cached && cached.width == NSUInteger(w) &&
+                                     cached.height == NSUInteger(h);
+            id<MTLTexture> out =
+                reuse_composition
+                    ? cached
+                    : texture(w, h,
+                              offscreen ? MTLPixelFormatRGBA8Unorm : drawable.texture.pixelFormat);
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            if (!cb || !out) {
+                if (f) {
+                    std::lock_guard lock(mutex);
+                    flights.erase(std::find(flights.begin(), flights.end(), f));
+                    drop(f);
+                }
+                return;
+            }
+            auto start = Clock::now();
+            prepare();
+            if (!reuse_composition)
+                compositor_compose(&f->input, out, cb);
+            f->composed = out;
+            if (drawable) {
+                if (out.width == drawable.texture.width && out.height == drawable.texture.height &&
+                    out.pixelFormat == drawable.texture.pixelFormat) {
+                    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+                    [blit copyFromTexture:out
+                              sourceSlice:0
+                              sourceLevel:0
+                             sourceOrigin:MTLOriginMake(0, 0, 0)
+                               sourceSize:MTLSizeMake(out.width, out.height, 1)
+                                toTexture:drawable.texture
+                         destinationSlice:0
+                         destinationLevel:0
+                        destinationOrigin:MTLOriginMake(0, 0, 0)];
+                    [blit endEncoding];
+                } else {
+                    CompositorInput in{};
+                    in.legacy = true;
+                    in.legacy_frame = out;
+                    in.guest_w = int(out.width);
+                    in.guest_h = int(out.height);
+                    in.drawable_w = int(drawable.texture.width);
+                    in.drawable_h = int(drawable.texture.height);
+                    compositor_compose(&in, drawable.texture, cb);
+                }
+            }
+            if (drawable) {
+                FramePacingSnapshot snapshot;
+                {
+                    std::lock_guard lock(mutex);
+                    snapshot = pacing.snapshot(ts, drops);
+                }
+                performance_overlay.draw(drawable.texture, cb, snapshot, ts, mods_display_overlay(),
+                                         mods_display_fps());
+            }
+            host_stats_note_phase(
+                HOST_PHASE_COMPOSITE,
+                std::chrono::duration<double, std::milli>(Clock::now() - start).count());
+            commit_present(f, drawable, cb);
+        }
+    }
+    static CVReturn link_tick(CVDisplayLinkRef, const CVTimeStamp *, const CVTimeStamp *output,
+                              CVOptionFlags, CVOptionFlags *, void *context) {
+        auto *s = static_cast<Service *>(context);
+        if (output->videoRefreshPeriod > 0 && output->videoTimeScale > 0) {
+            std::lock_guard lock(s->mutex);
+            s->frame_period = double(output->videoRefreshPeriod) / output->videoTimeScale;
+        }
+        double ts = double(output->hostTime) / CVGetHostClockFrequency();
+        s->signal_tick(ts);
+        return kCVReturnSuccess;
+    }
+    void start_link() { // main thread, after the host has shown the window
+        NSCAssert([NSThread isMainThread], @"display link starts on main thread");
+        CVReturn status = CVDisplayLinkCreateWithActiveCGDisplays(&link);
+        if (status == kCVReturnSuccess)
+            status = CVDisplayLinkSetOutputCallback(link, link_tick, this);
+        if (status == kCVReturnSuccess) {
+            CVTime period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link);
+            if (period.timeValue > 0 && period.timeScale > 0)
+                frame_period = double(period.timeValue) / period.timeScale;
+        }
+        if (status == kCVReturnSuccess)
+            status = CVDisplayLinkStart(link);
+        if (status != kCVReturnSuccess || !link || !CVDisplayLinkIsRunning(link)) {
+            {
+                std::lock_guard lock(mutex);
+                fault(32, "display link startup failed; timed fallback enabled");
+            }
+            if (link) {
+                CVDisplayLinkStop(link);
+                CVDisplayLinkRelease(link);
+                link = nullptr;
+            }
+        }
+    }
+    void run() {
+        @autoreleasepool {
+            auto synthetic_start = Clock::now();
+            double synthetic_origin = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+            uint64_t synthetic_index = 0;
+            while (true) {
+                double ts;
+                {
+                    std::unique_lock lock(mutex);
+                    if (offscreen) {
+                        // A synthetic link, tied to monotonic host time and independent
+                        // of the pinned simulation clock. The guest never waits here.
+                        auto elapsed =
+                            std::chrono::duration<double>(Clock::now() - synthetic_start).count();
+                        synthetic_index =
+                            std::max(synthetic_index + 1, uint64_t(elapsed * 120) + 1);
+                        auto deadline = synthetic_start +
+                                        std::chrono::duration_cast<Clock::duration>(
+                                            std::chrono::duration<double>(synthetic_index / 120.0));
+                        wake.wait_until(lock, deadline, [&] { return stop; });
+                        ts = synthetic_origin + synthetic_index / 120.0;
+                    } else {
+                        // Seal is a bootstrap event, not an acknowledgement. A
+                        // bounded wait also services a stopped link and checks
+                        // lost presented callbacks without blocking the guest.
+                        double now = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+                        double delay = 0.016;
+                        for (auto &pending : flights)
+                            if (!pending->shown &&
+                                (pending->gpu || now < pending->acknowledgement_deadline))
+                                delay = std::max(
+                                    0.0, std::min(delay, pending->acknowledgement_deadline - now));
+                        // Recompute after every completion notification, even
+                        // without a display-link callback or a new guest seal.
+                        if (!window_ready())
+                            wake.wait_for(lock, std::chrono::duration<double>(delay));
+                        ts = double(CVGetCurrentHostTime()) / CVGetHostClockFrequency();
+                        tick_pending = false;
+                    }
+                    if (stop)
+                        break;
+                }
+                tick(ts);
+            }
+            if (link) {
+                CVDisplayLinkStop(link);
+                CVDisplayLinkRelease(link);
+                link = nullptr;
+            }
+        }
+    }
+};
+AtomicShared<Service> active;
+id<MTLCommandQueue> shared_queue = nil;
+
+std::shared_ptr<Service> begin(bool fake, bool automatic, bool offscreen,
+                               id<MTLCommandQueue> queue) {
+    host_present_stop();
+    auto s = std::make_shared<Service>();
+    s->fake = fake;
+    s->automatic = automatic;
+    s->offscreen = offscreen;
+    s->queue = queue;
+    if (const char *mode = getenv("POP_HOST_PRESENT_PACING"))
+        s->duration_pacing = strcmp(mode, "immediate") != 0;
+    if (!fake)
+        if (const char *path = getenv("POP_PRESENT_ACK_TRACE")) {
+            s->ack_trace = fopen(path, "w");
+            if (s->ack_trace)
+                fprintf(s->ack_trace, "frame_id,screen_class,repeat,event,observed_s,event_s,"
+                                      "submitted_s,gpu_s,deadline_s,shown,fallback,released\n");
+            else
+                fprintf(stderr, "presenter: cannot open acknowledgement trace %s\n", path);
+        }
+    if (!fake)
+        if (const char *path = getenv("POP_FRAME_TIMINGS")) {
+            s->timings = fopen(path, "w");
+            if (s->timings) {
+                setvbuf(s->timings, nullptr, _IOFBF, 65536);
+                fprintf(s->timings, "frame_id,screen_class,repeat,sealed_s,submitted_s,presented_s,"
+                                    "gpu_ms,drops,display_ack,drawable_w,drawable_h\n");
+                fflush(s->timings);
+            } else
+                fprintf(stderr, "presenter: cannot open frame timings %s\n", path);
+        }
+    active.store(s);
+    if (!fake)
+        ddraw_set_present_callbacks(host_present_first_write, host_frame_seal);
+    return s;
+}
+void test_ack(uint64_t id, int kind, double ts) {
+    auto s = active.load();
+    if (!s)
+        return;
+    std::shared_ptr<Frame> f;
+    {
+        std::lock_guard lock(s->mutex);
+        if (kind == 2) {
+            for (auto &a : s->retiring)
+                if (a->frame_id == id)
+                    a->prefix->done = true;
+            for (auto &a : s->mailbox)
+                if (a->frame_id == id)
+                    a->prefix->done = true;
+            for (auto &a : s->flights)
+                if (a->frame_id == id)
+                    a->prefix->done = true;
+            s->sweep();
+            return;
+        }
+        for (auto &candidate : s->flights)
+            if (candidate->frame_id == id) {
+                f = candidate;
+                break;
+            }
+        if (!f)
+            for (auto &candidate : s->retiring)
+                if (candidate->frame_id == id) {
+                    f = candidate;
+                    break;
+                }
+    }
+    if (!f)
+        return;
+    if (kind == 0)
+        s->ack_command(f, true, ts);
+    else
+        s->ack_presented(f, ts);
+}
+} // namespace
+
+void host_present_set_shared_queue(id<MTLCommandQueue> queue) {
+    shared_queue = queue;
+}
+id<MTLCommandQueue> host_present_shared_queue() {
+    return shared_queue;
+}
+void host_present_start(CAMetalLayer *layer, CGDirectDisplayID display) {
+    NSCAssert([NSThread isMainThread], @"layer installation starts on main thread");
+    auto s = begin(false, true, false, shared_queue ?: [layer.device newCommandQueue]);
+    // Display acknowledgements can arrive three refreshes after submission.
+    // Match the layer's three drawables so that delay does not cap a 120 Hz
+    // producer near 80 FPS. Keep smaller queues available for comparisons.
+    s->flight_limit = 3;
+    if (const char *value = getenv("POP_HOST_PRESENT_FRAMES")) {
+        if (!strcmp(value, "1"))
+            s->flight_limit = 1;
+        else if (!strcmp(value, "2"))
+            s->flight_limit = 2;
+    }
+    s->layer = layer;
+    s->display = display;
+    s->drawable_w = int(layer.drawableSize.width);
+    s->drawable_h = int(layer.drawableSize.height);
+    fprintf(stderr, "presenter: %dx%d drawable, at most %zu display submissions in flight\n",
+            int(s->drawable_w), int(s->drawable_h), s->flight_limit);
+    NSCAssert(layer && layer.device == s->queue.device && s->drawable_w > 0 && s->drawable_h > 0,
+              @"presenter requires an attached, sized layer on the renderer device");
+    s->start_link();
+    s->worker = std::thread([s] { s->run(); });
+}
+void host_present_start_offscreen(id<MTLCommandQueue> queue, int w, int h) {
+    auto s = begin(false, true, true, queue);
+    s->drawable_w = w;
+    s->drawable_h = h;
+    s->worker = std::thread([s] { s->run(); });
+}
+void host_present_resize(int w, int h, CGDirectDisplayID display) {
+    auto s = active.load();
+    if (!s || w <= 0 || h <= 0)
+        return;
+    s->drawable_w = w;
+    s->drawable_h = h;
+    host_gate_publish_drawable_size(w, h);
+    auto m = std::make_shared<Message>();
+    m->w = w;
+    m->h = h;
+    m->display = display;
+    // Preserve an undelivered migration when a resize follows it in the same pump.
+    auto old = s->message.load();
+    do {
+        m->install = old && old->install;
+        m->layer = m->install ? old->layer : nil;
+    } while (!s->message.compare_exchange_weak(old, m));
+    s->wake.notify_one();
+}
+void host_present_install_layer(CAMetalLayer *layer, int w, int h, CGDirectDisplayID display) {
+    NSCAssert([NSThread isMainThread], @"layer installation belongs to main thread");
+    auto s = active.load();
+    if (!s)
+        return;
+    s->drawable_w = w;
+    s->drawable_h = h;
+    host_gate_publish_drawable_size(w, h);
+    auto m = std::make_shared<Message>();
+    m->layer = layer;
+    m->w = w;
+    m->h = h;
+    m->display = display;
+    m->install = true;
+    s->message.store(m);
+    s->wake.notify_one();
+}
+extern "C" void host_present_stop() {
+    auto s = active.load();
+    if (!s)
+        return;
+    {
+        std::lock_guard lock(s->mutex);
+        s->stop = true;
+        s->wake.notify_all();
+        s->completed.notify_all();
+    }
+    if (s->worker.joinable())
+        s->worker.join();
+    {
+        std::unique_lock lock(s->mutex);
+        // Cancellation does not invent a presentedTime. On shutdown GPU completion
+        // suffices for safe retirement, and cancelled frames never count unique.
+        for (auto &f : s->flights) {
+            f->shown = true;
+            if (s->fake) {
+                f->gpu = true;
+                f->prefix->done = true;
+            }
+        }
+        for (auto &f : s->mailbox) {
+            f->gpu = true;
+            s->retiring.push_back(f);
+        }
+        s->mailbox.clear();
+        if (s->fake)
+            for (auto &f : s->retiring)
+                f->prefix->done = true;
+        s->sweep();
+        s->completed.wait(lock, [&] {
+            s->sweep();
+            return s->flights.empty() && s->retiring.empty() && s->pending_commands == 0;
+        });
+        s->writing.reset();
+        s->history_lease.reset();
+        s->cached_target.reset();
+        s->history.world = nil;
+        s->history.overlay = nil;
+        s->cached = nil;
+        s->cached_input = {};
+        s->cached_ui = {};
+        s->targets = {};
+    }
+    if (!s->fake) {
+        ddraw_set_present_callbacks(nullptr, nullptr);
+        ddraw_drain_present_releases();
+    }
+    // Retain counters for the final report. begin() replaces this stopped service.
+}
+void host_present_drop_current() {
+    auto s = active.load();
+    if (!s)
+        return;
+    std::lock_guard lock(s->mutex);
+    if (s->writing && !s->writing->dropped) {
+        s->writing->dropped = true;
+        ++s->drops;
+    }
+}
+bool host_present_running() {
+    auto s = active.load();
+    if (!s)
+        return false;
+    std::lock_guard lock(s->mutex);
+    return !s->stop && !s->fake;
+}
+std::shared_ptr<void> host_present_target_lease(id<MTLTexture> world) {
+    auto s = active.load();
+    if (!s || !world)
+        return {};
+    std::lock_guard lock(s->mutex);
+    for (auto &t : s->targets)
+        if (t && t->scene.world == world)
+            return t;
+    return {};
+}
+HostSceneTarget host_present_acquire_target(int gw, int gh, int w, int h) {
+    auto s = active.load();
+    return s ? s->acquire(gw, gh, w, h) : HostSceneTarget{};
+}
+extern "C" void host_present_first_write() {
+    auto s = active.load();
+    if (!s)
+        return;
+    host_d3d_collect_present_targets();
+    int w = 0, h = 0, bpp = 0;
+    host_present_mode(&w, &h, &bpp);
+    s->acquire(w > 0 ? w : s->guest_w, h > 0 ? h : s->guest_h, s->drawable_w, s->drawable_h);
+}
+extern "C" int host_present_needs_legacy_pixels() {
+#ifdef POPM_PRESENT_HAS_UI_LAYER
+    auto s = active.load();
+    if (!s || mods_display_classic())
+        return 1;
+    {
+        std::lock_guard lock(s->mutex);
+        if (s->stop || !s->writing)
+            return 1;
+    }
+    const auto frame = host_frame_current();
+    if (frame.id && host_frame_class(frame) == HOST_SCREEN_GAMEPLAY && !host_frame_legacy(frame))
+        return 0;
+#endif
+    return 1;
+}
+extern "C" void host_present_stage_rgba(const uint8_t *rgba, int w, int h) {
+    auto s = active.load();
+    if (!s || !rgba || w <= 0 || h <= 0)
+        return;
+    s->acquire(w, h, s->drawable_w, s->drawable_h);
+    std::lock_guard lock(s->mutex);
+    if (s->stop || !s->writing || !s->writing->target)
+        return;
+    s->guest_w = w;
+    s->guest_h = h;
+    s->writing->staged_pixels = true;
+    auto &t = *s->writing->target;
+    if (s->fake)
+        t.test_pixels.assign(rgba, rgba + size_t(w) * h * 4);
+    else {
+        if (!t.pixels || t.pixels.pixelFormat != MTLPixelFormatRGBA8Unorm ||
+            t.pixels.width != NSUInteger(w) || t.pixels.height != NSUInteger(h))
+            t.pixels = s->texture(w, h);
+        [t.pixels replaceRegion:MTLRegionMake2D(0, 0, w, h)
+                    mipmapLevel:0
+                      withBytes:rgba
+                    bytesPerRow:size_t(w) * 4];
+    }
+}
+void host_present_set_input(const CompositorInput *input) {
+    auto s = active.load();
+    if (!s || !input)
+        return;
+    std::lock_guard lock(s->mutex);
+    if (!s->writing || !s->writing->target)
+        return;
+    auto &f = *s->writing;
+    if ((input->world && input->world != f.target->scene.world) ||
+        (input->overlay && input->overlay != f.target->scene.overlay)) {
+        fprintf(stderr,
+                "presenter: compositor input does not belong to the acquired scene target\n");
+        return;
+    }
+    f.input = *input;
+    f.supplied = true;
+    if (input->ui)
+        f.ui = *input->ui;
+    else
+        f.ui = {};
+    f.input.ui = &f.ui;
+}
+void host_present_track_command(id<MTLCommandBuffer> cb) {
+    auto s = active.load();
+    if (!s || !cb)
+        return;
+    auto fence = std::make_shared<Fence>();
+    fence->done = false;
+    std::shared_ptr<Frame> frame;
+    {
+        std::lock_guard lock(s->mutex);
+        if (!s->writing)
+            return;
+        frame = s->writing;
+        frame->prefix = fence;
+        ++frame->pending_prefixes;
+        ++s->pending_commands;
+    }
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+      std::lock_guard lock(s->mutex);
+      fence->done = true;
+      fence->success = c.status == MTLCommandBufferStatusCompleted;
+      frame->success = frame->success && fence->success;
+      --frame->pending_prefixes;
+      --s->pending_commands;
+      s->sweep();
+      s->completed.notify_all();
+    }];
+}
+// Seal guest-owned frame state and extract UI before publishing to the presentation worker.
+// Only immutable snapshots cross that boundary; guest surface leases are resolved here.
+extern "C" void host_frame_seal() {
+    auto s = active.load();
+    if (!s)
+        return;
+    auto f = host_frame_current();
+    if (!f.id)
+        return;
+    if (s->offscreen && s->capture_factory) {
+        bool eligible = false;
+        {
+            std::lock_guard lock(s->mutex);
+            eligible = s->writing && !s->writing->dropped && s->writing->target &&
+                       s->writing->target->scene.w > 0;
+        }
+        // Pool exhaustion is not a completed present. Leave the request armed
+        // for the next eligible frame; the runner still rejects a late turn.
+        if (eligible) {
+            auto capture = s->capture_factory(host_frame_class(f));
+            std::lock_guard lock(s->mutex);
+            s->writing->capture = std::move(capture);
+        }
+    }
+    host_d3d_seal_commands();
+#ifdef POPM_PRESENT_HAS_UI_LAYER
+    // Extraction reads shim leases on the guest thread before publication.
+    // Only immutable value types pass to the worker.
+    if (s->previous_ui_epoch != s->epoch ||
+        (s->class_known && s->last_class != host_frame_class(f)))
+        s->previous_ui = {};
+    UiFrame ui{};
+    ui_layer_extract(f, s->guest_w, s->guest_h, &s->previous_ui, &ui);
+    s->previous_ui = ui;
+    {
+        std::lock_guard lock(s->mutex);
+        if (s->writing && s->writing->target) {
+            s->writing->ui = std::move(ui);
+            if (host_frame_class(f) != HOST_SCREEN_GAMEPLAY) {
+                auto &writer = *s->writing;
+                // Blit/Flip-only front-end presents already supplied a complete
+                // image. Sparse UI records need not cover unchanged menu pixels.
+                writer.supplied = true;
+                writer.input.legacy = writer.staged_pixels;
+                writer.input.legacy_frame = writer.staged_pixels ? writer.target->pixels : nil;
+                writer.input.guest_w = writer.staged_pixels ? s->guest_w : writer.ui.guest_w;
+                writer.input.guest_h = writer.staged_pixels ? s->guest_h : writer.ui.guest_h;
+            }
+        }
+    }
+#endif
+    {
+        std::lock_guard lock(s->mutex);
+        if (s->writing && s->writing->target && !s->writing->supplied) {
+            auto &in = s->writing->input;
+            in.guest_w = s->guest_w;
+            in.guest_h = s->guest_h;
+            in.drawable_w = s->drawable_w;
+            in.drawable_h = s->drawable_h;
+            if (host_frame_class(f) == HOST_SCREEN_GAMEPLAY && !host_frame_legacy(f)) {
+                s->writing->supplied = true;
+                in.legacy = false; // compositor supplies the last scene on a no-draw frame
+            }
+        }
+    }
+    std::vector<uint8_t> page;
+    if (host_page_rgba(&page)) {
+        std::lock_guard lock(s->mutex);
+        if (s->writing && !s->fake) {
+            auto texture = s->texture(640, 480);
+            [texture replaceRegion:MTLRegionMake2D(0, 0, 640, 480)
+                       mipmapLevel:0
+                         withBytes:page.data()
+                       bytesPerRow:640 * 4];
+            s->writing->input.settings_page = texture;
+        }
+    }
+    s->seal(f.id, host_frame_class(f), host_frame_had_draws(f) != 0);
+#ifdef POPM_PRESENT_HAS_UI_LAYER
+    s->previous_ui_epoch = s->epoch;
+#endif
+}
+extern "C" void host_present_tick_for_test(double ts) {
+    auto s = active.load();
+    if (!s || !s->fake)
+        return;
+    s->signal_tick(ts);
+    {
+        std::lock_guard lock(s->mutex);
+        s->tick_pending = false;
+    }
+    s->tick(ts);
+}
+#define PRESENT_COUNTER(name, field)                                                               \
+    extern "C" uint64_t name() {                                                                   \
+        auto s = active.load();                                                                    \
+        if (!s)                                                                                    \
+            return 0;                                                                              \
+        std::lock_guard lock(s->mutex);                                                            \
+        return s->field;                                                                           \
+    }
+PRESENT_COUNTER(host_present_unique_completed, unique)
+PRESENT_COUNTER(host_present_repeats, repeats)
+PRESENT_COUNTER(host_present_drops, drops)
+PRESENT_COUNTER(host_present_waits, waits)
+PRESENT_COUNTER(host_present_faults, faults)
+PRESENT_COUNTER(host_present_scene_reused, history.scene_reused)
+PRESENT_COUNTER(host_present_transition_epoch, epoch)
+#undef PRESENT_COUNTER
+extern "C" void mods_present_level_end() {
+    auto s = active.load();
+    if (!s)
+        return;
+    std::lock_guard lock(s->mutex);
+    ++s->epoch;
+    s->metric = {};
+    s->class_known = false;
+    mods_display_transition(s->epoch, s->last_class);
+}
+extern "C" int host_metric_continuous(double *minimum, double *elapsed) {
+    auto s = active.load();
+    if (!s || s->offscreen) {
+        if (minimum)
+            *minimum = 0;
+        if (elapsed)
+            *elapsed = 0;
+        return 0;
+    }
+    std::lock_guard lock(s->mutex);
+    return s->metric.read(minimum, elapsed);
+}
+extern "C" int host_metric_throughput(double *minimum, double *elapsed) {
+    auto s = active.load();
+    if (!s || !s->offscreen) {
+        if (minimum)
+            *minimum = 0;
+        if (elapsed)
+            *elapsed = 0;
+        return 0;
+    }
+    std::lock_guard lock(s->mutex);
+    return s->metric.read(minimum, elapsed);
+}
+bool host_present_copy_layout(LayoutSnapshot *out) {
+    auto s = active.load();
+    if (!s || !out)
+        return false;
+    std::lock_guard lock(s->mutex);
+    if (!s->layout_valid)
+        return false;
+    *out = s->layouts[s->layout_slot];
+    return true;
+}
+void host_present_test_begin(bool automatic, bool offscreen, unsigned display_frames) {
+    auto s = begin(true, automatic, offscreen, nil);
+    s->flight_limit = !offscreen && display_frames >= 2 && display_frames <= 3 ? display_frames : 1;
+}
+unsigned host_present_test_flight_count() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return unsigned(s->flights.size());
+}
+void host_present_test_seal(uint64_t id, HostScreenClass cls, bool had_draws, bool prefix_pending) {
+    auto s = active.load();
+    if (!s)
+        return;
+    s->acquire(s->guest_w, s->guest_h, s->drawable_w, s->drawable_h);
+    s->seal(id, cls, had_draws, prefix_pending);
+}
+void host_present_test_command_done(uint64_t id) {
+    test_ack(id, 0, 0);
+}
+void host_present_test_presented(uint64_t id, double ts) {
+    test_ack(id, 1, ts);
+}
+void host_present_test_prefix_done(uint64_t id) {
+    test_ack(id, 2, 0);
+}
+bool host_present_test_released(uint64_t id) {
+    auto s = active.load();
+    if (!s)
+        return false;
+    std::lock_guard lock(s->mutex);
+    return s->test_released.count(id) != 0;
+}
+uint64_t host_present_test_last_id() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->last_id;
+}
+uint8_t host_present_test_last_pixel() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->last_pixel;
+}
+void host_present_test_fail_allocations(unsigned n) {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    s->fail_allocations = n;
+}
+int host_present_test_requested_width() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->requested_w;
+}
+
+bool host_present_test_read_rgba(uint8_t *out, size_t bytes) {
+    auto s = active.load();
+    if (!s || !out)
+        return false;
+    id<MTLTexture> texture = nil;
+    {
+        std::lock_guard lock(s->mutex);
+        texture = s->cached;
+    }
+    if (!texture || texture.pixelFormat != MTLPixelFormatRGBA8Unorm ||
+        bytes < texture.width * texture.height * 4)
+        return false;
+    // cached is published only after completion, so no GPU wait is needed.
+    [texture getBytes:out
+          bytesPerRow:texture.width * 4
+           fromRegion:MTLRegionMake2D(0, 0, texture.width, texture.height)
+          mipmapLevel:0];
+    return true;
+}
+
+bool host_present_copy_composite(HostCompletedComposite *out) {
+    auto s = active.load();
+    if (!s || !out)
+        return false;
+    HostCompletedComposite result;
+    id<MTLTexture> texture = nil;
+    {
+        std::lock_guard lock(s->mutex);
+        texture = s->cached;
+        if (!texture || texture.pixelFormat != MTLPixelFormatRGBA8Unorm)
+            return false;
+        result.w = int(texture.width);
+        result.h = int(texture.height);
+        result.guest_w = s->cached_input.guest_w;
+        result.guest_h = s->cached_input.guest_h;
+        result.cls = s->cached_input.cls;
+        result.frame_id = s->last_id;
+        result.layout = s->layouts[s->layout_slot];
+    }
+    result.rgba.resize(size_t(result.w) * result.h * 4);
+    [texture getBytes:result.rgba.data()
+          bytesPerRow:size_t(result.w) * 4
+           fromRegion:MTLRegionMake2D(0, 0, result.w, result.h)
+          mipmapLevel:0];
+    *out = std::move(result);
+    return true;
+}
+
+void host_present_set_capture_factory(HostCaptureFactory factory) {
+    auto s = active.load();
+    if (!s)
+        return;
+    std::lock_guard lock(s->mutex);
+    s->capture_factory = factory;
+}
+
+uint8_t host_present_test_last_ui_red() {
+    auto s = active.load();
+    if (!s)
+        return 0;
+    std::lock_guard lock(s->mutex);
+    return s->cached_ui.elements.empty() || s->cached_ui.elements[0].rgba.empty()
+               ? 0
+               : s->cached_ui.elements[0].rgba[0];
+}
+
+// Deterministic fake link uses the production worker predicate and tick state
+// machine. No worker thread, layer, drawable or Metal device is created.
+bool host_present_test_window_wake(double ts, bool display_tick, bool timeout) {
+    auto s = active.load();
+    if (!s || !s->fake || s->offscreen)
+        return false;
+    if (display_tick)
+        s->signal_tick(ts);
+    {
+        std::lock_guard lock(s->mutex);
+        if (!timeout && !s->window_ready())
+            return false;
+        s->tick_pending = false;
+    }
+    s->tick(ts);
+    return true;
+}
+uint64_t host_present_test_in_flight() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->flights.empty() ? 0 : s->flights.front()->frame_id;
+}
+unsigned host_present_test_faults() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return s->faults;
+}
+bool host_present_test_input_legacy() {
+    auto s = active.load();
+    std::lock_guard lock(s->mutex);
+    return !s->flights.empty() && s->flights.front()->input.legacy;
+}
+void host_present_test_commit_layer(id layer, id command) {
+    auto s = active.load();
+    if (!s || !s->fake)
+        return;
+    std::shared_ptr<Frame> f;
+    {
+        std::lock_guard lock(s->mutex);
+        if (!s->flights.empty())
+            f = s->flights.back();
+    }
+    if (f)
+        s->commit_present(f, [layer nextDrawable], command);
+}
+extern "C" int32_t host_display_anchor(uint64_t id, int8_t h, int8_t v, int clear) {
+    if (clear)
+        compositor_clear_anchor(id);
+    else
+        compositor_set_anchor(id, {h, v});
+    return 0;
+}
+extern "C" uint32_t host_display_elements(uint64_t *ids, uint32_t max) {
+    LayoutSnapshot layout;
+    if (!host_present_copy_layout(&layout))
+        return 0;
+    if (ids)
+        for (size_t i = 0; i < std::min(size_t(max), layout.elements.size()); ++i)
+            ids[i] = layout.elements[i].id;
+    return uint32_t(layout.elements.size());
+}
+extern "C" float host_display_aspect() {
+    auto s = active.load();
+    if (!s)
+        return 4.0f / 3.0f;
+    std::lock_guard lock(s->mutex);
+    return s->drawable_w > 0 && s->drawable_h > 0 ? float(s->drawable_w) / s->drawable_h
+                                                  : 4.0f / 3.0f;
+}
+extern "C" uint64_t host_display_epoch() {
+    return host_present_transition_epoch();
+}

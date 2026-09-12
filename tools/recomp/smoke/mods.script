@@ -1,0 +1,89 @@
+# mods.script - boot with the example mods loaded and play a level.
+#
+# The input is level1.script's, move for move and coordinate for coordinate;
+# see that file for why the moves are relative and why a click is held. Two
+# things are added: the overlay read at the menu, and the settings page at the
+# end.
+#
+# It plays the level rather than only reaching it. An earlier version stopped
+# once the level was on screen, and nothing that measures turns saw anything:
+# 123 samples of a watched entity with zero bytes changed, a turn hook that
+# counted 0 and an on_turn callback that never fired. The simulation does not
+# start until the opening dialog is dismissed and the flyby is over, and the
+# first turns arrive later still, so the run has to go as far as level1's does.
+
+# Use the same readiness condition as level1.script. With asynchronous
+# presentation, 16 seconds can still be the copyright screen: the first click
+# dismisses it and the next selects Load Game, so no turn hooks ever run.
+await picture>0.98 for 2000 within 60000
+dump menu
+
+# The overlay layer must be visible to the GAME's own file API, not merely
+# present on disk.
+readfile data\mods-example.txt overlay
+
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+dump levelselect
+
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 8000
+dump level_start
+
+# The opening dialog, then the flyby.
+moveby -2000 -2000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 4000
+dump level_playing
+wait 34000
+dump flyby_over
+
+peek 0x8e0428 179
+watch 0 1
+move 331 208
+wait 800
+click left 331 208
+wait 1500
+dump selected
+move 350 245
+wait 800
+click left 350 245
+wait 10000
+dump ordered
+wait 6000
+dump before_page
+
+# The mod layer consumes F10, so the page opens and the game never sees the key.
+key F10 down
+wait 200
+key F10 up
+wait 500
+dump settings_page
+key ESCAPE down
+wait 200
+key ESCAPE up
+wait 500
+
+# Entity slots and repeated watch samples also exist in the front end.
+# Require the simulation's own counter before claiming the level was played.
+expect entities>0
+expect watch_samples>100
+expect turn>0
+quit

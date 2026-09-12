@@ -1,0 +1,4 @@
+-r tools/requirements.txt
+-r tools/recomp/texture-pack-requirements.txt
+pytest==8.4.2
+clang-format==23.1.1

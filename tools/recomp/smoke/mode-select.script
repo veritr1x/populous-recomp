@@ -1,0 +1,88 @@
+# mode-select.script - the game's own path to a display mode.
+#
+# Replayed by the `mode` verb, once. It starts at the MAIN MENU and ends back
+# there, having advanced the screen resolution by one step in the game's own
+# options screen.
+#
+# ONE step is enough because the verb restricts what is offered before
+# replaying this: the list becomes 640x480x8, 640x480x16 and the mode asked
+# for, so the single click below moves from the resolution the front end is
+# already in to the only other one on offer. Both boot depths stay because the
+# front end runs at 640x480 in both and a list missing either is refused - and
+# this game does not check a refusal.
+#
+# The game recreates its surfaces itself; nothing here resizes anything. That
+# is the whole reason the path exists rather than a host-side call.
+#
+# WHERE THE COORDINATES COME FROM
+#
+# Recovered by headless discovery runs through build/recomp/pop_smoke, one
+# click at a time, each confirmed by the frame it produced. The frames are kept
+# in build/recomp/mode-select-evidence/ and named below.
+#
+#   OPTIONS at (320, 260): the main menu's fifth action row. The rows are 30 apart
+#     from New Game at y 140, so Options is 140 + 4*30 = 260, and the click
+#     produced 01-options-screen.ppm - the GAME tab, with TOOLTIPS, ROTATION,
+#     FLIP ROTATION, STAY SELECTED and AUTOCAST SPELL, and the tab row GAME /
+#     SOUND / GRAPHICS above BACK.
+#   GRAPHICS at (470, 435): the third tab in that row, measured off
+#     01-options-screen.ppm. The click produced 02-graphics-tab.ppm - SCREEN
+#     RESOLUTION, SKY, FOOTSTEPS, LANDSCAPE DETAIL, QUICK DEFAULTS, and
+#     DIRECT3D OPTIONS.
+#   The resolution's right arrow at (538, 152): the closing bracket of
+#     "SCREEN RESOLUTION : <640 X 480>", measured off 02-graphics-tab.ppm.
+#     One click advanced it to 800 X 600, which is 03- and 04- either side.
+#   BACK at (320, 466): under the tab row, measured off 02-graphics-tab.ppm.
+#
+# WHY `click` AND NOT `guestclick`
+#
+# `guestclick` places the pointer and this game ignores where it is placed: a
+# guestclick at New Game's row selected MULTIPLAYER instead, the row under the
+# game's own cursor. Populous hit-tests against the pointer IT integrates from
+# relative motion, so a script that needs a particular row has to walk the
+# game's cursor there. That is what the corner pin and `moveby` below do, the
+# same technique level1.script uses and for the same reason.
+#
+# WHEN THE MODE ACTUALLY TAKES EFFECT, WHICH IS NOT WHERE IT IS CHOSEN
+#
+# Leaving the options screen does NOT change the display mode. Measured: after
+# choosing 800 X 600 and clicking BACK, the host was still at 640x480x8, and it
+# was still at 640x480 after New Game, the tutorial prompt and the whole level
+# select screen. The mode changed only when a level started and the game
+# recreated its surfaces - 05-level-at-800x600.ppm, and the run's own summary
+# in 06-run-that-reached-800x600.log reads "display mode: 800x600 16bpp" with
+# 240436 draws at it.
+#
+# So a script cannot assert the mode when this path ends. It has to enter a
+# level first. The `mode` verb has no timeout for that reason: it arms the
+# claim, and the run fails at the end if the mode never arrived.
+
+moveby -2000 -2000
+wait 400
+moveby 320 260
+wait 700
+click left 320 260
+wait 4000
+
+moveby -2000 -2000
+wait 400
+moveby 470 435
+wait 700
+click left 470 435
+wait 4000
+
+# One step along the offered list. The list is whatever the shim offers, which
+# the `mode` verb restricts before replaying this.
+moveby -2000 -2000
+wait 400
+moveby 538 152
+wait 700
+click left 538 152
+wait 3000
+
+moveby -2000 -2000
+wait 400
+moveby 320 466
+wait 700
+click left 320 466
+wait 5000

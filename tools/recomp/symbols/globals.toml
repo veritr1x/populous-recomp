@@ -1,0 +1,131 @@
+# globals.toml - the curated symbols the translator copies into
+# build/recomp/symbols.json. One assignment per line; values are hex or
+# decimal integers.
+#
+# on_level_load is pinned on 0040c690 (load_objs), NOT on the 0040c670 thunk.
+# 0040c670 is `void load_objs_1(char)`: it forces a zero argument to 2 and tail
+# calls 0040c690, discarding the result. 0040c690 is `char load_objs(byte)` and
+# ends `MOV AL,[0x0089ce39]; RET`, so its return value IS objs0_loaded - the
+# game's own record of whether the load succeeded. A failed load (a missing
+# objects/objs0_<n>.ver, which read_obj_hdr reports) leaves it zero and jumps
+# straight to that epilogue. The startup thunk is kept below as
+# level_startup_thunk for mods that want the outer call.
+
+[globals.simulation_turn]
+addr = 0x0089d188
+size = 4
+
+[globals.command_frame]
+addr = 0x0089d184
+size = 4
+
+# Pause is bit 0x2 of this byte; there is no pause event, mods poll it.
+[globals.pause_flags]
+addr = 0x0089c661
+size = 1
+
+# What load_objs returns, and which object set is loaded.
+[globals.objs0_loaded]
+addr = 0x0089ce39
+size = 1
+
+[globals.current_obj_num]
+addr = 0x0089ce3a
+size = 1
+
+[globals.entity_base]
+addr = 0x008e0428
+size = 179
+stride = 179
+count = 2000
+
+[globals.tribe_base]
+addr = 0x0089d1c8
+size = 0xc65
+stride = 0xc65
+count = 4
+
+[events]
+on_turn = 0x004ec6f0
+on_frame = 0x004a5590
+on_level_load = 0x0040c690
+on_level_end = 0x0042c6d0
+
+# Whole functions recovered outside functions.tsv. Each entry needs a verified
+# prologue and calling convention; this does not promote ordinary table blocks.
+[entries]
+# DirectDraw enumeration callback passed by 004b0417; PUSH ESI/PUSH EDI
+# prologue and RET 8 epilogues verified in the pinned image's recovered body.
+# It owns the 1600-pixel cap and copies accepted DDSURFACEDESC fields.
+display_enumerate_mode = 0x004b0e80
+
+# Alternate entries a mod may hook that no relocated pointer, __initterm table
+# or instruction immediate names. Declaring one here is a curator's statement
+# that the address means the same thing across builds; without such a
+# statement an alternate entry reached only by branch or fallthrough discovery
+# is a listing-gap continuation and stays unhookable.
+#
+#   some_name = 0x004xxxxx
+
+[alternates]
+
+# Secondary names. Where one collides with a functions.tsv name the
+# functions.tsv name wins and this one stays an alias.
+[aliases]
+scheduler_turn = 0x004ec6f0
+frame_driver = 0x004a5590
+level_startup_thunk = 0x0040c670
+level_end = 0x0042c6d0
+
+# DISP-T13: 0046dbe0.asm reads width/centre with MOVSX word ptr;
+# 0046daa0.asm rejects triangles with shared screen outcodes using the width.
+# It consumes projected points, so the centre is consumed by the projection
+# function, not re-read by this triangle culler.
+display_project_point = 0x0046dbe0
+display_cull_triangle = 0x0046daa0
+# Deferred entity sprite chain, curated from each function's .asm.
+display_queue_entity = 0x0046f080
+display_human_tribe = 0x0045f4a0
+display_human_person = 0x0045f9d0
+display_human_unowned = 0x0045efd0
+display_sprite_quad = 0x004f95a0
+display_sprite_resolve = 0x004f98a0
+
+[globals.screen_width_2]
+addr = 0x0087ca90
+size = 2
+
+[globals.screen_height_2]
+addr = 0x0087ca92
+size = 2
+
+[globals.screen_width_2_half]
+addr = 0x0087caa4
+size = 2
+
+[globals.screen_height_2_half]
+addr = 0x0087caa6
+size = 2
+
+[globals.display_camera_ptr]
+addr = 0x0074a350
+size = 4
+
+# Integrated input pointer: 00526dd0 / 0052d430 return input object +0x20.
+# 0052d1e0 integrates DI deltas; 0052d270 clamps; 004fd370 draws here.
+[globals.mouse_cursor_x]
+addr = 0x00d0597c
+size = 4
+
+[globals.mouse_cursor_y]
+addr = 0x00d05980
+size = 4
+
+[globals.mouse_input_context]
+addr = 0x00d05978
+size = 4
+
+# D3D sprite translation into the framebuffer (0046f080 / 0046dbe0).
+[globals.display_origin_x]
+addr = 0x00a68f64
+size = 4

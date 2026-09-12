@@ -1,0 +1,8 @@
+# nomods.script - boot far enough to write a run record, and stop.
+#
+# Used only by the two checks that assert what the record says when mods are
+# turned OFF. Those checks read one field each, so there is nothing to play:
+# the record is written at shutdown whatever the run did, and replaying a whole
+# level to reach it would add three minutes to mods_test.sh for two greps.
+wait 16000
+dump nomods_menu

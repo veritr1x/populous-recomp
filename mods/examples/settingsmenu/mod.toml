@@ -1,0 +1,15 @@
+# The settings and menu example: declares a setting, round-trips it, and puts
+# a row on its own page that opens the page through the public API.
+id = "example.settingsmenu"
+name = "Settings example"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+affects_simulation = false
+
+[plugin]
+path = "settingsmenu.dylib"
+
+[settings]
+ui_scale = { type = "int", default = 2, min = 1, max = 4, label = "UI scale" }
+show_hints = { type = "bool", default = true, label = "Show hints" }

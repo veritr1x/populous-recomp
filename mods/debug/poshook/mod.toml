@@ -1,0 +1,12 @@
+# Reads the fourth argument of 0056fb10 and who passed it. Diagnostic only:
+# it installs a before hook, changes no guest state and answers no callback.
+id = "debug.poshook"
+name = "Positional sound probe"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+requires = ["core.hooks >= 1.0.0"]
+affects_simulation = false
+
+[plugin]
+path = "poshook.dylib"

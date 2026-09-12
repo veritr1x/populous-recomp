@@ -1,0 +1,18 @@
+# The replace-hook example: substitutes one constant and delegates.
+#
+# affects_simulation is false because the substituted value is the one the
+# thunk already used. It is a declaration either way: nothing enforces it, and
+# the run record names this mod whatever it says.
+id = "example.constant"
+name = "Constant example"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+requires = ["core.hooks >= 1.0.0"]
+affects_simulation = false
+
+[plugin]
+path = "constant.dylib"
+
+[settings]
+default_set = { type = "int", default = 2, min = 1, max = 4, label = "Default object set" }

@@ -1,0 +1,145 @@
+# gate-r.script - level1.script, with a turn assertion before every gameplay
+# dump.
+#
+# WHY THIS SCRIPT EXISTS
+#
+# Gate R compares frame dumps from two runs byte for byte, which only means
+# anything if both dumps were taken at the same point of the simulation.
+# level1.script's gameplay dumps fire off `wait`, a number of milliseconds.
+#
+# WHAT `await turn>N` DOES AND DOES NOT FIX
+#
+# Amendment 13 added the `turn` metric so a script could wait for the game to
+# have run rather than for the clock to have passed. Measured here, it does not
+# move the dump instant: by the time the first gameplay dump is due, the flyby
+# is over and the simulation is already past turn 300, so all four awaits below
+# are satisfied on their first evaluation.
+#
+#   [smoke] turn held above 0 for 0ms after 0.0s
+#   [smoke] turn held above 49 for 0ms after 0.0s
+#   [smoke] turn held above 149 for 0ms after 0.0s
+#   [smoke] turn held above 299 for 0ms after 0.0s
+#
+# So they are kept as ASSERTIONS, not as pins: each one fails the run if the
+# simulation has not reached that turn by the time the dump is taken, which is
+# a real claim about the run and one level1.script does not make. What they are
+# not is a way to make a gameplay frame reproducible. See task-19-report.md for
+# what is, and is not, comparable on this host.
+#
+# THE PINNED TURN TRACE, FOR WHOEVER SETS THE THRESHOLDS
+#
+# Under POP_RECOMP_PIN_CLOCK=1, which is what Gate R runs this script with, the
+# turn the simulation has reached at each of the four dump points below is,
+# measured from a run that loaded the level:
+#
+#   dump turn001   turn 609
+#   dump turn050   turn 641
+#   dump turn150   turn 793
+#   dump turn300   turn 878
+#
+# Every threshold in this file is below all of those, which is why each await
+# reports `after 0.0s`. A threshold that makes the wait real has to come from
+# above that trace, something like 620, 700, 800 and 900. They are left as they
+# are until the `dumpat turn>=N` verb lands: that verb dumps on the first
+# present after a turn and is the right mechanism, where a number chosen by
+# hand from this trace would be a second thing to keep in step with the script.
+#
+# WHAT THE PINNED CLOCK DOES AND DOES NOT FIX
+#
+# It fixes startup completely. Two pinned runs of this script report the same
+# line to six decimal places and the same frame count, and their
+# smoke_menu_present.ppm is byte-identical:
+#
+#   [smoke] picture held above 0.98 (reached 0.997708) for 40 frames (2000 ms asked) after 18.9s
+#
+# It does not fix the clicks. Those two runs diverged at the first click after
+# that identical menu: one loaded the level and reached turn 878, the next
+# reached turn 0 with zero textures and zero draws. The runner holds a click for
+# kClickHoldMs = 120 (smoke_main.mm:607), which under the pin is 2.4 presented
+# frames, and level1.script's own header records that a click which does not
+# stay down long enough is lost entirely. `guestclick x y left hold <ms>` exists
+# for this and parses, but HOST_SCRIPT_GUESTCLICK is not executed by the smoke
+# host yet, so there is nothing this script can set. Until it is, Gate R will
+# sometimes report that one of its mods-off runs failed, which is the gate
+# refusing to compare a level screen against a blank one.
+#
+# EVERYTHING ELSE IS level1.script, VERBATIM
+#
+# Every wait, every move, every click. That is deliberate and it was learned
+# twice. A version that replaced the two waits after the opening dialog with
+# the turn await never started the level at all (`turn did NOT hold above 0
+# after 90.0s`, scene brightness 0.204, watchdog at step 18 of 29). A version
+# that kept those but dropped the 1.5 s, 10 s and 6 s waits between the
+# gameplay dumps ran the level correctly and then failed three of its own
+# expectations, because the watched entity never got time to move:
+# watch_samples 17 of 100, watch_moved 0 of 256, watch_state_changes 0 of 1.
+# The waits are the script; only the assertions are added.
+#
+# See level1.script for where every coordinate comes from, why moves are
+# relative, and why a click has to be held.
+
+await picture>0.98 for 2000 within 60000
+dump menu
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+dump levelselect
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 8000
+dump level_start
+moveby -2000 -2000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 4000
+dump level_playing
+wait 34000
+await turn>0 within 60000
+dump turn001
+peek 0x8e0428 179
+watch 0 1
+move 331 208
+wait 800
+click left 331 208
+wait 1500
+await turn>49 within 60000
+dump turn050
+move 350 245
+wait 800
+click left 350 245
+wait 10000
+await turn>149 within 60000
+dump turn150
+wait 6000
+await turn>299 within 60000
+dump turn300
+expect textures>0
+expect draws>0
+expect writebacks>0
+expect scene_nonblack>0.50
+expect present_nonblack>0.50
+expect audio_peak>0.05
+expect present_changes>200
+expect presents>50
+expect entities>0
+expect watch_found>0
+expect watch_selected>0
+expect watch_samples>100
+expect watch_moved>256
+expect watch_toward_target>0.95
+expect watch_state_changes>0
+quit

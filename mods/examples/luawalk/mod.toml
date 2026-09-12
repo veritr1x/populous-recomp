@@ -1,0 +1,11 @@
+# The Lua example: reads entities through the read-only view every turn.
+id = "example.luawalk"
+name = "Lua walk example"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+requires = ["core.lua >= 1.0.0"]
+affects_simulation = false
+
+[script]
+path = "main.lua"

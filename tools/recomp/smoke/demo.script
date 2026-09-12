@@ -1,0 +1,79 @@
+# demo.script - boot to the main menu, start the rolling demo, and let it run
+# for a fixed span so both builds can be compared over the same content.
+#
+# Run with `make recomp-demo-sound`, which sets POPM_AUDIO_TRACE and writes the
+# trace where compare_sounds.py expects it.
+#
+# WHY THE ROLLING DEMO AND NOT A HAND-PLAYED SESSION
+#
+# The sound comparison needs both sides to cover the same content. A person
+# playing the original and a script playing ours are not the same content, and
+# every difference in the counts then has two possible causes. The rolling demo
+# is the same sequence every time on both sides, and it is the game playing
+# itself, so it exercises the effect path rather than only the menu.
+#
+# WHERE THE MENU ENTRY IS
+#
+# 640x480, the nine entries centred on x=320 at roughly:
+#
+#     NEW GAME 154   TUTORIAL 182   LOAD GAME 211   MULTIPLAYER 240
+#     OPTIONS 269    ROLLING DEMO 298   CREDITS 327   COMING SOON 356
+#     QUIT 385
+#
+# Read off build/recomp/smoke/frames/smoke_menu_present.ppm rather than guessed.
+# ROLLING DEMO is the sixth, at y=298.
+#
+# Note the menu also has COMING SOON, which is the other video entry. The
+# handler at 004c3540 plays FMV\trailer.tgq and is reached from the entry
+# record at 005d7d74; do not assume that record is this one without checking,
+# because a run that lands on a trailer video plays no effects at all and would
+# look like a build with no sound rather than the wrong menu entry. The dumps
+# below are what tells the two apart.
+#
+# HOW LONG
+#
+# 180 seconds from launch, which is the span the original side is stopped at,
+# and it has to be exactly that: the two sides are only comparable over the
+# same span. The waits below sum to 180000 ms - 22300 to get from launch to the
+# demo running, then 150000 of demo in five 30-second steps, then 7700 to the
+# end. An earlier version summed to 201300 and the host exited at about 197,
+# losing the final dump and both expectations, which is how a run that had
+# stopped early looked identical to one that had finished.
+
+wait 16000
+dump demo_menu
+
+# Home the cursor into the corner first: buffered DirectInput events are
+# deltas, so an absolute destination on its own moves nothing.
+moveby -2000 -2000
+wait 400
+moveby 320 298
+wait 900
+dump demo_hover
+click left 320 298
+wait 5000
+dump demo_started
+
+# The demo itself. Dumped every 30 s so a run that fell back to the menu, or
+# sat on a black video frame, is visible in the frames rather than only in the
+# counts.
+wait 30000
+dump demo_30s
+wait 30000
+dump demo_60s
+wait 30000
+dump demo_90s
+wait 30000
+dump demo_120s
+wait 30000
+dump demo_150s
+wait 7700
+dump demo_end
+
+# Enough to tell a run that ran from one that never started. Deliberately not
+# the level1.script expectations: the demo may never enter the 3D scene if the
+# entry turns out to be a video, and this fixture is for the sound counts.
+expect presents>50
+expect present_changes>200
+
+quit

@@ -1,0 +1,171 @@
+# Native Options navigation, live rendering/FPS changes and a 640/800/4K cycle
+# through the single resolution selector in the original Graphics tab.
+# Use an isolated profile, the shipped core.display and texture pack, and
+# POPM_DDRAW_MODES=640x480x8,640x480x16,800x600x16,3840x2160x16.
+# The final unit-selection/movement assertions prove the game resumed.
+await picture>0.98 for 2000 within 60000
+key F10 down
+wait 200
+key F10 up
+wait 2000
+dumpc frontend
+peek 0x749cd8 4
+peek 0x5d7374 4
+moveby -10000 -10000
+wait 300
+moveby 320 405
+wait 700
+click left 320 405
+wait 2000
+dumpc display_frontend
+moveby -10000 -10000
+wait 300
+moveby 495 405
+wait 700
+click left 495 405
+wait 2000
+dumpc mods_frontend
+moveby -10000 -10000
+wait 300
+moveby 320 466
+wait 700
+click left 320 466
+wait 2000
+moveby -10000 -10000
+wait 300
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -10000 -10000
+wait 300
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+moveby -10000 -10000
+wait 300
+moveby 605 448
+wait 700
+click left 605 448
+wait 8000
+await turn>=1 within 60000
+wait 2000
+moveby -10000 -10000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 34000
+key F10 down
+wait 200
+key F10 up
+wait 2000
+dumpc enhanced
+moveby -10000 -10000
+wait 300
+moveby 320 130
+wait 700
+click left 320 130
+wait 2000
+dumpc classic
+moveby -10000 -10000
+wait 300
+moveby 320 130
+wait 700
+click left 320 130
+wait 2000
+dumpc enhanced_again
+moveby -10000 -10000
+wait 300
+moveby 320 405
+wait 700
+click left 320 405
+wait 2000
+dumpc display
+moveby -10000 -10000
+wait 300
+moveby 320 160
+wait 700
+click left 320 160
+wait 2000
+dumpc fps40
+moveby -10000 -10000
+wait 300
+moveby 320 160
+wait 700
+click left 320 160
+wait 2000
+moveby -10000 -10000
+wait 300
+moveby 320 160
+wait 700
+click left 320 160
+wait 2000
+dumpc fps120
+moveby -10000 -10000
+wait 300
+moveby 470 435
+wait 700
+click left 470 435
+wait 2000
+dumpc graphics
+moveby -10000 -10000
+wait 300
+moveby 538 152
+wait 700
+click left 538 152
+wait 2000
+dumpc res800
+peek 0x89c6cf 4
+moveby -10000 -10000
+wait 300
+moveby 638 190
+wait 700
+click left 673 190
+wait 2000
+dumpc res4k
+peek 0x89c6cf 4
+moveby -10000 -10000
+wait 300
+moveby 638 478
+wait 700
+click left 2955 684
+wait 2000
+dumpc res640
+peek 0x89c6cf 4
+moveby -10000 -10000
+wait 300
+moveby 320 466
+wait 700
+click left 320 466
+wait 2000
+moveby -10000 -10000
+wait 300
+moveby 320 172
+wait 700
+click left 320 172
+wait 2000
+wait 3000
+dumpc resumed
+peek 0x89c669 4
+camera 5386 55651
+wait 1000
+watch 0 1
+await entity_body 1815 within 20000
+move entity 1815
+wait 1000
+await entity_body 1815 within 20000
+click entity 1815
+wait 1500
+expect watch_selected>0
+move world 5376 55040 128
+wait 800
+click world 5376 55040 128
+wait 20000
+expect watch_moved>256
+expect watch_state_changes>0
+expect hd_draws>0
+expect terrain_detail_draws>0
+dumpc playing
+quit

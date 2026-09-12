@@ -1,0 +1,65 @@
+# mode-800.script - the phase-2 executors, exercised by a gate.
+#
+# `mode` asks the game for 800x600x16 through its own options screen, and the
+# claim it arms is answered only when a level starts and the game recreates its
+# surfaces. So this script has to enter a level, and the probes and the dump
+# after it are what say the executors did something rather than merely ran.
+#
+# Run pinned by tools/recomp/gates.sh. Unpinned it works too and takes twice as
+# long in wall-clock time.
+
+await picture>0.98 for 2000 within 60000
+
+# Drives the recorded path, then arms the claim. If the mode never arrives the
+# run fails at the end and says why.
+mode 800 600 16
+
+# New Game, and No to the tutorial prompt. The coordinates and the corner pin
+# are level1.script's, for the reasons its header gives.
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+
+# Start mission 01, which is where the mode is applied.
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 10000
+
+# The composited frame at the new size.
+#
+# NOT `dumpat`, and the reason is a dependency rather than a preference. A
+# dumpat fires only on a gameplay frame, which is the right rule - a reference
+# frame is a picture of the simulation, and one caught on a menu is a picture
+# of something else - but nothing outside the dx tests calls ddraw_note_draw
+# yet, so host_frame_class never reports gameplay in a real run and an armed
+# dumpat can never fire. Task 3 wires the Direct3D side; when it lands, this
+# becomes `dumpat turn>=N mode800` and the wait below goes.
+#
+# The firing rule itself is not untested meanwhile: host_dumpat_should_fire is
+# covered case by case in the host suite, the gameplay case included.
+wait 4000
+dump mode800
+dumpc mode800_seen
+
+# The middle of an 800x600 frame is landscape, not the black a letterbox or an
+# unresized surface would leave. The tolerance is wide because the pixel is
+# whatever the terrain happens to be; what is being asserted is that something
+# was drawn there at all.
+probe 400 300 128 128 128 127
+
+expect textures>0
+expect draws>0
+expect scene_nonblack>0.50
+quit

@@ -1,0 +1,10 @@
+id = "core.display"
+name = "Wide world projection"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+requires = ["core.hooks >= 1.0.0"]
+affects_simulation = false
+
+[plugin]
+path = "display.dylib"

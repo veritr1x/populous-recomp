@@ -1,0 +1,55 @@
+# integration.script - drive the smoke host into GAMEPLAY, so a hook on the
+# turn scheduler has something to count, then open the settings page and quit.
+#
+# Task 13's mods.script is the one that plays the level; this one exists so
+# wave 8 does not depend on a file wave 9 writes. The navigation is the same
+# menu path level1.script takes, kept short: reaching the level is the point,
+# playing it is not.
+wait 16000
+dump menu
+
+# Main menu -> single player.
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+dump levelselect
+
+# Level select -> start.
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 8000
+dump level_start
+moveby -2000 -2000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 4000
+dump level_playing
+
+# In the level now, so the turn scheduler is running and the probe's hook on
+# main_loop_inner has something to count.
+wait 20000
+dump turning
+
+# F10 is the key the host reserves for the settings page. Pressing it here is
+# what proves the page's keyboard was registered by a host rather than by the
+# loader, which no longer does it: the page prints one line when it opens.
+key F10 down
+key F10 up
+wait 500
+dump page
+
+quit

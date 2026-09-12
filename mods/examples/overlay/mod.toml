@@ -1,0 +1,16 @@
+# The asset-overlay example. It ships one file and no code.
+#
+# The layer's root is this mod's assets/ directory, and a path under it maps to
+# the guest path of the same shape: assets/data/mods-example.txt answers the
+# game's own `data\mods-example.txt`. Reading it off disk would prove nothing,
+# so tools/recomp/smoke/mods.script reads it through the game's file API.
+id = "example.overlay"
+name = "Overlay example"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c3"
+requires = ["core.overlay >= 1.0.0"]
+affects_simulation = false
+
+[assets]
+path = "assets"

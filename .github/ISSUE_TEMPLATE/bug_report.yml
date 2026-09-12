@@ -1,0 +1,29 @@
+name: Bug report
+description: Report a reproducible native runtime or tooling problem
+title: "[Bug] "
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Device, macOS, commit, resolution, window/rendering mode and frame limit.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the menu or level and the exact action that triggers the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Relevant evidence
+      description: Short logs or screenshots are useful. Remove personal paths; do not attach game files or private saves.

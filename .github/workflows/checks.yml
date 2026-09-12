@@ -1,0 +1,39 @@
+name: Contributor checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tooling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install pinned contributor tools
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-dev.txt
+      - name: Test source tooling without game files
+        run: .venv/bin/python tools/test.py
+      - name: Check native code formatting
+        run: .venv/bin/python tools/format.py
+      - name: Check repository boundaries and documentation links
+        run: .venv/bin/python tools/check_repo.py
+
+  native-compile:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Compile native runtime, adapters and host test binaries
+        run: python3 tools/test.py --compile-only
+      # The game and locally generated code are not available in public CI.
+      # No original assets, app bundles, profiles or diagnostics are uploaded.

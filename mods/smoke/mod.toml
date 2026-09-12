@@ -1,0 +1,16 @@
+# The integration probe. It exists to prove one thing that no unit test can:
+# that a real plugin, loaded from mods/ by a real host, actually runs inside
+# the game. It hooks the turn scheduler, counts turns, and writes the count
+# out at shutdown; a host that does not link the mod runtime, or links it and
+# never calls mods_load_all, leaves no file behind.
+id = "smoke.probe"
+name = "Integration probe"
+version = "1.0.0"
+api = 1
+game = "815ba8a550f571c38b602cf3386f65aab942667a4a2d9c7096b3660deac2eacd"
+# It only counts. Saying so keeps it out of the way of anything that reads the
+# flag, even though nothing enforces it.
+affects_simulation = false
+
+[plugin]
+path = "probe.dylib"
