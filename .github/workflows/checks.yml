@@ -101,5 +101,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PopRecomp-${{ matrix.preset }}
-          path: dist/PopRecomp-*
+          path: |
+            dist/PopRecomp-*
+            build/recomp/PopRecomp.map
           retention-days: 7

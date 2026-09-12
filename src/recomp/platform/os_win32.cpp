@@ -428,10 +428,42 @@ int os_exe_path(char *buf, size_t cap) {
         return -1;
     return copy_out(narrow(w), buf, cap);
 }
+// The unhandled-exception filter: the fault address relative to this
+// executable's base (so a linker map resolves it), the top of the stack as
+// candidate return addresses, and the registered callback for the guest EIP.
+static OsFaultFn g_fault_fn;
+static LONG WINAPI fault_filter(EXCEPTION_POINTERS *info) {
+    char line[256];
+    const EXCEPTION_RECORD *rec = info->ExceptionRecord;
+    const uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr);
+    const uintptr_t at = (uintptr_t)rec->ExceptionAddress;
+    int n = snprintf(line, sizeof line,
+                     "[host] exception %08lx at %016llx (exe base %016llx, rva %llx)\n",
+                     (unsigned long)rec->ExceptionCode, (unsigned long long)at,
+                     (unsigned long long)base, (unsigned long long)(at - base));
+    os_write_stderr_raw(line, (size_t)n);
+    const uintptr_t *sp = (const uintptr_t *)info->ContextRecord->Rsp;
+    for (int i = 0; i < 24; ++i) {
+        uintptr_t v = 0;
+        if (IsBadReadPtr(sp + i, sizeof v))
+            break;
+        v = sp[i];
+        if (v >= base && v < base + (256u << 20)) {
+            n = snprintf(line, sizeof line, "[host]   stack[%d] rva %llx\n", i,
+                         (unsigned long long)(v - base));
+            os_write_stderr_raw(line, (size_t)n);
+        }
+    }
+    if (g_fault_fn)
+        g_fault_fn(rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ? "access violation"
+                                                                    : "exception");
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int os_install_fault_handlers(OsFaultFn fn) {
-    // A vectored exception handler is sub-project 3 work; say so honestly.
-    (void)fn;
-    return 0;
+    g_fault_fn = fn;
+    SetUnhandledExceptionFilter(fault_filter);
+    return 1;
 }
 void os_write_stderr_raw(const char *s, size_t n) {
     DWORD written = 0;

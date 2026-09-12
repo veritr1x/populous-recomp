@@ -298,17 +298,26 @@ typedef struct PopModAbi {
     uint32_t cpu_size;        /* sizeof(pop_cpu_v1) at build time */
 } PopModAbi;
 
+/* A plugin's exported symbols: COFF needs dllexport for GetProcAddress to see
+ * them; ELF and Mach-O need default visibility when built with -fvisibility=hidden. */
+#if defined(_WIN32)
+#define POP_MOD_EXPORT __declspec(dllexport)
+#else
+#define POP_MOD_EXPORT __attribute__((visibility("default")))
+#endif
+
 /* Exported by every plugin. The host validates it and refuses the plugin with
  * POP_E_ABI when it is missing or unusable; every copy-back is bounded by the
  * smaller of the host's size and the plugin's declared size. */
 #define POP_MOD_DECLARE_ABI()                                                                      \
-    const PopModAbi pop_mod_abi = {(uint32_t)sizeof(PopModAbi), POP_MOD_API_VERSION,               \
-                                   (uint32_t)sizeof(PopModApi), (uint32_t)sizeof(pop_cpu_v1)}
+    POP_MOD_EXPORT const PopModAbi pop_mod_abi = {                                                 \
+        (uint32_t)sizeof(PopModAbi), POP_MOD_API_VERSION, (uint32_t)sizeof(PopModApi),             \
+        (uint32_t)sizeof(pop_cpu_v1)}
 
-extern const PopModAbi pop_mod_abi;
+extern POP_MOD_EXPORT const PopModAbi pop_mod_abi;
 
-PopModStatus pop_mod_init(const PopModApi *api);
-PopModStatus pop_mod_exit(void);
+POP_MOD_EXPORT PopModStatus pop_mod_init(const PopModApi *api);
+POP_MOD_EXPORT PopModStatus pop_mod_exit(void);
 
 #ifdef __cplusplus
 }
