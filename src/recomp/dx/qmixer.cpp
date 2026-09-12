@@ -1041,15 +1041,17 @@ void QSWaveMixPlayEx(X86 *c) {
     }
     ch->open = true;
     ch->wave = w->handle;
-    if (!ch->enabled || ch->paused || !s->active) {
+    // A new play un-pauses the channel: the game pauses a channel and later
+    // reuses it with SetVolume, ConfigureChannel, EnableChannel and PlayEx,
+    // never RestartChannel, and expects the sound. Pause only holds the sound
+    // that was playing when it was called.
+    ch->paused = false;
+    if (!ch->enabled || !s->active) {
         // The call still succeeds; the sound is simply not audible, which is
         // what a disabled channel means.
         if (!ch->enabled) {
             ++counters().drop_disabled;
             drop_reason("channel disabled", idx, 0);
-        } else if (ch->paused) {
-            ++counters().drop_paused;
-            drop_reason("channel paused", idx, 0);
         } else {
             ++counters().drop_inactive;
             drop_reason("session not active", idx, 0);
