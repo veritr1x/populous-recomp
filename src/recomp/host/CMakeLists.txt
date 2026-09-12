@@ -13,6 +13,9 @@ pop_optimize(host_common 1)
 # Compiling Objective-C++ under ARC, as every script did; a no-op for C++.
 set(POP_OBJC_ARC $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 
+# The GPU interface, its test double, and (on Apple) the Metal backend.
+add_subdirectory(gpu)
+
 if(NOT APPLE)
   return()
 endif()

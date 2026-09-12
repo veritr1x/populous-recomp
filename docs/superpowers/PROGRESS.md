@@ -23,7 +23,7 @@ Windows/Linux/Android, WebGPU if web is ever attempted; device-level GPU interfa
 
 - Branch: `host-abstraction` (forked from `main` at 920de70).
 - Plan: `plans/2026-09-12-host-abstraction.md` (10 tasks, written and committed).
-- Executing inline (superpowers:executing-plans). Task 1 (dependencies) done; next Task 2 (GPU interface + fake backend).
+- Executing inline (superpowers:executing-plans). Tasks 1-2 done (dependencies; gpu.h + fake backend + gpu_fake_tests); next Task 3 (Metal backend).
 
 ## How to resume
 
