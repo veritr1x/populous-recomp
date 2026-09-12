@@ -43,6 +43,9 @@ jobs:
       - name: Enter the Visual Studio developer environment (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # NumPy and Pillow wheels exist for it on every runner
       - name: Install CMake, Ninja and the texture pack tools
         shell: bash
         run: |
