@@ -222,6 +222,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
         return nullptr;
     }
     volkLoadDevice(d->device_);
+    // A 1.1/1.2 device (CrossOver's winevulkan, older drivers) offers dynamic
+    // rendering through the KHR extension only; volk does not alias those
+    // entry points onto the core 1.3 names the backend calls.
+    if (!vkCmdBeginRendering && vkCmdBeginRenderingKHR) {
+        vkCmdBeginRendering = vkCmdBeginRenderingKHR;
+        vkCmdEndRendering = vkCmdEndRenderingKHR;
+    }
+    if (!vkCmdBeginRendering) {
+        fprintf(stderr, "gpu/vulkan: no dynamic rendering entry points\n");
+        return nullptr;
+    }
     vkGetDeviceQueue(d->device_, family, 0, &d->queue_);
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
