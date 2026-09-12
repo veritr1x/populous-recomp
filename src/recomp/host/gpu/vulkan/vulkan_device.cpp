@@ -226,8 +226,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create() {
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = family;
-    if (vkCreateCommandPool(d->device_, &pci, nullptr, &d->command_pool_) != VK_SUCCESS)
+    if (vkCreateCommandPool(d->device_, &pci, nullptr, &d->transfer_pool_) != VK_SUCCESS)
         return nullptr;
+    if (const char *t = getenv("POP_GPU_TRACE"); t && *t == '1')
+        d->trace_ = true;
     if (!d->init_pipeline_layout())
         return nullptr;
     d->reaper_ = std::thread([p = d.get()] { p->reap_loop(); });
@@ -288,6 +290,8 @@ VulkanDevice::~VulkanDevice() {
             vkDestroyQueryPool(device_, c.queries, nullptr);
         if (c.fence)
             vkDestroyFence(device_, c.fence, nullptr);
+        if (c.pool_of)
+            vkDestroyCommandPool(device_, c.pool_of, nullptr);
     };
     for (auto &c : free_cmds_)
         free_cmd(*c);
@@ -308,7 +312,7 @@ VulkanDevice::~VulkanDevice() {
         vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
     if (transfer_fence_)
         vkDestroyFence(device_, transfer_fence_, nullptr);
-    vkDestroyCommandPool(device_, command_pool_, nullptr);
+    vkDestroyCommandPool(device_, transfer_pool_, nullptr);
     vkDestroyDevice(device_, nullptr);
     vkDestroyInstance(instance_, nullptr);
 }
@@ -369,15 +373,13 @@ VkCommandBuffer VulkanDevice::one_shot_begin() {
     transfer_mutex_.lock(); // released by one_shot_end_wait
     if (!transfer_cb_) {
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        ai.commandPool = command_pool_;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        std::lock_guard lock(queue_mutex_); // the pool is externally synchronised
+        ai.commandPool = transfer_pool_; // its own pool, serialised by transfer_mutex_
         vkAllocateCommandBuffers(device_, &ai, &transfer_cb_);
         vkCreateFence(device_, &fci, nullptr, &transfer_fence_);
     } else {
-        std::lock_guard lock(queue_mutex_);
         vkResetCommandBuffer(transfer_cb_, 0);
     }
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -748,14 +750,17 @@ CommandBuffer VulkanDevice::begin() {
     }
     if (!c) {
         c = std::make_unique<Cmd>();
+        VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.queueFamilyIndex = queue_family_;
+        if (vkCreateCommandPool(device_, &pci, nullptr, &c->pool_of) != VK_SUCCESS) {
+            fail("command pool creation failed");
+            return {};
+        }
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        ai.commandPool = command_pool_;
+        ai.commandPool = c->pool_of;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
-        {
-            std::lock_guard lock(queue_mutex_);
-            vkAllocateCommandBuffers(device_, &ai, &c->buffer);
-        }
+        vkAllocateCommandBuffers(device_, &ai, &c->buffer);
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkCreateFence(device_, &fci, nullptr, &c->fence);
         if (props_.limits.timestampComputeAndGraphics) {
@@ -786,8 +791,13 @@ CommandBuffer VulkanDevice::begin() {
     for (auto &t : c->textures)
         t = {};
     {
-        std::lock_guard lock(queue_mutex_);
-        vkResetCommandBuffer(c->buffer, 0);
+        const double t0 = trace_ ? now_seconds() : 0;
+        vkResetCommandPool(device_, c->pool_of, 0); // the Cmd's own pool: no lock needed
+        if (trace_ && now_seconds() - t0 > 0.02)
+            fprintf(stderr,
+                    "gpu/vulkan: slow reset %.1f ms (previous draws %u dispatches %u binds %u)\n",
+                    (now_seconds() - t0) * 1000, c->draws, c->dispatches, c->binds);
+        c->draws = c->dispatches = c->binds = 0;
         if (c->pool)
             vkResetDescriptorPool(device_, c->pool, 0);
         for (VkDescriptorPool p : c->extra_pools)
@@ -879,6 +889,13 @@ void VulkanDevice::commit(CommandBuffer cb) {
         retired_cv_.notify_all();
         return;
     }
+    if (trace_)
+        fprintf(stderr,
+                "gpu/vulkan: commit %llu draws %u dispatches %u binds %u ring %llu KB textures %zu "
+                "buffers %zu graves %zu recording %zu submitted %zu\n",
+                (unsigned long long)cb.id, c->draws, c->dispatches, c->binds,
+                (unsigned long long)(c->ring_used >> 10), textures_.size(), buffers_.size(),
+                graves_.size(), recording_.size(), submitted_.size());
     submitted_.push_back({cb.id, std::move(c)});
     reaper_cv_.notify_one();
 }

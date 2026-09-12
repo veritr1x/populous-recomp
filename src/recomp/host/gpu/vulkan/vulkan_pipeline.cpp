@@ -592,6 +592,7 @@ void VulkanDevice::bind_descriptors(Cmd &c, VkPipelineBindPoint point) {
     vkUpdateDescriptorSets(device_, 12, writes, 0, nullptr);
     vkCmdBindDescriptorSets(c.buffer, point, pipeline_layout_, 0, 1, &set, 0, nullptr);
     c.bindings_dirty = false;
+    ++c.binds;
 }
 
 // ---------------------------------------------------------- draw, dispatch
@@ -617,6 +618,7 @@ void VulkanDevice::draw(CommandBuffer cb, Primitive primitive, int first, int co
     c->viewport_set = false;
     bind_descriptors(*c, VK_PIPELINE_BIND_POINT_GRAPHICS);
     vkCmdDraw(c->buffer, uint32_t(count), 1, uint32_t(first), 0);
+    ++c->draws;
 }
 
 void VulkanDevice::dispatch_threads(CommandBuffer cb, int tx, int ty, int gx, int gy) {
@@ -636,6 +638,7 @@ void VulkanDevice::dispatch_groups(CommandBuffer cb, int groups_x, int groups_y,
     vkCmdBindPipeline(c->buffer, VK_PIPELINE_BIND_POINT_COMPUTE, it->second.pipeline);
     bind_descriptors(*c, VK_PIPELINE_BIND_POINT_COMPUTE);
     vkCmdDispatch(c->buffer, uint32_t(groups_x), uint32_t(groups_y), 1);
+    ++c->dispatches;
     full_barrier(c->buffer); // successive dispatches read each other's buffers
 }
 

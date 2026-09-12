@@ -116,6 +116,7 @@ class VulkanDevice final : public Device {
     };
     struct Cmd {
         VkCommandBuffer buffer = VK_NULL_HANDLE;
+        VkCommandPool pool_of = VK_NULL_HANDLE; // this Cmd's own pool (see below)
         VkFence fence = VK_NULL_HANDLE;
         VkQueryPool queries = VK_NULL_HANDLE; // 2 timestamps
         VkDescriptorPool pool = VK_NULL_HANDLE;
@@ -148,6 +149,7 @@ class VulkanDevice final : public Device {
         bool presents = false;
         VkSemaphore wait_semaphore = VK_NULL_HANDLE, signal_semaphore = VK_NULL_HANDLE;
         std::function<void(double)> presented;
+        uint32_t draws = 0, dispatches = 0, binds = 0; // trace counters
     };
     struct Submission {
         uint64_t id = 0;
@@ -211,7 +213,11 @@ class VulkanDevice final : public Device {
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t queue_family_ = 0;
-    VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    // A command pool may be used by one thread at a time and the host records a
+    // command buffer from whichever thread holds it, so every Cmd owns its own
+    // pool: the host's per-command-buffer discipline is then all the pool needs.
+    std::vector<std::unique_ptr<Cmd>> free_cmds_;  // guarded by mutex_
+    VkCommandPool transfer_pool_ = VK_NULL_HANDLE; // guarded by transfer_mutex_
     // The one-shot transfer buffer uploads and readbacks share, serialised by
     // transfer_mutex_ (held from one_shot_begin to one_shot_end_wait). Reused
     // rather than allocated per call: freeing command buffers is slow on
@@ -227,6 +233,7 @@ class VulkanDevice final : public Device {
     bool core13_ = false;
     bool full_subgroups_ = false; // computeFullSubgroups enabled
     bool failed_ = false;
+    bool trace_ = false; // POP_GPU_TRACE=1
 
     std::mutex mutex_; // guards every table below
     std::mutex queue_mutex_;
@@ -234,7 +241,6 @@ class VulkanDevice final : public Device {
     std::unordered_map<uint64_t, Tex> textures_;
     std::unordered_map<uint64_t, Buf> buffers_;
     std::unordered_map<uint64_t, std::unique_ptr<Cmd>> recording_;
-    std::vector<std::unique_ptr<Cmd>> free_cmds_;
     // Submitted and not yet retired, in submission order (the reaper's queue).
     std::deque<Submission> submitted_;
     std::vector<Grave> graves_;
