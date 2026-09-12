@@ -42,6 +42,7 @@ add_custom_target(check_binaries)
 
 include(cmake/Warnings.cmake)
 include(cmake/Plugins.cmake)
+include(cmake/Translate.cmake)
 add_subdirectory(src/recomp/runtime)
 add_subdirectory(src/recomp/dx)
 add_subdirectory(src/recomp/mods)
