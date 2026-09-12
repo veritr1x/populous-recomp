@@ -206,7 +206,7 @@ MOD_TEST_SUITE(capture_a_real_call_and_replay_it) {
 }
 #endif
 #ifdef POPM_TESTING
-#include <dlfcn.h>
+#include "../../platform/os.h"
 namespace {
 char capture_last_log[256];
 PopModStatus capture_log(const PopModApi *, const char *message) {
@@ -218,15 +218,16 @@ PopModStatus capture_log(const PopModApi *, const char *message) {
 // refusing to install, because a hook that installed and then wrote nothing
 // would look like a candidate that was never called.
 MOD_TEST_SUITE(capture_fixture_fails_closed) {
-    void *library = dlopen("build/recomp/mods-fixtures/capture_mod.dylib", RTLD_NOW | RTLD_LOCAL);
+    void *library = os_dlopen(
+        ("build/recomp/mods-fixtures/capture_mod" + std::string(os_plugin_extension())).c_str());
     MOD_CHECK(library != nullptr);
     if (!library)
         return;
     auto init =
-        reinterpret_cast<PopModStatus (*)(const PopModApi *)>(dlsym(library, "pop_mod_init"));
+        reinterpret_cast<PopModStatus (*)(const PopModApi *)>(os_dlsym(library, "pop_mod_init"));
     MOD_CHECK(init != nullptr);
     if (!init) {
-        dlclose(library);
+        os_dlclose(library);
         return;
     }
     PopModApi api{};
@@ -261,7 +262,7 @@ MOD_TEST_SUITE(capture_fixture_fails_closed) {
     unsetenv("POPM_CAPTURE_TARGET");
     unsetenv("POPM_CAPTURE_OUT");
 
-    MOD_CHECK_EQ(dlclose(library), 0);
+    MOD_CHECK_EQ(os_dlclose(library), 0);
 }
 #endif
 #include "../../native/tests/page_track_tests.cpp"

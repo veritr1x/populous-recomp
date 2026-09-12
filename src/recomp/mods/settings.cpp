@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
-#include <unistd.h>
+#include "../platform/os.h"
 
 namespace {
 
@@ -117,13 +117,13 @@ bool mods_settings_save() {
     if (ec)
         return false;
     std::string temporary = path + ".tmp.XXXXXX";
-    int fd = mkstemp(temporary.data());
+    int fd = os_mkstemp(temporary.data());
     if (fd < 0)
         return false;
-    FILE *f = fdopen(fd, "wb");
+    FILE *f = (FILE *)os_fdopen(fd, "wb");
     if (!f) {
-        close(fd);
-        unlink(temporary.c_str());
+        os_fd_close(fd);
+        os_unlink(temporary.c_str());
         return false;
     }
     fprintf(f, "{\n");
@@ -133,13 +133,13 @@ bool mods_settings_save() {
         first = false;
     }
     fprintf(f, "\n}\n");
-    bool ok = !ferror(f) && fflush(f) == 0 && fsync(fd) == 0;
+    bool ok = !ferror(f) && fflush(f) == 0 && os_fd_fsync(fd) == 0;
     if (fclose(f) != 0)
         ok = false;
     if (ok)
-        ok = rename(temporary.c_str(), path.c_str()) == 0;
+        ok = os_rename(temporary.c_str(), path.c_str()) == 0;
     if (!ok)
-        unlink(temporary.c_str());
+        os_unlink(temporary.c_str());
     return ok;
 }
 

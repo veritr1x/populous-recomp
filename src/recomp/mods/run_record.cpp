@@ -5,14 +5,13 @@
 // and this record is written whatever it says.
 #include "mods_internal.h"
 #include "win32.h" /* host_clock_description */
+#include "../platform/os.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include <mutex>
 #include <map>
 #include <string>
 #include <utility>
@@ -97,7 +96,7 @@ bool g_build_hashed = false;
 // tree is torn that way does not fail where it was torn; it fails later,
 // somewhere else, differently on every run, which is exactly how a corrupted
 // process presents.
-pthread_mutex_t g_payloads_lock = PTHREAD_MUTEX_INITIALIZER;
+std::mutex g_payloads_lock;
 std::map<std::string, std::pair<uint64_t, const char *>> &payloads() {
     static std::map<std::string, std::pair<uint64_t, const char *>> m;
     return m;
@@ -318,6 +317,11 @@ uint64_t hash_file(const std::string &path, uint64_t h, bool *missing) {
 // on every machine. Depth-limited: a mod tree is a handful of levels, and a
 // symlink loop or a pathological pack must not walk the stack off the end of
 // whatever thread the loader called this on.
+int collect_name(const char *name, void *user) {
+    ((std::vector<std::string> *)user)->push_back(name);
+    return 0;
+}
+
 uint64_t hash_tree(const std::string &dir, uint64_t h, bool *missing, int depth) {
     if (depth > 32) {
         LOGW("mods: run record: %s is nested deeper than 32 levels; refusing "
@@ -327,23 +331,16 @@ uint64_t hash_tree(const std::string &dir, uint64_t h, bool *missing, int depth)
             *missing = true;
         return h;
     }
-    DIR *d = opendir(dir.c_str());
-    if (!d) {
+    std::vector<std::string> names;
+    if (os_listdir(dir.c_str(), collect_name, &names) != 0) {
         if (missing)
             *missing = true;
         return h;
     }
-    std::vector<std::string> names;
     // Only "." and "..". Every other dot-prefixed file is skipped by nobody
     // else: the overlay resolves and enumerates them, so a mod can ship one
     // and the guest can read it. Skipping them here let two guest-visible
     // asset sets record the same identity.
-    while (struct dirent *e = readdir(d)) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        names.push_back(e->d_name);
-    }
-    closedir(d);
     std::sort(names.begin(), names.end());
     for (const std::string &n : names) {
         std::string p = dir + "/" + n;
@@ -361,21 +358,23 @@ uint64_t hash_tree(const std::string &dir, uint64_t h, bool *missing, int depth)
         // it too and the identity has to describe what the guest can read.
         // A symlink cycle therefore still recurses, and the depth limit above
         // is what ends it.
-        struct stat st;
-        if (stat(p.c_str(), &st) != 0) {
+        OsStat st;
+        if (os_stat(p.c_str(), &st) != 0) {
             if (missing)
                 *missing = true;
             continue;
         }
-        if (S_ISDIR(st.st_mode)) {
+        if (st.is_dir) {
             h = hash_tree(p, h, missing, depth + 1);
-        } else if (S_ISREG(st.st_mode)) {
+        } else if (st.is_regular) {
             h = hash_file(p, h, missing);
         } else {
             // A device, socket or FIFO: it is part of what is there, so its
-            // presence and kind go into the identity, but it has no contents
-            // to read and must not be opened.
-            uint32_t kind = (uint32_t)(st.st_mode & S_IFMT);
+            // presence goes into the identity, but it has no contents to read
+            // and must not be opened. One code for every such kind: the
+            // platform layer does not distinguish them, and no mod pack
+            // legitimately ships one.
+            uint32_t kind = 0x0000F000u;
             h = fnv(&kind, sizeof kind, h);
         }
     }
@@ -465,9 +464,9 @@ extern "C" void mods_run_record_capture_payload(const char *dir) {
     uint64_t h = hash_tree(dir, 1469598103934665603ull, &bad, 0);
     if (bad)
         return;
-    pthread_mutex_lock(&g_payloads_lock);
+    g_payloads_lock.lock();
     payloads()[dir] = std::make_pair(h, "load");
-    pthread_mutex_unlock(&g_payloads_lock);
+    g_payloads_lock.unlock();
 }
 
 namespace {
@@ -618,7 +617,7 @@ bool mods_write_run_record(const char *path) {
         // Copied out under the lock, never held across what follows: the
         // iterator is only valid while the lock is, and the fallback below
         // walks a directory.
-        pthread_mutex_lock(&g_payloads_lock);
+        g_payloads_lock.lock();
         std::map<std::string, std::pair<uint64_t, const char *>>::const_iterator it =
             payloads().find(dir);
         if (it != payloads().end()) {
@@ -626,7 +625,7 @@ bool mods_write_run_record(const char *path) {
             when = it->second.second;
             captured = true;
         }
-        pthread_mutex_unlock(&g_payloads_lock);
+        g_payloads_lock.unlock();
         if (!captured) {
             // A mod from somewhere the start-of-run walk did not see. Better a
             // late hash, said to be late, than no identity at all.
@@ -692,7 +691,7 @@ bool mods_write_run_record(const char *path) {
         ok = fflush(f) == 0;
     if (fclose(f) != 0)
         ok = false; // the close is where ENOSPC lands
-    if (!ok || rename(tmp.c_str(), path) != 0) {
+    if (!ok || os_rename(tmp.c_str(), path) != 0) {
         LOGW("mods: run record could not be written to %s", path);
         remove(tmp.c_str());
         return false;

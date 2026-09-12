@@ -16,8 +16,8 @@
 #include "mods_internal.h"
 #include "display_settings.h"
 #include "../runtime/win32.h"
+#include "../platform/os.h"
 
-#include <pthread.h>
 #include <map>
 #include <stdio.h>
 #include <string>
@@ -63,18 +63,18 @@ void purge_dead_providers() {
     for (auto it = providers().begin(); it != providers().end();)
         it = (it->cb || it->ex) ? it + 1 : providers().erase(it);
 }
-pthread_t g_main{};
+OsThreadId g_main = 0;
 bool g_have_main = false;
 
 } // namespace
 
 void mods_host_set_main_thread() {
-    g_main = pthread_self();
+    g_main = os_thread_self();
     g_have_main = true;
 }
 
 bool mods_host_on_main_thread() {
-    return g_have_main && pthread_equal(pthread_self(), g_main);
+    return g_have_main && os_thread_self() == g_main;
 }
 
 PopModStatus mods_register_menu_item(uint32_t owner, const char *path, const char *label,

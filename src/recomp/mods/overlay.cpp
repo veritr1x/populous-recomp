@@ -3,19 +3,17 @@
 #include "mods_internal.h"
 #include "../runtime/mods_seam.h"
 #include "../runtime/win32.h"
+#include "../platform/os.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
-#include <dirent.h>
 #include <filesystem>
 #include <limits>
 #include <new>
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <thread>
-#include <unistd.h>
 #include <unordered_set>
 
 namespace {
@@ -77,6 +75,22 @@ bool mkdirs(const std::string &path) {
     return !ec && fs::is_directory(path, ec) && !ec;
 }
 
+// One directory entry compared case-insensitively against a wanted name.
+struct NameMatch {
+    std::string wanted_lower;
+    std::string found;
+    bool hit;
+};
+int match_name(const char *name, void *user) {
+    NameMatch *m = (NameMatch *)user;
+    if (lower(name) == m->wanted_lower) {
+        m->found = name;
+        m->hit = true;
+        return 1;
+    }
+    return 0;
+}
+
 // Mutating walks reject symlinks beneath the configured root: a profile link
 // must never turn a guest write or delete into a mutation of a lower tier.
 bool resolve_in(const std::string &root, const std::string &rel, bool create, bool mutation,
@@ -87,24 +101,18 @@ bool resolve_in(const std::string &root, const std::string &rel, bool create, bo
     if (!split(rel, &comps))
         return false;
     std::string host = root;
-    struct stat st;
-    if (stat(host.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+    OsStat st;
+    if (os_stat(host.c_str(), &st) != 0 || !st.is_dir)
         return false;
     for (size_t i = 0; i < comps.size(); ++i) {
         std::string name = comps[i];
         // Always use the directory's spelling, even on case-insensitive hosts.
-        bool found = false;
-        if (DIR *d = opendir(host.c_str())) {
-            while (dirent *e = readdir(d)) {
-                if (lower(e->d_name) == lower(name)) {
-                    name = e->d_name;
-                    found = true;
-                    break;
-                }
-            }
-            closedir(d);
-        } else
+        NameMatch match{lower(name), std::string(), false};
+        if (os_listdir(host.c_str(), match_name, &match) != 0)
             return false;
+        if (match.hit)
+            name = match.found;
+        bool found = match.hit;
         host += "/" + name;
         if (!found) {
             if (!create)
@@ -113,14 +121,14 @@ bool resolve_in(const std::string &root, const std::string &rel, bool create, bo
                 *out = host;
                 return true;
             }
-            if (mkdir(host.c_str(), 0755) != 0)
+            if (os_mkdir(host.c_str()) != 0)
                 return false;
         }
-        if (lstat(host.c_str(), &st) != 0)
+        if (os_lstat(host.c_str(), &st) != 0)
             return false;
-        if (mutation && S_ISLNK(st.st_mode))
+        if (mutation && st.is_symlink)
             return false;
-        if (i + 1 < comps.size() && (stat(host.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)))
+        if (i + 1 < comps.size() && (os_stat(host.c_str(), &st) != 0 || !st.is_dir))
             return false;
     }
     *out = host;
@@ -138,22 +146,22 @@ std::vector<std::string> roots_snapshot() {
 // Publish only a complete copy. A failed read/write/close leaves no partial
 // profile shadow hiding the still-good original.
 bool copy_up(const std::string &from, const std::string &to) {
-    struct stat st;
-    if (stat(from.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+    OsStat st;
+    if (os_stat(from.c_str(), &st) != 0 || !st.is_regular)
         return false;
     FILE *in = fopen(from.c_str(), "rb");
     if (!in)
         return false;
     std::string temp = to + ".pop-copy-XXXXXX";
-    int fd = mkstemp(temp.data());
+    int fd = os_mkstemp(temp.data());
     if (fd < 0) {
         fclose(in);
         return false;
     }
-    FILE *dest = fdopen(fd, "wb");
+    FILE *dest = (FILE *)os_fdopen(fd, "wb");
     if (!dest) {
-        close(fd);
-        unlink(temp.c_str());
+        os_fd_close(fd);
+        os_unlink(temp.c_str());
         fclose(in);
         return false;
     }
@@ -173,9 +181,9 @@ bool copy_up(const std::string &from, const std::string &to) {
     if (fclose(dest) != 0)
         ok = false;
     if (ok)
-        ok = rename(temp.c_str(), to.c_str()) == 0;
+        ok = os_rename(temp.c_str(), to.c_str()) == 0;
     if (!ok)
-        unlink(temp.c_str());
+        os_unlink(temp.c_str());
     return ok;
 }
 int resolver(const char *relative, int op, char *out, size_t len) {
@@ -252,8 +260,8 @@ PopModStatus mods_overlay_push(uint32_t owner, const char *dir, uint32_t *out_id
         if (!dir || !*dir)
             return POP_E_INVAL;
         std::string validated_dir(dir);
-        struct stat st;
-        if (stat(validated_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+        OsStat st;
+        if (os_stat(validated_dir.c_str(), &st) != 0 || !st.is_dir)
             return POP_E_NOTFOUND;
         // Directory validation can block; recheck the window before publishing.
         RegistryLock lock;
@@ -315,8 +323,8 @@ bool mods_cpp_overlay_resolve(const std::string &rel, int op, std::string *out) 
     std::string target;
     if (!resolve_in(roots[0], rel, true, true, &target))
         return false;
-    struct stat st;
-    if (op == WIN32_FILE_WRITE && lstat(target.c_str(), &st) != 0) {
+    OsStat st;
+    if (op == WIN32_FILE_WRITE && os_lstat(target.c_str(), &st) != 0) {
         for (size_t i = 1; i < roots.size(); ++i) {
             std::string source;
             if (!resolve_in(roots[i], rel, false, false, &source))
@@ -329,6 +337,21 @@ bool mods_cpp_overlay_resolve(const std::string &rel, int op, std::string *out) 
     *out = target;
     return true;
 }
+namespace {
+// Adds each entry of one root to the merged listing, first spelling wins.
+struct ListCollector {
+    std::unordered_set<std::string> *seen;
+    std::vector<std::pair<std::string, std::string>> *out;
+    std::string host;
+};
+int collect_listing(const char *name, void *user) {
+    ListCollector *c = (ListCollector *)user;
+    if (c->seen->insert(lower(name)).second)
+        c->out->push_back({name, c->host + "/" + name});
+    return 0;
+}
+} // namespace
+
 void mods_cpp_overlay_list(const std::string &rel,
                            std::vector<std::pair<std::string, std::string>> *out) {
     if (!out)
@@ -338,16 +361,8 @@ void mods_cpp_overlay_list(const std::string &rel,
         std::string host;
         if (!resolve_in(root, rel, false, false, &host))
             continue;
-        DIR *d = opendir(host.c_str());
-        if (!d)
-            continue;
-        while (dirent *e = readdir(d)) {
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
-                continue;
-            if (seen.insert(lower(e->d_name)).second)
-                out->push_back({e->d_name, host + "/" + e->d_name});
-        }
-        closedir(d);
+        ListCollector collect{&seen, out, host};
+        os_listdir(host.c_str(), collect_listing, &collect);
     }
 }
 void mods_fill_overlay_api(PopModApi *api) {

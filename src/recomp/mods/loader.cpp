@@ -25,13 +25,12 @@
 // sched_guest_threads_stopped: a plugin may not be unloaded while a guest
 // thread could still be inside one of its hooks.
 #include "../runtime/win32.h"
+#include "../platform/os.h"
 
 #include <algorithm>
 #include <atomic>
 #include <type_traits>
 #include <deque>
-#include <dirent.h>
-#include <dlfcn.h>
 #include <set>
 #include <stdio.h>
 #include <string>
@@ -410,7 +409,7 @@ void rollback(uint32_t owner) {
 // because "abi" appearing somewhere in a sentence is not something a caller or
 // a test can act on.
 PopModStatus validate_abi(void *handle, std::string *why) {
-    const PopModAbi *abi = (const PopModAbi *)dlsym(handle, "pop_mod_abi");
+    const PopModAbi *abi = (const PopModAbi *)os_dlsym(handle, "pop_mod_abi");
     if (!abi) {
         *why = "no pop_mod_abi record";
         return POP_E_ABI;
@@ -509,6 +508,13 @@ bool mods_record(uint32_t i, const char **id, const char **version, const char *
 
 // Discover, validate and order mods, then initialize each against its guarded API.
 // Production loading occurs once per process; shutdown owns unloading and resource reclamation.
+// Directory entries that can hold a mod: anything not hidden.
+static int collect_mod_dirs(const char *name, void *user) {
+    if (name[0] != '.')
+        ((std::vector<std::string> *)user)->push_back(name);
+    return 0;
+}
+
 bool mods_load_all() {
     g_shutdown_done = false; // a fresh run, so its record is due again
     // Once per process, and the spec is why: v1 unloads a plugin only at
@@ -573,12 +579,8 @@ bool mods_load_all() {
     std::vector<ModManifest> manifests;
     std::vector<std::pair<std::string, std::string>> rejected;
     auto discover = [&](const std::string &root, bool core) {
-        if (DIR *d = opendir(root.c_str())) {
-            std::vector<std::string> dirs;
-            while (struct dirent *e = readdir(d))
-                if (e->d_name[0] != '.')
-                    dirs.push_back(e->d_name);
-            closedir(d);
+        std::vector<std::string> dirs;
+        if (os_listdir(root.c_str(), collect_mod_dirs, &dirs) == 0) {
             std::sort(dirs.begin(), dirs.end()); // deterministic discovery
             for (const std::string &name : dirs) {
                 std::string dir = root + "/" + name;
@@ -677,19 +679,27 @@ bool mods_load_all() {
 
         if (why.empty() && !m.plugin_path.empty()) {
             std::string path = m.dir + "/" + m.plugin_path;
-            c.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+            OsStat st;
+            if (os_stat(path.c_str(), &st) != 0) {
+                // A manifest written on one platform names that platform's
+                // extension; the plugin shipped for this one has the same stem.
+                size_t dot = m.plugin_path.rfind('.');
+                if (dot != std::string::npos)
+                    path = m.dir + "/" + m.plugin_path.substr(0, dot) + os_plugin_extension();
+            }
+            c.handle = os_dlopen(path.c_str());
             if (!c.handle) {
-                why = std::string("dlopen failed: ") + dlerror();
+                why = std::string("dlopen failed: ") + os_dlerror();
             } else if ((c.status = validate_abi(c.handle, &why)) != POP_OK) {
                 // validate_abi said what is wrong and gave the typed status
             } else {
-                auto init = (PopModStatus (*)(const PopModApi *))dlsym(c.handle, "pop_mod_init");
+                auto init = (PopModStatus (*)(const PopModApi *))os_dlsym(c.handle, "pop_mod_init");
                 if (!init) {
                     why = "no pop_mod_init export";
                 } else {
-                    const PopModAbi *abi = (const PopModAbi *)dlsym(c.handle, "pop_mod_abi");
+                    const PopModAbi *abi = (const PopModAbi *)os_dlsym(c.handle, "pop_mod_abi");
                     mods_hooks_set_cpu_size(c.owner, abi->cpu_size);
-                    c.exit_fn = (PopModStatus (*)())dlsym(c.handle, "pop_mod_exit");
+                    c.exit_fn = (PopModStatus (*)())os_dlsym(c.handle, "pop_mod_exit");
                     // Open across pop_mod_init and nothing else. A [script]
                     // running afterwards can call back into a plugin API the
                     // mod retained, and that must not be a second chance to
@@ -805,7 +815,7 @@ void shutdown_now() {
     // guard it would reach is only reachable while the code that calls it is.
     for (size_t i = generation_base(); i < contexts().size(); ++i)
         if (contexts()[i].handle) {
-            dlclose(contexts()[i].handle);
+            os_dlclose(contexts()[i].handle);
             contexts()[i].handle = nullptr;
         }
     mods_settings_save();

@@ -48,6 +48,7 @@ endforeach()
 # The roots resolver, run from a relocated app-shaped directory by roots_tests.sh.
 add_executable(roots_probe roots.cpp ${POP_ROOT}/mods/core/tests/roots_probe.cpp)
 target_include_directories(roots_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(roots_probe PRIVATE recomp_platform)
 pop_optimize(roots_probe 1)
 pop_test_binary(roots_probe)
 if(NOT WIN32)

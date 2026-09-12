@@ -15,12 +15,10 @@ extern "C" void mods_test_set_next_owner(uint32_t owner);
 extern "C" uint32_t mods_test_next_owner(void);
 extern "C" int mods_test_guards_in_flight(void);
 
-#include <dlfcn.h>
+#include "../../platform/os.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <atomic>
 #include <setjmp.h>
 #include <string>
@@ -118,6 +116,11 @@ void fresh() {
 }
 
 // One mod directory: its manifest, and its plugin copied in from the fixtures.
+// The fixture named with THIS platform's extension, for manifests and copies.
+std::string plug(const char *stem) {
+    return std::string(stem) + os_plugin_extension();
+}
+
 void install(const char *dir, const std::string &toml, const char *dylib = nullptr) {
     std::string d = std::string(TREE) + "/" + dir;
     mkdirs(d);
@@ -202,8 +205,10 @@ void two_case_cycle() {
 
 void two_case_duplicate() {
     fresh();
-    install("a", manifest("dup.same", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
-    install("b", manifest("dup.same", "[plugin]\npath = \"good_b.dylib\"\n"), "good_b.dylib");
+    install("a", manifest("dup.same", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
+    install("b", manifest("dup.same", "[plugin]\npath = \"" + plug("good_b") + "\"\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     // Exactly one survives, and the reason names the duplicate id.
     MOD_CHECK(loaded("dup.same"));
@@ -221,11 +226,13 @@ void two_case_duplicate() {
 
 void two_case_conflict() {
     fresh();
-    install("a", manifest("conf.first", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("conf.first", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     install("b",
             manifest("conf.second", "conflicts = [\"conf.first\"]\n"
-                                    "[plugin]\npath = \"good_b.dylib\"\n"),
-            "good_b.dylib");
+                                    "[plugin]\npath = \"" +
+                                        plug("good_b") + "\"\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("conf.first"));
     MOD_CHECK(!loaded("conf.second"));
@@ -243,12 +250,11 @@ MOD_TEST_SUITE(loader_packaged_core_display) {
     MOD_CHECK_EQ(mods_record_status("core.display"), POP_OK);
     if (!loaded("core.display"))
         fprintf(stderr, "core.display: %s\n", reason("core.display").c_str());
-    // RTLD_NOLOAD proves the loader opened the installed artifact itself.
-    void *lib =
-        dlopen("build/recomp/mods/core/display/display.dylib", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+    // A no-load open proves the loader opened the installed artifact itself.
+    void *lib = os_dlopen_noload(("build/recomp/mods/core/display/" + plug("display")).c_str());
     MOD_CHECK(lib != nullptr);
     if (lib)
-        dlclose(lib);
+        os_dlclose(lib);
     MOD_CHECK(mods_test_reset_loader());
 }
 
@@ -258,7 +264,8 @@ MOD_TEST_SUITE(loader_core_roots) {
     std::string core = mod_test_dir("core-tree");
     setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
     TREE = core.c_str();
-    install("first", manifest("z.core", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("first", manifest("z.core", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     install("second", manifest("b.core", "requires = [\"z.core >= 1.0.0\"]\n"));
     TREE = user;
     install("user", manifest("a.user", "requires = [\"b.core >= 1.0.0\"]\n"));
@@ -281,7 +288,7 @@ MOD_TEST_SUITE(loader_core_discovery_wins_duplicate) {
     TREE = core.c_str();
     install("z", manifest("same.id"));
     TREE = user;
-    install("a", manifest("same.id", "[plugin]\npath = \"missing.dylib\"\n"));
+    install("a", manifest("same.id", "[plugin]\npath = \"" + plug("missing") + "\"\n"));
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("same.id"));
     MOD_CHECK_EQ(mods_record_count(), 2u);
@@ -313,7 +320,7 @@ MOD_TEST_SUITE(loader_missing_core_and_failed_core_allow_users) {
     std::string core = mod_test_dir("core-failure");
     setenv("POPM_CORE_MODS_DIR", core.c_str(), 1);
     TREE = core.c_str();
-    install("broken", manifest("z.broken", "[plugin]\npath = \"missing.dylib\"\n"));
+    install("broken", manifest("z.broken", "[plugin]\npath = \"" + plug("missing") + "\"\n"));
     TREE = user;
     install("user", manifest("a.user"));
     MOD_CHECK(mods_load_all());
@@ -359,18 +366,21 @@ MOD_TEST_SUITE(loader_core_conflict_precedes_lexically_smaller_user) {
 
 MOD_TEST_SUITE(loader_loads_two_and_rolls_back_the_third) {
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
     install("c",
-            manifest("bad.init", "[plugin]\npath = \"bad_init.dylib\"\n"
-                                 "[assets]\npath = \"data\"\n"
-                                 "[settings]\n"
-                                 "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
-            "bad_init.dylib");
+            manifest("bad.init", "[plugin]\npath = \"" + plug("bad_init") +
+                                     "\"\n"
+                                     "[assets]\npath = \"data\"\n"
+                                     "[settings]\n"
+                                     "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
+            plug("bad_init").c_str());
     mkdirs(std::string(TREE) + "/c/data");
 
     uint32_t hooks_before = mods_hooks_installed_count();
@@ -442,10 +452,11 @@ MOD_TEST_SUITE(loader_negative_cases) {
         "id = \"wrong.api\"\nname = \"W\"\nversion = \"1.0.0\"\napi = 99\n"
         "game = \"815ba8a550f571c3\"\n",
         nullptr, "api");
-    one("no pop_mod_init", manifest("no.init", "[plugin]\npath = \"no_init.dylib\"\n"),
-        "no_init.dylib", "pop_mod_init");
-    one("unusable ABI record", manifest("bad.abi", "[plugin]\npath = \"bad_abi.dylib\"\n"),
-        "bad_abi.dylib", "abi");
+    one("no pop_mod_init", manifest("no.init", "[plugin]\npath = \"" + plug("no_init") + "\"\n"),
+        plug("no_init").c_str(), "pop_mod_init");
+    one("unusable ABI record",
+        manifest("bad.abi", "[plugin]\npath = \"" + plug("bad_abi") + "\"\n"),
+        plug("bad_abi").c_str(), "abi");
     one("a [script] mod with no Lua runtime",
         manifest("script.only", "[script]\npath = \"main.lua\"\n"), nullptr, "script");
 
@@ -472,11 +483,13 @@ MOD_TEST_SUITE(loader_negative_cases) {
 
 MOD_TEST_SUITE(loader_rejects_dependents_of_a_failed_init) {
     fresh();
-    install("a", manifest("bad.init", "[plugin]\npath = \"bad_init.dylib\"\n"), "bad_init.dylib");
+    install("a", manifest("bad.init", "[plugin]\npath = \"" + plug("bad_init") + "\"\n"),
+            plug("bad_init").c_str());
     install("b",
             manifest("needs.bad", "requires = [\"bad.init >= 1.0.0\"]\n"
-                                  "[plugin]\npath = \"good_a.dylib\"\n"),
-            "good_a.dylib");
+                                  "[plugin]\npath = \"" +
+                                      plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("bad.init"));
     // Its dependent never ran its own init at all.
@@ -489,7 +502,8 @@ MOD_TEST_SUITE(loader_rejects_dependents_of_a_failed_init) {
 
 MOD_TEST_SUITE(loader_serves_an_old_cpu_layout) {
     fresh();
-    install("x", manifest("old.cpu", "[plugin]\npath = \"old_cpu.dylib\"\n"), "old_cpu.dylib");
+    install("x", manifest("old.cpu", "[plugin]\npath = \"" + plug("old_cpu") + "\"\n"),
+            plug("old_cpu").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("old.cpu"));
 
@@ -501,10 +515,10 @@ MOD_TEST_SUITE(loader_serves_an_old_cpu_layout) {
     int32_t i = recomp_index_of(0x004ec6f0u);
     recomp_hook_ptrs[i](c, (uint32_t)i);
 
-    void *h = dlopen((std::string(TREE) + "/x/old_cpu.dylib").c_str(), RTLD_NOLOAD);
-    unsigned *size = (unsigned *)dlsym(h, "g_old_cpu_size");
-    unsigned *eax = (unsigned *)dlsym(h, "g_old_cpu_eax");
-    unsigned *declared = (unsigned *)dlsym(h, "g_old_cpu_declared");
+    void *h = os_dlopen_noload((std::string(TREE) + "/x/" + plug("old_cpu")).c_str());
+    unsigned *size = (unsigned *)os_dlsym(h, "g_old_cpu_size");
+    unsigned *eax = (unsigned *)os_dlsym(h, "g_old_cpu_eax");
+    unsigned *declared = (unsigned *)os_dlsym(h, "g_old_cpu_declared");
     MOD_CHECK(size && eax && declared);
     MOD_CHECK_EQ(*eax, 0xfeedfaceu);
     // The plugin's own header said this, and the host served exactly it.
@@ -516,10 +530,12 @@ MOD_TEST_SUITE(loader_settings_and_shutdown) {
     fresh();
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     MOD_CHECK(mods_load_all());
     uint32_t b = owner_of("good.b");
 
@@ -558,22 +574,23 @@ MOD_TEST_SUITE(loader_settings_and_shutdown) {
 MOD_TEST_SUITE(loader_rollback_undoes_registrations_that_really_happened) {
     fresh();
     install("c",
-            manifest("bad.init", "[plugin]\npath = \"bad_init.dylib\"\n"
-                                 "[assets]\npath = \"data\"\n"
-                                 "[settings]\n"
-                                 "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
-            "bad_init.dylib");
+            manifest("bad.init", "[plugin]\npath = \"" + plug("bad_init") +
+                                     "\"\n"
+                                     "[assets]\npath = \"data\"\n"
+                                     "[settings]\n"
+                                     "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
+            plug("bad_init").c_str());
     mkdirs(std::string(TREE) + "/c/data");
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("bad.init"));
     uint32_t owner = owner_of("bad.init");
 
-    void *h = dlopen((std::string(TREE) + "/c/bad_init.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/c/" + plug("bad_init")).c_str());
     MOD_CHECK(h != nullptr);
     if (!h)
         return;
     auto st = [&](const char *sym) {
-        int *p = (int *)dlsym(h, sym);
+        int *p = (int *)os_dlsym(h, sym);
         return p ? *p : -999;
     };
     // Each registration succeeded before init failed. POP_OK is 0.
@@ -585,7 +602,7 @@ MOD_TEST_SUITE(loader_rollback_undoes_registrations_that_really_happened) {
     MOD_CHECK_EQ(st("g_bad_menu_st"), 0);
     MOD_CHECK_EQ(st("g_bad_provider_st"), 0);
     MOD_CHECK_EQ(st("g_bad_setting_st"), 0);
-    unsigned *mem = (unsigned *)dlsym(h, "g_bad_mem");
+    unsigned *mem = (unsigned *)os_dlsym(h, "g_bad_mem");
     MOD_CHECK(mem && *mem != 0); // it really got guest memory
 
     // And none of it survived. The observable ones are observed rather than
@@ -593,7 +610,7 @@ MOD_TEST_SUITE(loader_rollback_undoes_registrations_that_really_happened) {
     // its calls, and neither may be reached now.
     MOD_CHECK(!mods_input_key(0x22, 0x47, true));
     MOD_CHECK(!mods_input_key(0x22, 0x47, false));
-    unsigned *keys = (unsigned *)dlsym(h, "g_bad_key_seen");
+    unsigned *keys = (unsigned *)os_dlsym(h, "g_bad_key_seen");
     MOD_CHECK(keys && *keys == 0);
     MOD_CHECK_EQ(mods_guest_alloc_count(owner), 0u);
     MOD_CHECK_EQ(mods_overlay_layer_count(), 0u);
@@ -643,7 +660,8 @@ MOD_TEST_SUITE(loader_absent_and_empty_directories) {
 // ---------------------------------------------------------------------------
 MOD_TEST_SUITE(loader_abi_rejection_is_typed) {
     fresh();
-    install("x", manifest("bad.abi", "[plugin]\npath = \"bad_abi.dylib\"\n"), "bad_abi.dylib");
+    install("x", manifest("bad.abi", "[plugin]\npath = \"" + plug("bad_abi") + "\"\n"),
+            plug("bad_abi").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("bad.abi"));
     MOD_CHECK_EQ(mods_record_status("bad.abi"), POP_E_ABI);
@@ -651,7 +669,8 @@ MOD_TEST_SUITE(loader_abi_rejection_is_typed) {
 
     // A plugin with no record at all is the same typed refusal.
     fresh();
-    install("y", manifest("no.init", "[plugin]\npath = \"no_init.dylib\"\n"), "no_init.dylib");
+    install("y", manifest("no.init", "[plugin]\npath = \"" + plug("no_init") + "\"\n"),
+            plug("no_init").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("no.init"));
     // no_init.c DOES export a valid record, so this one is refused for the
@@ -663,23 +682,24 @@ MOD_TEST_SUITE(loader_abi_rejection_is_typed) {
     // A record that is absent, one that stops mid-member, and one claiming a
     // struct larger than this host's: each is POP_E_ABI, exactly.
     fresh();
-    install("m", manifest("abi.missing", "[plugin]\npath = \"abi_missing.dylib\"\n"),
-            "abi_missing.dylib");
+    install("m", manifest("abi.missing", "[plugin]\npath = \"" + plug("abi_missing") + "\"\n"),
+            plug("abi_missing").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("abi.missing"));
     MOD_CHECK_EQ(mods_record_status("abi.missing"), POP_E_ABI);
     MOD_CHECK(reason("abi.missing").find("no pop_mod_abi") != std::string::npos);
 
     fresh();
-    install("s", manifest("abi.short", "[plugin]\npath = \"abi_short.dylib\"\n"),
-            "abi_short.dylib");
+    install("s", manifest("abi.short", "[plugin]\npath = \"" + plug("abi_short") + "\"\n"),
+            plug("abi_short").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("abi.short"));
     MOD_CHECK_EQ(mods_record_status("abi.short"), POP_E_ABI);
     MOD_CHECK(reason("abi.short").find("member boundary") != std::string::npos);
 
     fresh();
-    install("g", manifest("abi.big", "[plugin]\npath = \"abi_big.dylib\"\n"), "abi_big.dylib");
+    install("g", manifest("abi.big", "[plugin]\npath = \"" + plug("abi_big") + "\"\n"),
+            plug("abi_big").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("abi.big"));
     MOD_CHECK_EQ(mods_record_status("abi.big"), POP_E_ABI);
@@ -687,7 +707,8 @@ MOD_TEST_SUITE(loader_abi_rejection_is_typed) {
     // And the old-header plugin is still served: a smaller cpu_size is a
     // supported plugin, not a rejected one.
     fresh();
-    install("z", manifest("old.cpu", "[plugin]\npath = \"old_cpu.dylib\"\n"), "old_cpu.dylib");
+    install("z", manifest("old.cpu", "[plugin]\npath = \"" + plug("old_cpu") + "\"\n"),
+            plug("old_cpu").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("old.cpu"));
 }
@@ -697,7 +718,8 @@ MOD_TEST_SUITE(loader_abi_rejection_is_typed) {
 // ---------------------------------------------------------------------------
 MOD_TEST_SUITE(loader_shutdown_waits_for_quiescence) {
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.a"));
     uint32_t owner = owner_of("good.a");
@@ -714,9 +736,10 @@ MOD_TEST_SUITE(loader_shutdown_waits_for_quiescence) {
     fresh();
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     uint32_t b = owner_of("good.b");
     const PopModApi *api_b = mods_api_for(b);
@@ -761,29 +784,31 @@ MOD_TEST_SUITE(loader_rollback_is_observable_from_every_side) {
     // A value the failing mod will try to change, written by a mod that loads.
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
     install("c",
-            manifest("bad.init", "[plugin]\npath = \"bad_init.dylib\"\n"
-                                 "[assets]\npath = \"data\"\n"
-                                 "[settings]\n"
-                                 "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
-            "bad_init.dylib");
+            manifest("bad.init", "[plugin]\npath = \"" + plug("bad_init") +
+                                     "\"\n"
+                                     "[assets]\npath = \"data\"\n"
+                                     "[settings]\n"
+                                     "level = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
+            plug("bad_init").c_str());
     mkdirs(std::string(TREE) + "/c/data");
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
     MOD_CHECK(!loaded("bad.init"));
     uint32_t bad = owner_of("bad.init");
 
-    void *h = dlopen((std::string(TREE) + "/c/bad_init.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/c/" + plug("bad_init")).c_str());
     MOD_CHECK(h != nullptr);
     if (!h)
         return;
 
     // Its event subscription is gone, observed by firing the event rather than
     // by counting subscriptions: nothing of it is reached.
-    unsigned *fired = (unsigned *)dlsym(h, "g_bad_event_fired");
+    unsigned *fired = (unsigned *)os_dlsym(h, "g_bad_event_fired");
     MOD_CHECK(fired && *fired == 0);
     // Driven through the real dispatch table, the way a generated call site
     // reaches it, so the event really fires. If the subscription had survived
@@ -798,7 +823,7 @@ MOD_TEST_SUITE(loader_rollback_is_observable_from_every_side) {
     uint32_t n = 0;
     MOD_CHECK_EQ(mods_texture_override(0x1234u, 4, 4, 0, &px, &n), 0);
     MOD_CHECK(px == nullptr);
-    unsigned *provider_calls = (unsigned *)dlsym(h, "g_bad_provider_calls");
+    unsigned *provider_calls = (unsigned *)os_dlsym(h, "g_bad_provider_calls");
     MOD_CHECK(provider_calls && *provider_calls == 0);
 
     // Its settings declaration went with it, and the value the surviving mod
@@ -841,9 +866,10 @@ MOD_TEST_SUITE(loader_retained_api_and_in_flight_teardown) {
     fresh();
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
     g_inflight_owner = owner_of("good.b");
@@ -899,14 +925,15 @@ MOD_TEST_SUITE(loader_api_is_live_through_pop_mod_exit) {
     fresh();
     install("b",
             manifest("good.b",
-                     "[plugin]\npath = \"good_b.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
-            "good_b.dylib");
+                     "[plugin]\npath = \"" + plug("good_b") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 2, min = 0, max = 9 }\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
     uint32_t b = owner_of("good.b");
 
-    void *h = dlopen((std::string(TREE) + "/b/good_b.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/b/" + plug("good_b")).c_str());
     MOD_CHECK(h != nullptr);
     if (!h)
         return;
@@ -917,7 +944,7 @@ MOD_TEST_SUITE(loader_api_is_live_through_pop_mod_exit) {
 
     // Ask this fixture to write at exit. It is off by default so the other
     // suites that load it keep asserting about their own values.
-    int *enable = (int *)dlsym(h, "g_good_b_write_at_exit");
+    int *enable = (int *)os_dlsym(h, "g_good_b_write_at_exit");
     MOD_CHECK(enable != nullptr);
     if (enable)
         *enable = 1;
@@ -926,7 +953,7 @@ MOD_TEST_SUITE(loader_api_is_live_through_pop_mod_exit) {
     MOD_CHECK_EQ(mods_record_count(), 0u); // the teardown really ran
 
     // Its exit handler wrote through its own API, and the write succeeded.
-    int *st = (int *)dlsym(h, "g_good_b_exit_write_status");
+    int *st = (int *)os_dlsym(h, "g_good_b_exit_write_status");
     MOD_CHECK(st != nullptr);
     MOD_CHECK_EQ(st ? *st : -1, 0);
 
@@ -934,7 +961,7 @@ MOD_TEST_SUITE(loader_api_is_live_through_pop_mod_exit) {
     // mod code and a removal needs the baton: a host that had given the baton
     // up before running the exits would have this queued on the one thread
     // left to apply the queue, which is to say never applied at all.
-    int *unhook = (int *)dlsym(h, "g_good_b_exit_unhook_status");
+    int *unhook = (int *)os_dlsym(h, "g_good_b_exit_unhook_status");
     MOD_CHECK(unhook != nullptr);
     MOD_CHECK_EQ(unhook ? *unhook : -1, 0);
 
@@ -961,7 +988,8 @@ uint32_t g_outer_esp = 0;
 
 MOD_TEST_SUITE(loader_a_guard_unwound_past_leaves_no_count_behind) {
     fresh();
-    install("b", manifest("good.b", "[plugin]\npath = \"good_b.dylib\"\n"), "good_b.dylib");
+    install("b", manifest("good.b", "[plugin]\npath = \"" + plug("good_b") + "\"\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
     const PopModApi *api = mods_api_for(owner_of("good.b"));
@@ -1008,7 +1036,8 @@ MOD_TEST_SUITE(loader_a_guard_unwound_past_leaves_no_count_behind) {
 
 MOD_TEST_SUITE(loader_loads_once_per_process) {
     fresh();
-    install("b", manifest("good.b", "[plugin]\npath = \"good_b.dylib\"\n"), "good_b.dylib");
+    install("b", manifest("good.b", "[plugin]\npath = \"" + plug("good_b") + "\"\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
     const uint32_t owner = owner_of("good.b");
@@ -1034,7 +1063,8 @@ MOD_TEST_SUITE(loader_refuses_a_mod_when_owner_ids_run_out) {
     // wrapped would hand a mod one of those and that mod's rollback would take
     // the runtime's own event hooks with it.
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     mods_test_set_next_owner(0xffffffffu);
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("good.a"));
@@ -1043,7 +1073,8 @@ MOD_TEST_SUITE(loader_refuses_a_mod_when_owner_ids_run_out) {
 
     // One left: it loads, and it is the last one that can.
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     mods_test_set_next_owner(0xfffffffeu);
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.a"));
@@ -1091,9 +1122,10 @@ MOD_TEST_SUITE(loader_a_failed_mod_keeps_a_pointer_that_refuses) {
     fresh();
     install("c",
             manifest("bad.init",
-                     "[plugin]\npath = \"bad_init.dylib\"\n"
-                     "[settings]\nlevel = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
-            "bad_init.dylib");
+                     "[plugin]\npath = \"" + plug("bad_init") +
+                         "\"\n"
+                         "[settings]\nlevel = { type = \"int\", default = 1, min = 0, max = 9 }\n"),
+            plug("bad_init").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("bad.init"));
 
@@ -1101,15 +1133,15 @@ MOD_TEST_SUITE(loader_a_failed_mod_keeps_a_pointer_that_refuses) {
     // registration before returning an error, so it is exactly as likely to
     // have saved these as a mod that succeeded - and a rollback that only
     // stops NEW lookups leaves a saved pointer as a live way back in.
-    void *h = dlopen((std::string(TREE) + "/c/bad_init.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/c/" + plug("bad_init")).c_str());
     MOD_CHECK(h != nullptr);
     if (!h)
         return;
     typedef PopModStatus (*AllocFn)(const PopModApi *, uint32_t, uint32_t *);
     typedef PopModStatus (*SetFn)(const PopModApi *, const char *, int64_t);
-    const PopModApi **saved_api = (const PopModApi **)dlsym(h, "g_bad_saved_api");
-    AllocFn *saved_alloc = (AllocFn *)dlsym(h, "g_bad_saved_alloc");
-    SetFn *saved_set = (SetFn *)dlsym(h, "g_bad_saved_settings_set");
+    const PopModApi **saved_api = (const PopModApi **)os_dlsym(h, "g_bad_saved_api");
+    AllocFn *saved_alloc = (AllocFn *)os_dlsym(h, "g_bad_saved_alloc");
+    SetFn *saved_set = (SetFn *)os_dlsym(h, "g_bad_saved_settings_set");
     MOD_CHECK(saved_api && saved_alloc && saved_set);
     if (!saved_api || !saved_alloc || !saved_set)
         return;
@@ -1135,7 +1167,8 @@ MOD_TEST_SUITE(loader_a_failed_mod_keeps_a_pointer_that_refuses) {
 
 MOD_TEST_SUITE(loader_a_retained_guard_survives_the_teardown_that_races_it) {
     fresh();
-    install("b", manifest("good.b", "[plugin]\npath = \"good_b.dylib\"\n"), "good_b.dylib");
+    install("b", manifest("good.b", "[plugin]\npath = \"" + plug("good_b") + "\"\n"),
+            plug("good_b").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.b"));
 
@@ -1194,8 +1227,8 @@ MOD_TEST_SUITE(loader_a_retained_guard_survives_the_teardown_that_races_it) {
 // ---------------------------------------------------------------------------
 MOD_TEST_SUITE(loader_publishes_init_time_hooks_before_the_entry_point) {
     fresh();
-    install("e", manifest("entry.hook", "[plugin]\npath = \"entry_hook.dylib\"\n"),
-            "entry_hook.dylib");
+    install("e", manifest("entry.hook", "[plugin]\npath = \"" + plug("entry_hook") + "\"\n"),
+            plug("entry_hook").c_str());
     // The loader runs where it really runs: a thread that is not a guest
     // thread, before the guest has been entered at all. Loading from a thread
     // marked guest would install the init-time hook inline and prove nothing
@@ -1209,12 +1242,12 @@ MOD_TEST_SUITE(loader_publishes_init_time_hooks_before_the_entry_point) {
     sched_set_guest_thread(true);
     MOD_CHECK(loaded("entry.hook"));
 
-    void *h = dlopen((std::string(TREE) + "/e/entry_hook.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/e/" + plug("entry_hook")).c_str());
     MOD_CHECK(h != nullptr);
     if (!h)
         return;
-    int *st = (int *)dlsym(h, "g_entry_hook_install_status");
-    unsigned *calls = (unsigned *)dlsym(h, "g_entry_hook_calls");
+    int *st = (int *)os_dlsym(h, "g_entry_hook_install_status");
+    unsigned *calls = (unsigned *)os_dlsym(h, "g_entry_hook_calls");
     MOD_CHECK(st && calls);
     if (!st || !calls)
         return;
@@ -1245,14 +1278,15 @@ MOD_TEST_SUITE(loader_a_failed_init_leaves_the_page_alone) {
     mods_page_close();
     MOD_CHECK(!mods_page_visible());
 
-    install("c", manifest("bad.page", "[plugin]\npath = \"bad_page.dylib\"\n"), "bad_page.dylib");
+    install("c", manifest("bad.page", "[plugin]\npath = \"" + plug("bad_page") + "\"\n"),
+            plug("bad_page").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(!loaded("bad.page"));
 
-    void *h = dlopen((std::string(TREE) + "/c/bad_page.dylib").c_str(), RTLD_NOLOAD);
+    void *h = os_dlopen_noload((std::string(TREE) + "/c/" + plug("bad_page")).c_str());
     MOD_CHECK(h != nullptr);
     if (h) {
-        int *opened = (int *)dlsym(h, "g_bad_page_open_status");
+        int *opened = (int *)os_dlsym(h, "g_bad_page_open_status");
         MOD_CHECK(opened != nullptr);
         MOD_CHECK_EQ(opened ? *opened : -1, 0); // it really did open it
     }
@@ -1268,8 +1302,10 @@ MOD_TEST_SUITE(loader_a_failed_init_leaves_the_page_alone) {
 // ---------------------------------------------------------------------------
 MOD_TEST_SUITE(loader_a_failed_init_cannot_remove_another_mods_hook) {
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
-    install("z", manifest("bad.thief", "[plugin]\npath = \"bad_init.dylib\"\n"), "bad_init.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
+    install("z", manifest("bad.thief", "[plugin]\npath = \"" + plug("bad_init") + "\"\n"),
+            plug("bad_init").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK(loaded("good.a"));
     MOD_CHECK(!loaded("bad.thief"));
@@ -1295,7 +1331,8 @@ MOD_TEST_SUITE(loader_record_accessors_are_safe_before_and_after) {
     // After a teardown, which is the state that produces the wrap: the
     // generation base sits at the end of the deque.
     fresh();
-    install("a", manifest("good.a", "[plugin]\npath = \"good_a.dylib\"\n"), "good_a.dylib");
+    install("a", manifest("good.a", "[plugin]\npath = \"" + plug("good_a") + "\"\n"),
+            plug("good_a").c_str());
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 1u);
     mods_shutdown();
@@ -1337,9 +1374,9 @@ MOD_TEST_SUITE(loader_an_empty_run_still_writes_its_record) {
     // what is found afterwards was written by THIS shutdown and is not
     // something an earlier one left behind.
     const std::string record = "build/recomp/mods/run.json";
-    unlink(record.c_str());
-    struct stat st;
-    MOD_CHECK(stat(record.c_str(), &st) != 0);
+    os_unlink(record.c_str());
+    OsStat st;
+    MOD_CHECK(os_stat(record.c_str(), &st) != 0);
 
     MOD_CHECK(mods_load_all());
     MOD_CHECK_EQ(mods_record_count(), 0u); // the loader ran and found none
@@ -1348,11 +1385,21 @@ MOD_TEST_SUITE(loader_an_empty_run_still_writes_its_record) {
     // A run that reached the loader and found nothing is still a run, and its
     // record is what distinguishes "no mods ran" from "nothing wrote a
     // record". Gating this on the record count meant those runs wrote nothing.
-    MOD_CHECK_EQ(stat(record.c_str(), &st), 0);
-    MOD_CHECK(st.st_size > 0);
+    MOD_CHECK_EQ(os_stat(record.c_str(), &st), 0);
+    MOD_CHECK(st.size > 0);
 
     // The mod set the record names is the run record's own business and is
     // asserted against a fresh process in tools/recomp/mods_test.sh; this
     // binary has loaded mods many times over, so what it accumulates here
     // would not be evidence either way.
+}
+
+MOD_TEST_SUITE(loader_plugin_extension_substitution) {
+    fresh();
+    // The manifest names a suffix from another platform; the shipped file has
+    // this platform's. The loader must find it by stem.
+    install("x", manifest("ext.sub", "[plugin]\npath = \"good_a.plugin\"\n"),
+            plug("good_a").c_str());
+    MOD_CHECK(mods_load_all());
+    MOD_CHECK_EQ(mods_record_status("ext.sub"), POP_OK);
 }

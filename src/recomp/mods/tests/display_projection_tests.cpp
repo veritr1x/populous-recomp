@@ -1,6 +1,6 @@
 #include "mods_tests.h"
 #include "../pop_mod_api.h"
-#include <dlfcn.h>
+#include "../../platform/os.h"
 #include <cmath>
 #include <map>
 #include <string>
@@ -91,18 +91,19 @@ PopModApi fake_api() {
 MOD_TEST_SUITE(display_projection_fixture) {
     // Compiled as C by the same toolchain as all loader fixtures, then loaded
     // through its public ABI; this exercises the shipping hook callbacks.
-    void *lib =
-        dlopen("build/recomp/mods-fixtures/display_projection.dylib", RTLD_NOW | RTLD_LOCAL);
+    void *lib = os_dlopen(
+        ("build/recomp/mods-fixtures/display_projection" + std::string(os_plugin_extension()))
+            .c_str());
     MOD_CHECK(lib != nullptr);
     if (!lib) {
-        fprintf(stderr, "%s\n", dlerror());
+        fprintf(stderr, "%s\n", os_dlerror());
         return;
     }
-    auto init = (PopModStatus (*)(const PopModApi *))dlsym(lib, "pop_mod_init");
-    auto stop = (PopModStatus (*)())dlsym(lib, "pop_mod_exit");
+    auto init = (PopModStatus (*)(const PopModApi *))os_dlsym(lib, "pop_mod_init");
+    auto stop = (PopModStatus (*)())os_dlsym(lib, "pop_mod_exit");
     MOD_CHECK(init && stop);
     if (!init || !stop) {
-        dlclose(lib);
+        os_dlclose(lib);
         return;
     }
     hooks.clear();
@@ -364,7 +365,7 @@ MOD_TEST_SUITE(display_projection_fixture) {
     origin = 100;
     canvas_width = 640;
     MOD_CHECK_EQ(stop(), POP_OK);
-    dlclose(lib);
+    os_dlclose(lib);
 }
 
 #include "../mods_internal.h"

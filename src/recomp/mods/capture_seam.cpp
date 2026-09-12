@@ -10,6 +10,7 @@
 // the process: the mods test binary compiles this file through the same glob,
 // so its test bridge includes only the test files.
 #include "../native/page_track.cpp"
+#include "../platform/os.h"
 #include "../native/shim_capture.cpp"
 #include "../native/replay.h"
 #include "../runtime/guest.h"
@@ -54,7 +55,7 @@ thread_local bool t_cancelled_by_unwind = false;
 } // namespace
 
 void mods_capture_unwound(void) {
-    if (g_capture_owner.load(std::memory_order_acquire) != (uintptr_t)pthread_self() ||
+    if (g_capture_owner.load(std::memory_order_acquire) != (uintptr_t)os_thread_self() ||
         !g_capture_depth || mods_hook_depth() >= g_capture_depth)
         return;
     t_cancelled_by_unwind = true;
@@ -135,7 +136,7 @@ int pop_capture_begin(uint32_t max_pages, uint32_t max_calls) {
     }
     g_capture_depth = mods_hook_depth();
     t_cancelled_by_unwind = false;
-    g_capture_owner.store((uintptr_t)pthread_self(), std::memory_order_release);
+    g_capture_owner.store((uintptr_t)os_thread_self(), std::memory_order_release);
     return 1;
 }
 
@@ -148,7 +149,7 @@ int pop_capture_write(const char *path, uint32_t target, const pop_cpu_v1 *entry
             *why = "capture cancelled by unwind";
         return 0;
     }
-    if (g_capture_owner.load(std::memory_order_acquire) != (uintptr_t)pthread_self()) {
+    if (g_capture_owner.load(std::memory_order_acquire) != (uintptr_t)os_thread_self()) {
         if (why)
             *why = "this thread does not own a capture window";
         return 0;
