@@ -93,3 +93,13 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }} --target PopRecomp pop_headless pop_smoke
       - name: Run the suites that need no game files
         run: ctest --preset ${{ matrix.preset }} -L "${{ matrix.labels }}" --output-on-failure
+      - name: Package the hosts as a downloadable archive
+        shell: bash
+        run: |
+          cmake --build --preset ${{ matrix.preset }} --target core_mods
+          python3 tools/recomp/package.py --preset ${{ matrix.preset }} --version "$(git describe --tags --always)" --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PopRecomp-${{ matrix.preset }}
+          path: dist/PopRecomp-*
+          retention-days: 7
