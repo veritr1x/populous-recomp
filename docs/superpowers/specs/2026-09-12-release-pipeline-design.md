@@ -64,7 +64,7 @@ original work's behaviour or ownership.
 
 ## 2. One install layout
 
-`src/recomp/host/layout.h`:
+`src/recomp/mods/layout.h` (the mods layer, below the host, because roots, overlay, settings and run-record need it):
 
 ```cpp
 struct HostLayout {
@@ -100,7 +100,7 @@ mods), `d3d_render.cpp` (texture pack), `sdl/main.cpp` (classic modes table),
 `mods/overlay.cpp` and `settings.cpp` (profile). Each keeps the environment
 override it honours today. `pop_headless` and `pop_smoke` use the same unit.
 
-Test: `host_tests` gets `test_layout`, which points the layout at a temporary
+Test: a `nogame` `layout_tests` executable points the layout at a temporary
 `resources/` tree and a temporary `X.app/Contents/MacOS/` tree through a test
 seam `host_layout_set_exe_path_for_test(const char *)` and checks each
 resolution and the developer fallback.
