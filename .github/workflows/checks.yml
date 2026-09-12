@@ -32,8 +32,9 @@ jobs:
   native-compile:
     # The game and locally generated code are not available in public CI.
     # Each platform configures with POP_TRANSLATE=OFF, builds every test
-    # binary it has, and runs the suites that need neither game files nor a
-    # GPU. No original assets, bundles, profiles or diagnostics are uploaded.
+    # binary it has, and runs the suites that need no game files; macOS (Metal)
+    # and Linux (lavapipe) also run the GPU suites. No original assets,
+    # bundles, profiles or diagnostics are uploaded.
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +44,7 @@ jobs:
             labels: "nogame|gpu"
           - os: ubuntu-24.04
             preset: linux
-            labels: nogame
+            labels: "nogame|gpu" # lavapipe supplies the Vulkan device
           - os: windows-2025
             preset: windows
             labels: nogame
@@ -61,7 +62,14 @@ jobs:
             libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
             libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
             libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev \
-            libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+            libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
+            mesa-vulkan-drivers glslc
+      - name: Software Vulkan for the GPU suites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
+          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
+          echo "SDL_VIDEODRIVER=dummy" >> "$GITHUB_ENV"
       - name: Enter the Visual Studio developer environment (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
