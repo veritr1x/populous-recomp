@@ -18,10 +18,18 @@ static int g_checks = 0, g_failures = 0;
         }                                                                                          \
     } while (0)
 
+// The layout reports forward slashes on every platform, so the expected
+// paths are built from a root spelled that way too.
 static std::string temp_root() {
     char dir[512];
     snprintf(dir, sizeof dir, "%s/pop-layout-XXXXXX", os_temp_dir());
-    return os_mkdtemp(dir) == 0 ? dir : "";
+    if (os_mkdtemp(dir) != 0)
+        return "";
+    std::string root = dir;
+    for (char &c : root)
+        if (c == '\\')
+            c = '/';
+    return root;
 }
 
 static void touch(const std::string &path) {

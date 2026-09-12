@@ -133,8 +133,8 @@ def main():
     parser.add_argument("--api-include", type=Path, default=ROOT / "src/recomp/mods")
     args = parser.parse_args()
     dest = args.dest.resolve()
-    # Only build trees are install roots: the source tree stays clean.
-    if "build" not in dest.parts:
+    # Only build and packaging trees are install roots: the source tree stays clean.
+    if "build" not in dest.parts and "dist" not in dest.parts:
         parser.error("unsupported install root: %s" % dest)
     try:
         built = install(args.source.resolve(), dest, args.cc, args.api_include.resolve())
