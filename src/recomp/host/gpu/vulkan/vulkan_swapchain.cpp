@@ -20,6 +20,7 @@ double VulkanDevice::refresh_period(Swapchain) {
     return 1.0 / 60;
 }
 void VulkanDevice::destroy(Swapchain) {}
+void VulkanDevice::queue_present(Cmd &) {}
 
 void *vulkan_test_native_surface(int, int) {
     return nullptr;
