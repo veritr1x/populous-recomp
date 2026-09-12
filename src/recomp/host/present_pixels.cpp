@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include "../platform/os.h"
 
 #include <algorithm>
 #include <atomic>
@@ -205,7 +205,7 @@ extern "C" const char *host_dump_dir(void) {
         for (size_t i = 0; i <= dir.size(); ++i) {
             if (i == dir.size() || dir[i] == '/') {
                 if (!acc.empty())
-                    mkdir(acc.c_str(), 0755);
+                    os_mkdir(acc.c_str());
             }
             if (i < dir.size())
                 acc.push_back(dir[i]);

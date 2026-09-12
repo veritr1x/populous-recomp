@@ -10,14 +10,11 @@
 #include "../runtime/win32.h"
 #include "../runtime/mods_seam.h"
 #include "../dx/dx.h"
+#include "../platform/os.h"
 
-#include <pthread.h>
 #include <setjmp.h>
-#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <vector>
@@ -39,13 +36,11 @@ const char *g_stop_reason = "guest returned from its entry point";
 // watchdog stop the run if it never comes back.
 jmp_buf g_bail;
 bool g_bail_armed = false;
-pthread_t g_guest_thread;
+OsThreadId g_guest_thread = 0;
 bool g_guest_thread_known = false;
 
 double now_seconds() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return (double)os_monotonic_ns() * 1e-9;
 }
 
 // The runtime's own clock is not reusable here: host_millis() dispatches to
@@ -146,9 +141,7 @@ void arm_clock_pin() {
 
 uint64_t g_clock_epoch_us = 0;
 uint32_t raw_millis() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t us = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+    uint64_t us = os_monotonic_ns() / 1000ull;
     if (!g_clock_epoch_us)
         g_clock_epoch_us = us;
     return (uint32_t)((us - g_clock_epoch_us) / 1000ull);
@@ -224,7 +217,7 @@ void boot_tick() {
     // only on the thread whose stack holds the landing pad.
     if (g_close_posted && g_opt.close_unwind_grace > 0.0 &&
         now_seconds() - g_close_time > g_opt.close_unwind_grace && g_bail_armed &&
-        pthread_equal(pthread_self(), g_guest_thread)) {
+        os_thread_self() == g_guest_thread) {
         g_forced_stop = true;
         static char unwound[128];
         snprintf(unwound, sizeof unwound,
@@ -294,7 +287,7 @@ bool boot_message_waiter() {
 // ---------------------------------------------------------------------------
 void *watchdog_main(void *) {
     for (;;) {
-        usleep(200 * 1000);
+        os_sleep_us(200 * 1000);
         double elapsed = now_seconds() - g_t0;
         bool over_deadline = g_opt.deadline_seconds > 0.0 &&
                              elapsed >= g_opt.deadline_seconds + g_opt.deadline_grace;
@@ -380,12 +373,7 @@ void sig_write_u32(uint32_t v) {
     sig_write(&buf[i + 1]);
 }
 
-void fault_handler(int sig) {
-    const char *name =
-        sig == SIGSEGV
-            ? "SIGSEGV"
-            : (sig == SIGBUS ? "SIGBUS"
-                             : (sig == SIGABRT ? "an abort from the runtime" : "a fatal signal"));
+void fault_handler(const char *name) {
     // guest_current_context() reads only thread-local state and a vector that
     // is never resized while guest code runs, so it is safe to ask here.
     X86 *c = guest_current_context();
@@ -492,20 +480,17 @@ void boot_run() {
         fprintf(stderr, "[host] boot_run without a loaded image\n");
         return;
     }
-    if (g_opt.signal_handlers) {
-        signal(SIGSEGV, fault_handler);
-        signal(SIGBUS, fault_handler);
-        signal(SIGABRT, fault_handler);
-    }
+    if (g_opt.signal_handlers && !os_install_fault_handlers(fault_handler))
+        fprintf(stderr, "[host] fault reporting is not available on this platform\n");
 
     g_t0 = now_seconds();
-    g_guest_thread = pthread_self();
+    g_guest_thread = os_thread_self();
     g_guest_thread_known = true;
     g_bail_armed = true;
     if (g_opt.deadline_seconds > 0.0 || g_opt.close_watchdog_grace > 0.0) {
-        pthread_t watchdog;
-        if (pthread_create(&watchdog, nullptr, watchdog_main, nullptr) == 0)
-            pthread_detach(watchdog);
+        OsThread *watchdog = os_thread_create(watchdog_main, nullptr, 0);
+        if (watchdog)
+            os_thread_detach(watchdog);
         else
             fprintf(stderr, "[host] could not start the watchdog; a wedged guest will hang\n");
     }
@@ -602,7 +587,7 @@ bool boot_activated() {
     return g_activated;
 }
 bool boot_on_run_thread() {
-    return g_guest_thread_known && pthread_equal(pthread_self(), g_guest_thread);
+    return g_guest_thread_known && os_thread_self() == g_guest_thread;
 }
 bool boot_abnormal_exit() {
     return g_forced_stop || (process_exited() && process_exit_code() != 0);

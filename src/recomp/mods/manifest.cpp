@@ -470,7 +470,7 @@ bool mods_resolve_order(std::vector<ModManifest> &mods,
             }
             placed.insert(remaining[chosen].id);
             order.push_back(remaining[chosen]);
-            remaining.erase(remaining.begin() + (long)chosen);
+            remaining.erase(remaining.begin() + (ptrdiff_t)chosen);
         }
         mods.swap(order);
         return true;

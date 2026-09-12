@@ -79,7 +79,7 @@ void pcm_release(uint32_t addr) {
             continue;
         if (--pcm_refs()[i].second == 0) {
             heap_free(addr);
-            pcm_refs().erase(pcm_refs().begin() + (long)i);
+            pcm_refs().erase(pcm_refs().begin() + (ptrdiff_t)i);
         }
         return;
     }
@@ -202,7 +202,7 @@ void stream_drop(uint32_t id) {
     for (size_t i = 0; i < streams().size(); ++i) {
         if (streams()[i].obj_id != id)
             continue;
-        streams().erase(streams().begin() + (long)i);
+        streams().erase(streams().begin() + (ptrdiff_t)i);
         return;
     }
 }
@@ -1676,7 +1676,7 @@ void dsbuffer_destroy(ComObj *b) {
     for (size_t i = 0; i < notifies().size(); ++i) {
         if (notifies()[i].obj_id != b->id)
             continue;
-        notifies().erase(notifies().begin() + (long)i);
+        notifies().erase(notifies().begin() + (ptrdiff_t)i);
         break;
     }
     stream_drop(b->id);

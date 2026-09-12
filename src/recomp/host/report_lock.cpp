@@ -12,18 +12,19 @@
 // boot.h declares these; boot.cpp uses the trylock from its watchdog.
 #include "boot.h"
 
-#include <pthread.h>
-#include <unistd.h>
+#include "../platform/os.h"
+
+#include <mutex>
 
 namespace {
-pthread_mutex_t g_report_m = PTHREAD_MUTEX_INITIALIZER;
+std::mutex g_report_m;
 }
 
 void boot_report_lock() {
-    pthread_mutex_lock(&g_report_m);
+    g_report_m.lock();
 }
 void boot_report_unlock() {
-    pthread_mutex_unlock(&g_report_m);
+    g_report_m.unlock();
 }
 
 // Tries for `seconds` and says whether it got it. The watchdog must never wait
@@ -31,9 +32,9 @@ void boot_report_unlock() {
 // that would turn "report and exit" into another hang.
 bool boot_report_trylock_for(double seconds) {
     for (int i = 0; i < (int)(seconds * 100.0) + 1; ++i) {
-        if (pthread_mutex_trylock(&g_report_m) == 0)
+        if (g_report_m.try_lock())
             return true;
-        usleep(10 * 1000);
+        os_sleep_us(10 * 1000);
     }
     return false;
 }

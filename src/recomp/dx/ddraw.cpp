@@ -2004,7 +2004,7 @@ bool lock_shadow_record(ComObj *s, const int32_t *unlock_rect, uint32_t unlock_p
         }
     }
     LockShadow sh = std::move(stack[at]);
-    stack.erase(stack.begin() + (long)at);
+    stack.erase(stack.begin() + (ptrdiff_t)at);
     if (stack.empty())
         lock_shadows().erase(it);
     if (!sh.armed)

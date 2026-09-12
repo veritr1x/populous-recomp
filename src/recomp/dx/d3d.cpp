@@ -1146,7 +1146,7 @@ void Viewport_DeleteLight(X86 *c) {
     }
     for (size_t i = 0; i < v->lights.size(); ++i) {
         if (v->lights[i] == l->id) {
-            v->lights.erase(v->lights.begin() + (long)i);
+            v->lights.erase(v->lights.begin() + (ptrdiff_t)i);
             com_release(l);
             com_ret(c, D3D_OK_);
             return;
@@ -1309,7 +1309,7 @@ void Device_DeleteViewport(X86 *c) {
     }
     for (size_t i = 0; i < dev->viewports.size(); ++i) {
         if (dev->viewports[i] == v->id) {
-            dev->viewports.erase(dev->viewports.begin() + (long)i);
+            dev->viewports.erase(dev->viewports.begin() + (ptrdiff_t)i);
             if (dev->current_viewport == v->id)
                 dev->current_viewport = 0;
             com_release(v);

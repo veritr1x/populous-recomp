@@ -223,7 +223,7 @@ void poll_device(ComObj *d) {
     // vector bounded when the guest never drains it.
     if (d->buffer_size && d->events.size() > d->buffer_size) {
         size_t drop = d->events.size() - d->buffer_size;
-        d->events.erase(d->events.begin(), d->events.begin() + (long)drop);
+        d->events.erase(d->events.begin(), d->events.begin() + (ptrdiff_t)drop);
         log_once("dinput.overflow", "dinput: the %u-event buffer overflowed; oldest events dropped",
                  d->buffer_size);
     }
@@ -474,7 +474,7 @@ void Device_GetDeviceData(X86 *c) {
     }
     wr32(inout, n);
     if (!peek && n)
-        d->events.erase(d->events.begin(), d->events.begin() + (long)n);
+        d->events.erase(d->events.begin(), d->events.begin() + (ptrdiff_t)n);
     com_ret(c, DI_OK);
 }
 

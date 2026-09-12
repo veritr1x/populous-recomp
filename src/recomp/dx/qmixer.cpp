@@ -33,12 +33,12 @@
 #include "host_api.h"
 #include "../runtime/memory.h"
 #include "../runtime/win32.h"
+#include "../platform/os.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #include <vector>
 #include <iterator>
 
@@ -155,9 +155,7 @@ bool qm_trace_take() {
 // with +timestamp - because "a play on a channel whose last sound had not
 // finished" is a question about time and cannot be answered from order alone.
 uint32_t qm_trace_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now = (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+    uint64_t now = os_monotonic_ns() / 1000000ull;
     static uint64_t base = 0;
     if (!base)
         base = now;
