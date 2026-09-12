@@ -25,6 +25,7 @@
 // -DRECOMP_NULL_HOST, so every host callback is a strong no-op.  No window,
 // no device, no audio stream, no input device is ever opened.
 #include "guest.h"
+#include "layout.h"
 #include "loader.h"
 #include "memory.h"
 #include "imports.h"
@@ -155,7 +156,7 @@ void fixture_mods_teardown() {
         static bool recorded = false;
         if (!recorded) {
             recorded = true;
-            mods_write_run_record("build/recomp/mods/run.json");
+            mods_write_run_record(host_state_file("mods/run.json").c_str());
         }
         return;
     }

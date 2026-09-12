@@ -1,7 +1,7 @@
 // Asset overlay: profile, reverse mod load order, then the original game.
 // Mutations never fall through; deleting a shadow reveals the lower file.
 #include "mods_internal.h"
-#include "layout.h"
+#include "../runtime/layout.h"
 #include "../runtime/mods_seam.h"
 #include "../runtime/win32.h"
 #include "../platform/os.h"

@@ -84,6 +84,11 @@ std::string host_resource(const char *rel) {
     const HostLayout &l = host_layout();
     if (l.resources_dir.empty())
         return "";
+    if (l.developer && strcmp(rel, "symbols.json") == 0) {
+        // A regenerated translation's index, else the tracked translation's.
+        std::string fresh = l.checkout_root + "/build/recomp/symbols.json";
+        return exists(fresh) ? fresh : l.checkout_root + "/translation/symbols.json";
+    }
     if (l.developer && l.resources_dir == l.checkout_root) {
         if (strcmp(rel, "mods/core") == 0)
             return l.checkout_root + "/build/recomp/mods/core";
@@ -93,6 +98,13 @@ std::string host_resource(const char *rel) {
             return l.checkout_root + "/tools/recomp/baseline/classic-modes.json";
     }
     return l.resources_dir + "/" + rel;
+}
+
+std::string host_state_file(const char *name) {
+    const HostLayout &l = host_layout();
+    if (l.developer)
+        return l.checkout_root + "/build/recomp/" + name;
+    return l.profile_dir + "/" + name;
 }
 
 void host_layout_set_exe_path_for_test(const char *exe_path) {

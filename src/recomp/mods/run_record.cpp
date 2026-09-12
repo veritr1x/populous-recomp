@@ -4,7 +4,7 @@
 // Determinism is DECLARED, never enforced: affects_simulation is informational
 // and this record is written whatever it says.
 #include "mods_internal.h"
-#include "layout.h"
+#include "../runtime/layout.h"
 #include "win32.h" /* host_clock_description */
 #include "../platform/os.h"
 
@@ -407,7 +407,7 @@ __attribute__((constructor)) void capture_build() {
     const uint64_t seed = 1469598103934665603ull;
     bool missing = false;
     uint64_t archive = hash_file("build/recomp/librecomp_gen.a", seed, &missing);
-    uint64_t symbols = hash_file("build/recomp/symbols.json", seed, &missing);
+    uint64_t symbols = hash_file(host_resource("symbols.json").c_str(), seed, &missing);
     if (!missing) {
         g_archive_hash = archive;
         g_symbols_hash = symbols;

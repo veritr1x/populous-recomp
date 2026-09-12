@@ -10,6 +10,7 @@
 // name is code or data, and symbols_matching searches all of them in address
 // order.
 #include "mods_internal.h"
+#include "../runtime/layout.h"
 #include "../runtime/loader.h"
 
 #include <algorithm>
@@ -153,8 +154,8 @@ uint32_t mods_symbols_count() {
 // Load the generated symbol map and verify that it names the currently mapped image.
 // Reject incompatible metadata before hooks or game views resolve addresses from it.
 bool mods_symbols_load(const char *path) {
-    const char *file = path ? path : "build/recomp/symbols.json";
-    FILE *f = fopen(file, "rb");
+    const std::string file = path ? path : host_resource("symbols.json");
+    FILE *f = fopen(file.c_str(), "rb");
     if (!f) {
         g_error = std::string("cannot open ") + file;
         return false;

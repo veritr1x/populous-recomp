@@ -1,6 +1,6 @@
 #include "game_path.h"
 
-#include "../mods/layout.h"
+#include "../runtime/layout.h"
 #include "../platform/os.h"
 #include "../runtime/loader.h"
 

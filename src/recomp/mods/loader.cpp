@@ -18,6 +18,7 @@
 //  5. Shutdown, after guest threads stop: pop_mod_exit in reverse load order,
 //     every tracked resource reclaimed, then the Lua runtime last.
 #include "mods_internal.h"
+#include "../runtime/layout.h"
 #include "options_menu.h"
 #include "sprite_view.h"
 #include "manifest_types.h"
@@ -785,7 +786,7 @@ void shutdown_now() {
     // The record is written FIRST, while the settings, the mod list and the
     // payload paths are all still here: writing it after the teardown loop
     // would record an empty run.
-    mods_write_run_record("build/recomp/mods/run.json");
+    mods_write_run_record(host_state_file("mods/run.json").c_str());
 
     for (size_t i = contexts().size(); i-- > generation_base();) {
         ModContext &c = contexts()[i];

@@ -37,7 +37,7 @@
 #include "../../platform/os.h"
 #include "../audio.h"
 #include "../game_path.h"
-#include "../../mods/layout.h"
+#include "../../runtime/layout.h"
 #include "../d3d_render.h"
 #include "../../dx/host_api.h"
 #include "../../runtime/memory.h"

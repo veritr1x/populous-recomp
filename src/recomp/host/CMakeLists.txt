@@ -143,7 +143,7 @@ pop_host(host_tests UI_LAYER
   SOURCES ${HOST}/tests/host_tests.cpp ${HOST}/tests/test_frame_builder.cpp
           ${POP_ROOT}/src/recomp/runtime/tests/stub_recomp_call.cpp
           ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/present.cpp
-          ${POP_ROOT}/src/recomp/mods/font6x8.cpp ${POP_ROOT}/src/recomp/mods/layout.cpp
+          ${POP_ROOT}/src/recomp/mods/font6x8.cpp
           ${HOST}/game_path.cpp
           ${HOST}/page_overlay.cpp ${POP_PRESENT_SOURCES} ${HOST}/input.cpp ${HOST}/input_gate.cpp
           ${POP_AUDIO_SOURCES}

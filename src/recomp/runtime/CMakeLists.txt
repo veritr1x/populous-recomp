@@ -2,7 +2,7 @@
 # consumer exactly as the shell scripts linked every object.
 set(POP_RUNTIME_SOURCES
   memory.cpp loader.cpp imports.cpp cpu.cpp profile.cpp kernel32.cpp
-  mods_seam.cpp user32.cpp misc.cpp)
+  mods_seam.cpp user32.cpp misc.cpp layout.cpp)
 
 add_library(recomp_runtime OBJECT ${POP_RUNTIME_SOURCES})
 target_include_directories(recomp_runtime PUBLIC ${POP_ROOT} ${CMAKE_CURRENT_SOURCE_DIR})

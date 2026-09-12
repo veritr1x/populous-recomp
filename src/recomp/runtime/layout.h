@@ -15,6 +15,10 @@ const HostLayout &host_layout();
 // resources_dir + "/" + rel, with the developer mapping for the three names
 // "mods/core", "texture-pack" and "classic-modes.json"; "" when unknown.
 std::string host_resource(const char *rel);
+// A file the host writes during a run (the emulated registry, the run
+// record): <checkout>/build/recomp/<name> in developer mode, else
+// <profile_dir>/<name>.
+std::string host_state_file(const char *name);
 // Test seam: recompute from this executable path and the current environment
 // (nullptr restores the real path). Not thread-safe; tests only.
 void host_layout_set_exe_path_for_test(const char *exe_path);

@@ -2,7 +2,7 @@
 // (resources/ beside the executable, a macOS bundle, a developer checkout)
 // and the environment override. Label nogame.
 #include "../../platform/os.h"
-#include "../layout.h"
+#include "../../runtime/layout.h"
 
 #include <stdio.h>
 #include <string.h>

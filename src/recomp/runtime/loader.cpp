@@ -145,7 +145,7 @@ bool read_file(const char *path, std::vector<uint8_t> &out) {
 }
 
 std::string dirname_of(const std::string &p) {
-    size_t s = p.find_last_of('/');
+    size_t s = p.find_last_of("\\/");
     if (s == std::string::npos)
         return ".";
     if (s == 0)

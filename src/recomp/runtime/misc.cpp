@@ -3,6 +3,7 @@
 // clock, multimedia timers and mmio file access). MIDI and aux output are
 // logging-only here; real audio belongs to the audio task.
 #include "imports.h"
+#include "layout.h"
 #include "memory.h"
 #include "win32.h"
 
@@ -420,7 +421,7 @@ std::string bytes_to_hex(const std::vector<uint8_t> &b) {
 std::string registry_path() {
     if (const char *e = getenv("POPM_REGISTRY"))
         return e;
-    return "build/recomp/registry.json";
+    return host_state_file("registry.json");
 }
 
 // Load the profile registry into the guest key/value store and reset transient key handles.

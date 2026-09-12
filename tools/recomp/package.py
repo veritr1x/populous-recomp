@@ -23,12 +23,19 @@ def stage_resources(dest, cc):
     resources = dest / "resources"
     resources.mkdir(parents=True)
     shutil.copy(ROOT / "tools/recomp/baseline/classic-modes.json", resources / "classic-modes.json")
+    shutil.copy(symbols_json(), resources / "symbols.json")
     subprocess.run([sys.executable, str(ROOT / "tools/recomp/build_core.py"),
                     "--dest", str(resources / "mods/core"), "--cc", cc], check=True, cwd=ROOT)
     pack = ROOT / "build/texture-pack"
     if (pack / "manifest.json").is_file():
         subprocess.run([sys.executable, str(ROOT / "tools/recomp/package_texture_pack.py"),
                         str(pack), str(resources / "texture-pack")], check=True, cwd=ROOT)
+
+
+def symbols_json():
+    """The translation index the mod loader reads: a regenerated one, else the tracked one."""
+    fresh = ROOT / "build/recomp/symbols.json"
+    return fresh if fresh.is_file() else ROOT / "translation/symbols.json"
 
 
 def add_docs(dest):

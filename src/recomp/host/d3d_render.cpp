@@ -31,7 +31,7 @@
 // Nothing here opens a window, and nothing here names a GPU API: the shaders
 // are the programs gpu/shaders.md describes, bound by slot number.
 #include "d3d_render.h"
-#include "../mods/layout.h"
+#include "../runtime/layout.h"
 #include "../platform/os.h"
 #include "../runtime/display_seam.h"
 #include "present.h"

@@ -18,7 +18,7 @@
 // and d3d_render.cpp owns the Direct3D scene; this file owns the window, the
 // events and the lifetime.
 #include "../../mods/display_settings.h"
-#include "../../mods/layout.h"
+#include "../../runtime/layout.h"
 #include "../../platform/os.h"
 #include "../audio.h"
 #include "../audio_capture.h"

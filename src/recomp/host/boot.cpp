@@ -1,6 +1,7 @@
 // boot.cpp - see boot.h. Extracted verbatim in behaviour from the headless
 // host, which was the first program to need every part of it.
 #include "boot.h"
+#include "../runtime/layout.h"
 #include "page_overlay.h"
 
 #include "../runtime/guest.h"
@@ -526,7 +527,7 @@ void boot_run() {
     // the loader's own shutdown writes it, and writing here as well would
     // record the set twice.
     if (!g_loader_ran)
-        mods_write_run_record("build/recomp/mods/run.json");
+        mods_write_run_record(host_state_file("mods/run.json").c_str());
 
     mods_shutdown_request();
     // The abandoned frames go FIRST, and unconditionally: this thread has left

@@ -8,7 +8,7 @@
 // because a mod that changed another mod's setting and then failed must leave
 // no trace of either.
 #include "mods_internal.h"
-#include "layout.h"
+#include "../runtime/layout.h"
 #include "display_settings.h"
 
 #include <algorithm>
