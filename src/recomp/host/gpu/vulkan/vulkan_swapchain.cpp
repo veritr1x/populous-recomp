@@ -150,9 +150,17 @@ Swapchain VulkanDevice::create_swapchain(void *native_surface, int width, int he
         vkDestroySurfaceKHR(instance_, c->surface, nullptr);
         return {};
     }
-    if (const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)))
+    float reported_hz = 0;
+    if (const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window))) {
+        reported_hz = mode->refresh_rate;
         if (mode->refresh_rate > 1.0f)
             c->refresh = 1.0 / mode->refresh_rate;
+    }
+    // The presenter paces one frame per refresh from this number, so a display
+    // SDL reports at 60 Hz caps the game at 60 whatever the panel can do.
+    fprintf(stderr,
+            "gpu/vulkan: swapchain %dx%d, display reports %.2f Hz (pacing at %.1f), %u images\n",
+            c->width, c->height, reported_hz, 1.0 / c->refresh, unsigned(c->images.size()));
     std::lock_guard lock(mutex_);
     uint64_t id = next_id_++;
     swapchains_[id] = std::move(c);
