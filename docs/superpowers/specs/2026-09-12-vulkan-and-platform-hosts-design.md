@@ -40,9 +40,13 @@ Files: `src/recomp/host/gpu/vulkan/vulkan_device.{h,cpp}`,
 Loading. `volkInitialize()` at device creation; failure means the factory
 returns null, as it does today off Apple. On macOS the loader finds MoltenVK
 through its normal ICD search; `VK_ICD_FILENAMES` is honoured but not
-required. Instance: Vulkan 1.3 requested, 1.2 accepted with the
-`VK_KHR_dynamic_rendering`, `VK_KHR_synchronization2` and (on MoltenVK)
-`VK_KHR_portability_subset` extensions. Validation layers are enabled when
+required. Instance: Vulkan 1.3 requested, 1.1 accepted when the device offers
+`VK_KHR_dynamic_rendering` (plus `VK_KHR_portability_subset` and the instance's
+`VK_KHR_portability_enumeration` on MoltenVK). On macOS the Homebrew loader is
+not on the dynamic linker's default path, so the backend also tries
+`/opt/homebrew/lib/libvulkan.1.dylib` and `/usr/local/lib/libvulkan.1.dylib`,
+honours `POP_VULKAN_LIBRARY`, and exposes the path it loaded so the SDL host
+can hand it to `SDL_Vulkan_LoadLibrary`. Validation layers are enabled when
 `POP_GPU_VALIDATE=1` and the layer is installed; messages go to stderr.
 
 Device and queue. The first discrete physical device, else the first with a
@@ -73,24 +77,44 @@ barriers. `allocated_bytes` reports the memory requirement size.
 Buffers. Host-visible, host-coherent, persistently mapped. `update` is a
 memcpy; `map_read` waits for the last submitted fence and returns the mapping.
 
-Pipelines. `render_pipeline(name, state)` builds a graphics pipeline for the
-named GLSL pair with the `RenderState` blend factors, colour write mask,
-attachment formats and depth format, using dynamic rendering (no render pass
-objects) and dynamic viewport, cull mode, depth test enable, depth write
-enable and depth compare op, so `set_depth`, `set_cull` and `set_viewport` are
-recorded commands rather than pipeline variants. Vertex input for "d3d" is
-one binding of 56-byte `HostD3DVertex`; the other programs take no vertex
-input. `compute_pipeline(name)` builds the named kernel;
-`thread_execution_width` reports the subgroup size.
+Pipelines. `render_pipeline(name, state)` returns a handle to a pipeline
+family: the named GLSL pair plus the `RenderState` blend factors, colour write
+mask, attachment formats and depth format. The `VkPipeline` itself is created
+lazily at draw time for the variant the recorded `Primitive`, `Cull` and
+`DepthState` need, and cached by (family, topology, cull, compare, write), so
+no extended dynamic state extension is required; viewport and scissor are the
+only dynamic state. Render passes use dynamic rendering
+(`VK_KHR_dynamic_rendering`, core in 1.3), no render pass objects. Vertex data
+is pulled: the "d3d" vertex shader indexes a storage buffer of 56-byte
+`HostD3DVertex` by `gl_VertexIndex`, because the renderer supplies small draws
+through `set_bytes` as well as through `set_vertex_buffer`. `compute_pipeline
+(name)` builds the named kernel; `thread_execution_width` reports the subgroup
+size, or the workgroup size when the shared-memory variant is chosen.
 
-Bindings. `set_bytes(stage, 1, ...)` for the 144-byte D3D uniforms and the
-other small blocks is a push-constant range (slot 0 and 1 blocks are at most
-144 bytes; the surface-upload palette of 1024 bytes at slot 2 goes through
-the uniform ring instead). `set_buffer` and larger `set_bytes` use a
-host-visible uniform/storage ring (4 MB, wrapped per frame) and descriptor set
-0. Textures and samplers are combined image samplers in set 0 at their slot
-numbers; samplers are cached by `SamplerState`. Descriptor sets come from a
-per-command-buffer pool reset when the buffer is recycled.
+Bindings. Every buffer-like binding is a storage buffer descriptor; there are
+no push constants (only 128 bytes are guaranteed, the D3D uniforms are 144).
+`set_bytes` copies into a per-command-buffer host-visible ring (allocations
+256-aligned) and binds that range; `set_buffer` and `set_vertex_buffer` bind
+the buffer at the given offset. One descriptor set layout serves every
+pipeline: bindings 0..3 are the vertex stage's buffer slots 0..3, 4..7 the
+fragment stage's, 8..11 combined image samplers for texture slots 0..3
+(compute uses 0..3 and 8..11). A descriptor set is written per draw or
+dispatch from a per-command-buffer pool; slots the shader does not set hold a
+dummy buffer and a 1x1 texture. Samplers are cached by `SamplerState`.
+
+Layouts and barriers. Every image the backend owns lives in `VK_IMAGE_LAYOUT_
+GENERAL` for its whole life, so two threads recording into different command
+buffers never disagree about a texture's layout; only swapchain images move
+(UNDEFINED at acquire, GENERAL on first use, PRESENT_SRC at present). A full
+memory barrier is recorded before each render pass, compute pass and transfer,
+which with single-queue submission order is what makes one command buffer's
+writes visible to the next.
+
+Coordinates. Metal's clip space has y up and Vulkan's y down; the backend
+passes a negative-height viewport (`VK_KHR_maintenance1`, core in 1.1) so the
+shared shader arithmetic is untouched, and sets front face clockwise to match
+the Metal backend's winding. Depth 0..1 and the top-left texture origin are the
+same in both.
 
 Compute. `begin_compute_pass`/`end_compute_pass` bracket dispatches;
 `dispatch_threads` rounds up to workgroups of the requested local size;
@@ -105,10 +129,14 @@ native surface; `create_swapchain` makes the surface with
 `SDL_Vulkan_CreateSurface`, picks BGRA8 UNORM (else the first format), FIFO
 present mode, three images. `acquire` waits on an acquire semaphore and
 returns the image as a texture handle; `present` records the final layout
-transition on the command buffer, submits it signalling a render-finished
-semaphore, then queues the present against it. The presented time reported is
-0 (no timing extension is required), so the presenter's completion fallback
-paces repeats, as it does for a Metal drawable without a presented time.
+transition on the command buffer and remembers the image; `commit` then submits
+waiting on the acquire semaphore, signalling a render-finished semaphore, and
+queues the present against it. The presented time reported is the time the
+submission's fence completed, read by the reaper thread on the backend clock:
+the presenter treats a zero presented time as a missing acknowledgement and
+logs a fault, so the completion time stands in for the flip time until a
+timing extension is adopted. `min_duration_seconds` is ignored; FIFO paces.
+`release_drawable` consumes the acquire semaphore with an empty fenced submit.
 `resize` recreates the swapchain; a suboptimal or out-of-date result also
 recreates it at the next acquire. `refresh_period` comes from the display
 mode SDL reports for the window's display.
@@ -211,6 +239,9 @@ Manual: one run each on real Windows and Linux hardware, recorded in
   lines, no geometry shaders, no triangle fans).
 - lavapipe is slow; the Linux `gpu` suites will take minutes, not seconds.
   Acceptable for CI; the renderer pixel tests are small.
-- Presented-time-less presentation relies on the presenter's completion
-  fallback, which counts frames as shown at GPU completion. FPS accounting on
-  Vulkan will differ from Metal's until a timing extension is adopted.
+- The presented time is the fence completion time, not the flip. FPS
+  accounting on Vulkan will read slightly early until a timing extension is
+  adopted.
+- The swapchain contract test needs a native surface; the Vulkan backend makes
+  one from a hidden SDL window, which a display-less Linux runner cannot give,
+  so the test reports "skipped" there rather than failing.
