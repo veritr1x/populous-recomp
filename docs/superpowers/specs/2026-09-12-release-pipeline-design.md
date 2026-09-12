@@ -160,9 +160,10 @@ and `developer` and exits 0. The version comes from `git describe --tags
   than the checks runner, for wider compatibility). Each: install the same
   dependencies `checks.yml` installs, configure the preset (tracked
   translation, `POP_RECOMP_VERSION` from `git describe`), build `PopRecomp`
-  and `core_mods`, build the terrain texture pack with
-  `tools/recomp/terrain_detail.py` (NumPy and Pillow from
-  `texture-pack-requirements.txt`), run `package.py`, upload the archive as an
+  and `core_mods`, build the terrain texture pack the way `tools/build.py`'s
+  `texture_pack()` does (`tools/recomp/terrain_detail.py --source
+  assets/terrain/materials-v1.png --output build/texture-pack`, NumPy and
+  Pillow from `tools/recomp/texture-pack-requirements.txt`), run `package.py`, upload the archive as an
   artifact.
 - Smoke without the game: from an unrelated directory, run the packaged
   executable with `--version` and `--probe-layout`; both must exit 0 and the
