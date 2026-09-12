@@ -15,7 +15,8 @@
 # HOW IT WORKS
 #
 #   `flock` on build/recomp/.lock, held by a python process for exactly as
-#   long as the command it wraps.  The kernel owns the lock: it is released
+#   long as the command it wraps. The program is tools/recomp/buildlock.py,
+#   which tools/build.py and tools/test.py also import as a module.  The kernel owns the lock: it is released
 #   when the holder exits however it exits, so there is no stale state to
 #   detect and nothing to reclaim.
 #
@@ -80,67 +81,14 @@ buildlock_python() {
 
 # buildlock.sh run ROOT DESCRIPTION COMMAND...
 #   Runs COMMAND with build/recomp/.lock held, and exits with its status.
+#   The lock itself lives in tools/recomp/buildlock.py; this is the shell entry.
 if [ "${1:-}" = "run" ]; then
     _root=$2
-    _what=$3
-    shift 3
-    mkdir -p "$_root/build/recomp"
-    BUILDLOCK_HELD=1
-    export BUILDLOCK_HELD
-    exec "$(buildlock_python "$_root")" - "$_root/build/recomp/.lock" \
-         "$_what" "$BUILDLOCK_WAIT" "$@" <<'PY'
-import fcntl, os, subprocess, sys, threading, time
-
-path, what, wait, cmd = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4:]
-fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
-
-# Say who we are waiting for, once, if we do not get it straight away.  The
-# note is advisory only: correctness comes from flock, not from this file.
-try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        holder = (os.read(fd, 256).decode("utf-8", "replace")
-                  .replace("\0", "").strip() or "another build")
-    except OSError:
-        holder = "another build"
-    print("buildlock: waiting for %s" % holder, file=sys.stderr, flush=True)
-    done = threading.Event()
-
-    def acquire():
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        done.set()
-
-    t = threading.Thread(target=acquire, daemon=True)
-    t.start()
-    if not done.wait(wait):
-        print("buildlock: %s still held after %gs; giving up" % (path, wait),
-              file=sys.stderr)
-        sys.exit(1)
-
-os.ftruncate(fd, 0)
-# Truncating does not move the write offset, and a waiter that has been sitting
-# in flock still has one from its own read; without this the note lands after a
-# run of NULs and the "waiting for" line prints a hole instead of a name.
-os.lseek(fd, 0, os.SEEK_SET)
-os.write(fd, ("%s (pid %d)\n" % (what, os.getpid())).encode())
-os.fsync(fd)
-
-# Hand the locked descriptor to the command, so the lock outlives this
-# wrapper for as long as anything it started is still running.  pass_fds
-# keeps the number stable and marks it inheritable; everything else is still
-# closed across the exec.
-try:
-    sys.exit(subprocess.call(cmd, pass_fds=(fd,)))
-finally:
-    # The kernel drops the lock when this process exits; clearing the note
-    # first only keeps a stale name from being reported to the next waiter.
-    try:
-        os.ftruncate(fd, 0)
-    except OSError:
-        pass
-PY
+    shift 1
+    # buildlock.py sits beside this script, which is not always under ROOT:
+    # the race test copies only the lock into a scratch root.
+    _dir=$(cd "$(dirname "${BUILDLOCK_SH:-$0}")" && pwd)
+    exec "$(buildlock_python "$_root")" "$_dir/buildlock.py" run "$@"
 fi
 
 # buildlock_acquire ROOT DESCRIPTION COMMAND...
