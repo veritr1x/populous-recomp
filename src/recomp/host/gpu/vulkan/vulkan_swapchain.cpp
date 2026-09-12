@@ -8,8 +8,42 @@
 
 #include <algorithm>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 namespace gpu {
+
+static VkPresentModeKHR choose_present_mode(VulkanDevice &d, VkSurfaceKHR surface) {
+    uint32_t n = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(d.physical_, surface, &n, nullptr);
+    std::vector<VkPresentModeKHR> modes(n);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(d.physical_, surface, &n, modes.data());
+    auto has = [&](VkPresentModeKHR m) {
+        for (VkPresentModeKHR x : modes)
+            if (x == m)
+                return true;
+        return false;
+    };
+    VkPresentModeKHR want =
+        has(VK_PRESENT_MODE_MAILBOX_KHR) ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    if (const char *e = getenv("POP_VULKAN_PRESENT_MODE"); e && *e) {
+        if (strcmp(e, "fifo") == 0)
+            want = VK_PRESENT_MODE_FIFO_KHR;
+        else if (strcmp(e, "mailbox") == 0 && has(VK_PRESENT_MODE_MAILBOX_KHR))
+            want = VK_PRESENT_MODE_MAILBOX_KHR;
+        else if (strcmp(e, "immediate") == 0 && has(VK_PRESENT_MODE_IMMEDIATE_KHR))
+            want = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        fprintf(stderr, "gpu/vulkan: present mode %s\n",
+                want == VK_PRESENT_MODE_MAILBOX_KHR     ? "mailbox"
+                : want == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate"
+                                                        : "fifo");
+    }
+    return want;
+}
 
 static bool build_swapchain(VulkanDevice &d, VulkanDevice::Chain &c, int width, int height) {
     vkDeviceWaitIdle(d.device_);
@@ -56,7 +90,11 @@ static bool build_swapchain(VulkanDevice &d, VulkanDevice::Chain &c, int width, 
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    // FIFO is vsync and caps the frame rate at the display's refresh; the
+    // presenter paces frames itself, so MAILBOX (uncapped, no tearing) is the
+    // first choice and FIFO the fallback every driver has. POP_VULKAN_PRESENT_MODE
+    // = fifo | mailbox | immediate overrides, for diagnosis.
+    sci.presentMode = choose_present_mode(d, c.surface);
     sci.clipped = VK_TRUE;
     sci.oldSwapchain = c.swapchain;
     VkSwapchainKHR fresh;
