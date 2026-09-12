@@ -95,8 +95,9 @@ per-command-buffer pool reset when the buffer is recycled.
 Compute. `begin_compute_pass`/`end_compute_pass` bracket dispatches;
 `dispatch_threads` rounds up to workgroups of the requested local size;
 resources bound with `Stage::Compute` go to the compute pipeline's set 0.
-`native_brightness` uses `subgroupAdd` where `VK_KHR_shader_subgroup` is
-available and a shared-memory tree otherwise; the output layout is the one
+`native_brightness` uses `subgroupAdd` (core since Vulkan 1.1) when the device
+reports arithmetic subgroup operations for compute and a shared-memory tree
+otherwise; the output layout is the one
 `shaders.md` fixes, so the renderer does not know which.
 
 Swapchain. On Vulkan platforms the SDL host passes its `SDL_Window*` as the
@@ -151,7 +152,7 @@ The platform layer `src/recomp/platform/os.h` gains:
   name plugin files.
 
 `runtime_tests`, `mods_tests`, `host_tests` and the roots shell test move onto
-those (the roots test becomes a Python test so Windows runs it). The
+those (`roots_tests.sh` becomes a Python test so Windows runs it). The
 `if(NOT WIN32)` guards around those targets go. Any remaining `<unistd.h>` or
 `<sys/stat.h>` use in the hosts moves behind `os.h` helpers that already
 exist (`os_stat`, `os_exe_path`, `os_chdir`).
@@ -186,7 +187,9 @@ keeps clang and lld.
 Linux CI installs `mesa-vulkan-drivers` and runs `-L "nogame|gpu"`:
 `gpu_vulkan_tests`, `compositor_tests`, `host_tests` (renderer pixel tests
 included) all run over lavapipe. Windows CI runs `-L nogame`, which now
-includes the ported runtime and mods suites; its `gpu` suites are local only.
+includes `mods_tests` and `roots_tests` (ported); `runtime_tests` keeps its
+`game` label and runs locally wherever game files exist; Windows `gpu` suites
+are local only.
 macOS CI runs `nogame|gpu` as today, with the Metal backend; `gpu_vulkan_tests`
 on macOS requires MoltenVK and is labelled `gpu-vulkan` so hosted runners skip
 it and the development machine runs it.
@@ -202,10 +205,10 @@ Manual: one run each on real Windows and Linux hardware, recorded in
 
 ## Risks
 
-- MoltenVK's portability subset lacks a few features (no `VK_FORMAT_R8` blend
-  quirks, limited `VK_KHR_shader_subgroup` on some GPUs); the design keeps the
-  shared-memory reduction path for `native_brightness` and avoids anything the
-  subset forbids (no wide lines, no geometry shaders, no separate stencil).
+- MoltenVK's portability subset forbids a few features and some GPUs lack
+  arithmetic subgroup operations; the design keeps the shared-memory reduction
+  path for `native_brightness` and uses nothing the subset forbids (no wide
+  lines, no geometry shaders, no triangle fans).
 - lavapipe is slow; the Linux `gpu` suites will take minutes, not seconds.
   Acceptable for CI; the renderer pixel tests are small.
 - Presented-time-less presentation relies on the presenter's completion
