@@ -30,6 +30,14 @@ class SdlSink final : public AudioSink {
         // thread more slack at the cost of latency.
         if (const char *frames = getenv("POP_AUDIO_FRAMES"); frames && *frames)
             SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
+        // The backlog kept queued ahead of the device, in frames. A device
+        // with a 10 ms period whose thread wakes 30 ms late (measured under
+        // CrossOver) drains an exactly-filled stream and plays silence; a
+        // 2048-frame backlog (43 ms at 48 kHz) rides that out. POP_AUDIO_AHEAD
+        // overrides it; 0 renders just in time, for A/B runs.
+        ahead_frames_ = 2048;
+        if (const char *ahead = getenv("POP_AUDIO_AHEAD"); ahead && *ahead)
+            ahead_frames_ = uint32_t(strtoul(ahead, nullptr, 10));
         SDL_AudioSpec spec;
         spec.format = SDL_AUDIO_F32;
         spec.channels = 2;
@@ -61,10 +69,10 @@ class SdlSink final : public AudioSink {
     // periods after the previous one is a gap the device filled with silence
     // (or stale data) before we could render.
     void report() {
-        printf("[host] audio sink: %llu pulls, %llu late (>1.5 periods), max gap %.1f ms, "
-               "max render %.1f ms, period %.1f ms\n",
-               (unsigned long long)pulls_, (unsigned long long)late_, max_gap_ms_, max_render_ms_,
-               period_ms_);
+        printf("[host] audio sink: %llu pulls, %llu late (>1.5 periods), %llu starved, max gap "
+               "%.1f ms, max render %.1f ms, period %.1f ms, ahead %u frames\n",
+               (unsigned long long)pulls_, (unsigned long long)late_, (unsigned long long)starved_,
+               max_gap_ms_, max_render_ms_, period_ms_, ahead_frames_);
         fflush(stdout);
     }
     bool running() const override {
@@ -74,7 +82,14 @@ class SdlSink final : public AudioSink {
   private:
     static void SDLCALL pull(void *userdata, SDL_AudioStream *stream, int additional, int) {
         auto *self = static_cast<SdlSink *>(userdata);
-        const uint32_t frames = uint32_t(additional) / (2 * sizeof(float));
+        const uint32_t needed = uint32_t(additional) / (2 * sizeof(float));
+        const uint32_t queued = uint32_t(SDL_GetAudioStreamQueued(stream)) / (2 * sizeof(float));
+        if (queued == 0 && self->pulls_ > 0)
+            ++self->starved_; // the device drained everything we had queued
+        // Top the backlog up, and never hand back less than the device asked for.
+        uint32_t frames = needed;
+        if (self->ahead_frames_ > queued && self->ahead_frames_ - queued > frames)
+            frames = self->ahead_frames_ - queued;
         if (!frames)
             return;
         const double now = double(SDL_GetTicksNS()) * 1e-6;
@@ -116,7 +131,8 @@ class SdlSink final : public AudioSink {
     }
     SDL_AudioStream *stream_ = nullptr;
     double period_ms_ = 0, last_pull_ms_ = 0, max_gap_ms_ = 0, max_render_ms_ = 0;
-    uint64_t pulls_ = 0, late_ = 0;
+    uint64_t pulls_ = 0, late_ = 0, starved_ = 0;
+    uint32_t ahead_frames_ = 2048;
     double report_ms_ = 0;
     std::function<void(float *, float *, uint32_t)> render_;
     std::vector<float> left_, right_, interleaved_;
