@@ -1,17 +1,22 @@
-# The translated game. tools/build.py writes build/recomp/gen; this file turns
-# it into build/recomp/librecomp_gen.a and says which targets can exist.
-set(POP_GEN_DIR ${POP_OUT}/gen)
+# The translated game. A developer's fresh regeneration in build/recomp/gen
+# wins; otherwise the tracked translation in translation/ (the one supported
+# GOG build) is what every host links.
+if(EXISTS ${POP_OUT}/gen/table.c)
+  set(POP_GEN_DIR ${POP_OUT}/gen)
+else()
+  set(POP_GEN_DIR ${POP_ROOT}/translation)
+endif()
 set(POP_HAVE_GEN OFF)
 if(POP_TRANSLATE STREQUAL "OFF")
   message(STATUS "POP_TRANSLATE=OFF: targets that need the generated code are not defined")
 elseif(EXISTS ${POP_GEN_DIR}/table.c)
   set(POP_HAVE_GEN ON)
+  message(STATUS "Translation: ${POP_GEN_DIR}")
 elseif(POP_TRANSLATE STREQUAL "ON")
-  message(FATAL_ERROR "POP_TRANSLATE=ON but ${POP_GEN_DIR}/table.c is missing; run tools/build.py --regenerate")
+  message(FATAL_ERROR "POP_TRANSLATE=ON but no translation: run tools/build.py --regenerate")
 else()
-  message(STATUS "build/recomp/gen is absent: PopRecomp, pop_headless, pop_smoke, pop_fixture, "
-                 "mods_tests, present_events_tests and profile_tests are not defined until "
-                 "tools/build.py translates")
+  message(STATUS "No translation found: PopRecomp, pop_headless, pop_smoke, pop_fixture, "
+                 "mods_tests, present_events_tests and profile_tests are not defined")
 endif()
 
 if(POP_HAVE_GEN)

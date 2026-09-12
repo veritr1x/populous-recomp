@@ -30,6 +30,9 @@ are tied to this image. Do not bypass the hash to add support for another versio
 
 ## Prepare your game installation
 
+Building the app no longer requires this step: `translation/` is tracked. Running
+the app, the game-backed suites, and regenerating the translation do.
+
 Use a directory containing the executable and its `data`, `levels`, `objects`
 and `sound` directories. Paths containing spaces are supported when quoted.
 

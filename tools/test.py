@@ -24,6 +24,7 @@ PORTABLE_TESTS = [
     "tools/recomp/tests/test_mode_probe.py", "tools/recomp/tests/test_texture_pack.py",
     "tools/recomp/tests/test_terrain_detail.py", "tools/recomp/tests/test_buildlock.py",
     "tools/recomp/tests/test_translate_publish.py", "tools/recomp/tests/test_shaders.py",
+    "tools/recomp/tests/test_translation.py",
 ]
 
 

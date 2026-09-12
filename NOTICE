@@ -7,8 +7,13 @@ The handwritten native host, compatibility runtime, translator, build/test tools
 and project documentation are covered by LICENSE. The project-created terrain
 material source is described in assets/terrain/README.md and is covered by LICENSE.
 
-Original game files and locally generated translations are not distributed in this
-repository and are not relicensed by its MIT license. Replacement packs derived
+Original game files are not distributed in this repository and are not relicensed by
+its MIT license. The directory translation/ holds a translation of the one supported
+GOG build of D3DPopTB.exe (SHA-256 815ba8a5...eacd), generated from that executable
+by this project's tools; it is distributed so prebuilt binaries can be published,
+under the same terms as the handwritten code, and claims nothing over the original
+work's behaviour or ownership. The game's executable, data, artwork, audio and levels
+are still required from the player's own copy and are never included. Replacement packs derived
 from original game artwork are also local build products.
 
 Lua 5.4.6 is included unmodified under its upstream MIT license; see

@@ -92,6 +92,18 @@ def publish_generated(root, translate):
     shutil.rmtree(old, ignore_errors=True)
 
 
+def publish_tracked(root):
+    """Replace translation/ with build/recomp/gen wholesale; the caller commits it."""
+    root = Path(root)
+    gen, tracked = root / "build/recomp/gen", root / "translation"
+    shutil.rmtree(tracked, ignore_errors=True)
+    tracked.mkdir()
+    for path in sorted(gen.iterdir()):
+        if path.suffix in (".c", ".h") or path.name == "symbols.json":
+            shutil.copy(path, tracked / path.name)
+    print("published %d files to translation/" % sum(1 for _ in tracked.iterdir()))
+
+
 def run_translator(stage):
     subprocess.run([sys.executable, str(ROOT / "tools/recomp/translate.py"), "--out", str(stage),
                     "--report", str(ROOT / "build/recomp/translate-report.json")], cwd=ROOT, check=True)
@@ -112,6 +124,8 @@ def texture_pack():
 def parse_args(argv, system=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--regenerate", action="store_true", help="Regenerate and compile translated C")
+    parser.add_argument("--publish-tracked", action="store_true",
+                        help="Regenerate, then copy the translation into translation/ for committing")
     parser.add_argument("--target", choices=sorted(TARGETS), default="app")
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
     parser.add_argument("--preset", default=default_preset(system), help="CMake configure preset")
@@ -128,15 +142,21 @@ def parse_args(argv, system=None):
 def main():
     """Check inputs, translate under the build lock when needed, then configure and build."""
     args, parser = parse_args(sys.argv[1:])
-    if args.target in NEEDS_GEN and not (ROOT / "original/gog/D3DPopTB.exe").is_file():
+    if args.publish_tracked:
+        args.regenerate = True
+    # The tracked translation lets a contributor without the game build the
+    # hosts; regenerating still needs the game and its listings.
+    if args.regenerate and not (ROOT / "original/gog/D3DPopTB.exe").is_file():
         parser.error("Prepare your own game installation with tools/setup.py first")
     preset = preset_name(args.preset, args.config)
     try:
         with buildlock.BuildLock(ROOT, "tools/build.py"):
-            if args.target in NEEDS_GEN and (args.regenerate or not archive_path().is_file()):
+            if args.target in NEEDS_GEN and args.regenerate:
                 if not (ROOT / "analysis/decompiled/D3DPopTB.exe/functions.tsv").is_file():
                     parser.error("Translation listings are missing; run tools/setup.py without --link-only")
                 publish_generated(ROOT, run_translator)
+                if args.publish_tracked:
+                    publish_tracked(ROOT)
             if args.target == "app":
                 texture_pack()
             configure(preset)

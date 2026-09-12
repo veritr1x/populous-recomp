@@ -25,12 +25,19 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
-Follow the [one-time game setup](CONTRIBUTING.md#prepare-your-game-installation), then:
+Players: download the archive for your platform from the
+[Releases page](https://github.com/veritr1x/populous-recomp/releases) and follow
+the README.txt inside; the app asks for your GOG `D3DPopTB.exe` on first run.
+
+To build from source, follow the [one-time game setup](CONTRIBUTING.md#prepare-your-game-installation), then:
 
 ```sh
 .venv/bin/python tools/build.py
 open build/PopRecomp.app
 ```
+
+The tracked `translation/` directory lets the hosts build without the translation
+step; `tools/build.py --publish-tracked` regenerates it from your game files.
 
 The app stays inside the checkout so it can find your local game-data link.
 F10 and **Populous → Settings…** open the game's Options screen; Command-Q exits.
@@ -63,6 +70,7 @@ the checked-in `.clang-format`; generated code remains a local build product.
 | `tools/recomp/` | Translator, instruction helpers, builders and gameplay smoke scripts |
 | `mods/examples/` | Small C, Lua and asset-overlay examples |
 | `assets/terrain/` | Project-created material-detail artwork and its provenance |
+| `translation/` | Generated translation of the supported GOG executable; regenerate with `tools/build.py --publish-tracked` |
 | `third_party/lua/` | Unmodified Lua source and upstream license |
 | `third_party/volk/` | volk 1.4.304, the Vulkan meta-loader, unmodified |
 | `third_party/vulkan-headers/` | Vulkan-Headers v1.4.304, the subset the backend includes, unmodified |

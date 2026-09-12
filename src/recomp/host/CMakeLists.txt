@@ -32,6 +32,12 @@ add_test(NAME shader_drift_check
   WORKING_DIRECTORY ${POP_ROOT})
 set_tests_properties(shader_drift_check PROPERTIES LABELS nogame)
 
+# The tracked translation names the loader's pinned exe and is complete.
+add_test(NAME translation_check
+  COMMAND ${Python3_EXECUTABLE} -m unittest ${POP_ROOT}/tools/recomp/tests/test_translation.py
+  WORKING_DIRECTORY ${POP_ROOT})
+set_tests_properties(translation_check PROPERTIES LABELS nogame)
+
 # Portable pieces built everywhere. compositor_tests needs a real device for
 # its pixel half (label gpu); ui_layer_tests needs nothing.
 add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)

@@ -30,9 +30,9 @@ jobs:
         run: .venv/bin/python tools/check_repo.py
 
   native-compile:
-    # The game and locally generated code are not available in public CI.
-    # Each platform configures with POP_TRANSLATE=OFF, builds every test
-    # binary it has, and runs the suites that need no game files; macOS (Metal)
+    # The game files are not available in public CI; the tracked translation
+    # lets every platform build the hosts. Each platform builds every test
+    # binary it has and runs the suites that need no game files; macOS (Metal)
     # and Linux (lavapipe) also run the GPU suites. No original assets,
     # bundles, profiles or diagnostics are uploaded.
     strategy:
@@ -86,8 +86,10 @@ jobs:
             echo "$PWD/$BIN" >> "$GITHUB_PATH"
           fi
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }} -DPOP_TRANSLATE=OFF
+        run: cmake --preset ${{ matrix.preset }}
       - name: Build every test binary this platform has
         run: cmake --build --preset ${{ matrix.preset }} --target check_binaries
+      - name: Build the hosts from the tracked translation
+        run: cmake --build --preset ${{ matrix.preset }} --target PopRecomp pop_headless pop_smoke
       - name: Run the suites that need no game files
         run: ctest --preset ${{ matrix.preset }} -L "${{ matrix.labels }}" --output-on-failure
