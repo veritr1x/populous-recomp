@@ -118,22 +118,31 @@ tools/recomp/snapshot_gen.py         consistent copy of build/recomp/gen
 Each directory's `CMakeLists.txt` owns the targets for the code in that
 directory, so a reader finds a target beside its sources.
 
+The first-party libraries are CMake object libraries, not archives. The shell
+scripts compile every source and link every object; an archive would let the
+linker drop members nobody references, which changes what a weak default or a
+static initializer contributes. Object libraries reproduce the scripts exactly.
+Each executable lists the object libraries it needs directly, because CMake
+does not propagate object files transitively. Lua and the generated code stay
+archives, as they are today.
+
 ### Targets
 
 | Target | Kind | Sources | Platforms |
 | --- | --- | --- | --- |
-| `recomp_platform` | static | `src/recomp/platform/os_posix.cpp` or `os_win32.cpp` | all |
-| `recomp_runtime` | static | `src/recomp/runtime/*.cpp` except `fixture.cpp`, `snapshot.cpp` and tests | all |
-| `recomp_dx` | static | `src/recomp/dx/*.cpp` including `host_api.cpp` | all |
+| `recomp_platform` | object | `src/recomp/platform/os_posix.cpp` or `os_win32.cpp` | all |
+| `recomp_runtime` | object | `src/recomp/runtime/*.cpp` except `fixture.cpp` and tests | all |
+| `recomp_dx` | object | `src/recomp/dx/*.cpp` including `host_api.cpp` | all |
+| `recomp_dx_null` | object | the same sources with `RECOMP_NULL_HOST` | all |
 | `lua` | static | `third_party/lua/*.c` minus `lua.c` and `luac.c` | all |
-| `recomp_mods` | static | `src/recomp/mods/*.cpp`, `src/recomp/mods/lua/*.cpp` | all |
+| `recomp_mods` | object | `src/recomp/mods/*.cpp`, `src/recomp/mods/lua/*.cpp` | all |
 | `recomp_gen` | static, published as `build/recomp/librecomp_gen.a` | `build/recomp/gen/chunk_*.c`, `table.c` | all, when `POP_TRANSLATE` is not OFF |
-| `host_common` | static | `boot.cpp`, `report_lock.cpp`, `input_gate.cpp`, `present_pixels.cpp`, `page_overlay.cpp`, `audio_math.cpp`, `audio_capture.cpp`, `script.cpp`, `src/backends/cpu/indexed_frame.cpp` | all |
-| `host_macos` | static | every `.mm` in `src/recomp/host/` except the three `*_main.mm` | macOS |
+| `host_common` | object | `boot.cpp`, `report_lock.cpp`, `input_gate.cpp`, `present_pixels.cpp`, `page_overlay.cpp`, `audio_math.cpp`, `audio_capture.cpp`, `script.cpp`, `src/backends/cpu/indexed_frame.cpp` | all |
+| `host_macos` | object | every `.mm` in `src/recomp/host/` except the three `*_main.mm` | macOS |
 | `PopRecomp` | app bundle | `main.mm` | macOS |
-| `pop_headless` | executable | `headless_main.cpp`, `snapshot.cpp` | macOS |
+| `pop_headless` | executable | `headless_main.cpp` | macOS |
 | `pop_smoke` | executable | `smoke_main.mm` | macOS |
-| `pop_fixture` | executable | `fixture.cpp`, `snapshot.cpp`, built with `RECOMP_NULL_HOST` | all |
+| `pop_fixture` | executable | `fixture.cpp` with `recomp_dx_null` | all |
 | `pop_fixture_trace` | executable | as `pop_fixture` against the snapshot in `POP_TRACE_DIR` | all, when set |
 | `core_mods` | custom | runs `tools/recomp/build_core.py` with the configured compiler | all |
 | `mod_fixtures` | MODULE libraries | `src/recomp/mods/tests/fixtures/*.c`; `old_cpu` gets `old_header` first on the include path | all |
@@ -347,14 +356,17 @@ table is corrected.
 The tooling job is unchanged. The compile job becomes a matrix over
 `macos-15`, `ubuntu-24.04` and `windows-2025` with `POP_TRANSLATE=OFF`. Each
 runner configures with its preset, builds `check_binaries`, and runs the
-`nogame` label. The macOS runner also runs the `gpu` label. Ubuntu installs
-clang and Ninja; Windows installs LLVM and Ninja and uses the Windows SDK
-already on the runner. No game files, generated code, bundles, profiles or
+`nogame` label. The macOS runner also runs the `gpu` label. Ubuntu installs clang and Ninja. Windows installs LLVM and Ninja, enters a
+Visual Studio developer environment for the Windows SDK, and builds with the
+GNU-style `clang` driver targeting the MSVC ABI and `lld-link`, so compiler
+flags are the same on every platform. No game files, generated code, bundles, profiles or
 diagnostics are uploaded.
 
-Windows and Linux cannot be exercised on the development machine, which is a
-Mac. Their verification is the CI matrix on the feature branch, and the plan
-says so at each step that needs it.
+The development checkout has no game files and no generated code, so every
+game-backed suite is verified by whoever holds a game-equipped checkout; the
+plan says so at each step that needs it. Linux is verified locally in a Docker
+container and in CI. Windows cannot be exercised on the development machine,
+which is a Mac; its verification is the CI matrix on the feature branch.
 
 ### Documentation
 
