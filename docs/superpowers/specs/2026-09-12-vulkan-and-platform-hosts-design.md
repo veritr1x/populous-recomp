@@ -161,7 +161,7 @@ and maps depth 0..1 unchanged, so the renderer's matrices and viewport
 arithmetic do not change; `compositor` and `hud` emit clip positions directly
 from the same quad arithmetic with the Y flip applied.
 
-`tools/recomp/shaders.py compile` runs `glslc -O --target-env=vulkan1.2` on
+`tools/recomp/shaders.py compile` runs `glslc -O --target-env=vulkan1.1` on
 each file and writes `gpu/vulkan/shaders_spv.h`, one `static const uint32_t`
 array per program plus a table of names. `tools/recomp/shaders.py check`
 recompiles into a temporary file and compares; it is a `nogame` CTest that
@@ -175,9 +175,9 @@ The platform layer `src/recomp/platform/os.h` gains:
 - `os_spawn(const char *const argv[], int *pid_out)` and
   `os_wait(pid, int *status)`, POSIX `fork`+`execv` and Win32
   `CreateProcess`, used by `runtime_tests` where it forks a child.
-- `os_mkdtemp(char *template)`, `mkdtemp` and `_mktemp_s` + `CreateDirectory`.
-- `os_module_suffix()` returning `.dylib`, `.so` or `.dll`, used where tests
-  name plugin files.
+- `os_mkdtemp(char *template)`, `mkdtemp` and a name loop + `CreateDirectory`.
+- `os_temp_dir()` and `os_null_device()`, so tests stop spelling `/tmp` and
+  `/dev/null`.
 
 `runtime_tests`, `mods_tests`, `host_tests` and the roots shell test move onto
 those (`roots_tests.sh` becomes a Python test so Windows runs it). The
@@ -187,7 +187,7 @@ exist (`os_stat`, `os_exe_path`, `os_chdir`).
 
 `sdl/main.cpp` creates the window with `SDL_WINDOW_METAL` on Apple and
 `SDL_WINDOW_VULKAN` elsewhere, and hands the presenter the Metal layer or the
-`SDL_Window*` accordingly through one `gpu::native_surface_for(SDL_Window*)`
+`SDL_Window*` accordingly through `gpu::native_surface_for_window(void *sdl_window)`
 in `gpu_factory`. The exe search and `classic-modes.json` lookup already walk
 from `os_exe_path`; on the two new platforms there is no bundle, so the
 checkout paths are used. `pop_headless` and `pop_smoke` need nothing new.
@@ -215,7 +215,7 @@ keeps clang and lld.
 Linux CI installs `mesa-vulkan-drivers` and runs `-L "nogame|gpu"`:
 `gpu_vulkan_tests`, `compositor_tests`, `host_tests` (renderer pixel tests
 included) all run over lavapipe. Windows CI runs `-L nogame`, which now
-includes `mods_tests` and `roots_tests` (ported); `runtime_tests` keeps its
+includes `platform_tests` (spawn, mkdtemp) and `roots_tests` (ported); `runtime_tests` keeps its
 `game` label and runs locally wherever game files exist; Windows `gpu` suites
 are local only.
 macOS CI runs `nogame|gpu` as today, with the Metal backend; `gpu_vulkan_tests`
