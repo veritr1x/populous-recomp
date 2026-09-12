@@ -179,6 +179,26 @@ const char *os_null_device(void) {
     return "/dev/null";
 }
 
+int os_user_data_dir(const char *app, char *buf, size_t cap) {
+    const char *home = getenv("HOME");
+    char base[4096];
+#ifdef __APPLE__
+    if (!home || !*home)
+        return -1;
+    snprintf(base, sizeof base, "%s/Library/Application Support", home);
+#else
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg)
+        snprintf(base, sizeof base, "%s", xdg);
+    else if (home && *home)
+        snprintf(base, sizeof base, "%s/.local/share", home);
+    else
+        return -1;
+#endif
+    int n = snprintf(buf, cap, "%s/%s", base, app);
+    return n > 0 && (size_t)n < cap ? 0 : -1;
+}
+
 extern "C" char **environ;
 
 int os_spawn(const char *const argv[], int64_t *pid_out) {

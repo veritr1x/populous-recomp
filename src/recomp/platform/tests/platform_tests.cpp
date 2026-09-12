@@ -178,6 +178,10 @@ void test_process_and_strings() {
     CHECK(getenv("POP_PLATFORM_TEST") == nullptr || getenv("POP_PLATFORM_TEST")[0] == 0);
     const char *ext = os_plugin_extension();
     CHECK(ext[0] == '.' && strlen(ext) >= 3);
+    char data[4096];
+    CHECK(os_user_data_dir("PopRecompTest", data, sizeof data) == 0);
+    CHECK(strstr(data, "PopRecompTest") != nullptr);
+    CHECK(data[strlen(data) - 1] != '/' && data[strlen(data) - 1] != '\\');
     CHECK(os_dlopen_noload("/definitely/not/loaded") == nullptr);
     CHECK(os_dlopen("/definitely/not/a/plugin") == nullptr);
     CHECK(os_dlerror() != nullptr);

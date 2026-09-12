@@ -76,6 +76,9 @@ int os_mkdtemp(char *template_path);
 const char *os_temp_dir(void);
 // "/dev/null" or "NUL".
 const char *os_null_device(void);
+// Per-user data directory for `app` (not created): ~/Library/Application Support/<app>,
+// %APPDATA%\<app>, $XDG_DATA_HOME/<app> or ~/.local/share/<app>. 0 or -1.
+int os_user_data_dir(const char *app, char *buf, size_t cap);
 // Runs argv[0] with argv (NULL-terminated), inheriting stdio; 0 and a pid, or -1.
 int os_spawn(const char *const argv[], int64_t *pid_out);
 // Waits for the child. exit_code receives the exit status, or 128 + signal on
