@@ -14,14 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  configure:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-          - os: ubuntu-24.04
-    runs-on: ${{ matrix.os }}
+  # The kit's portable Python suites plus this game's config tests, on the
+  # platform where the kit's pinned tooling installs from wheels.
+  tooling:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -34,11 +30,22 @@ jobs:
         run: |
           .venv/bin/python tools/test.py
           .venv/bin/python -m pytest -q tests
-      - name: Install clang and lld (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang lld
-      - name: Link-only configure of this game through the kit
+
+  # Link-only builds of this game through the kit: no game files, no
+  # translation, no signing. The kit's own CI covers Linux and Windows.
+  stub-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          submodules: recursive
+      - name: CMake, Ninja and pytest
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install cmake==4.1.2 ninja==1.13.0 pytest tomli
+      - name: This game's config tests
+        run: .venv/bin/python -m pytest -q tests
+      - name: macOS stub build
         run: .venv/bin/python tools/build.py --stub
       - name: iOS stub compile (no signing)
-        if: runner.os == 'macOS'
         run: .venv/bin/python tools/build.py --stub --target ios
