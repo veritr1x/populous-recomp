@@ -55,8 +55,9 @@ Touch: tap = left click, long press then lift = right click (unselect), long
 press then drag = wheel-button drag (scroll; rotate when it starts near the
 bottom), a hold on a screen edge scrolls, drag = left drag, two-finger drag
 pans, two-finger tap = Escape, three-finger tap = F10 (Options), four-finger
-tap toggles the keyboard. The on-screen key strip hides with HIDE and returns
-with KEYS. `tools/ios_logs.py --device <id>` pulls the app's Documents (saves)
+tap toggles the system keyboard. An on-screen split keyboard sits in the
+bottom corners: HIDE/KEYS tabs per half, Shift/Ctrl/Alt hold to chord, tap
+to latch, double tap to lock; size and visibility are on the F10 page. `tools/ios_logs.py --device <id>` pulls the app's Documents (saves)
 back to the Mac.
 
 ## Check a change
