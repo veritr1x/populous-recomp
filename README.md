@@ -15,8 +15,7 @@ submodule `kit/`. This repository holds what is Populous's: `game.toml` and
 `globals.toml` (identity, addresses, curated symbols), `core/` and `tests/`
 (game-specific headers), `mods/` (core plugins, examples, the smoke probe),
 `assets/` (artwork the texture pack is compiled from), `smoke/` (scripted
-runs), release notes and docs. The kit is private at the moment, so the
-submodule needs access to it.
+runs), release notes and docs.
 
 **You need your own copy of the game.** Game executables, artwork, sound,
 levels, generated game code and replacement packs are prepared locally and are
