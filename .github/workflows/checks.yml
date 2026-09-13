@@ -1,8 +1,8 @@
-name: Contributor checks
+name: Checks
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -14,94 +14,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  tooling:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: Install pinned contributor tools
-        run: |
-          python3 -m venv .venv
-          .venv/bin/python -m pip install -r requirements-dev.txt
-      - name: Test source tooling without game files
-        run: .venv/bin/python tools/test.py
-      - name: Check native code formatting
-        run: .venv/bin/python tools/format.py
-      - name: Check repository boundaries and documentation links
-        run: .venv/bin/python tools/check_repo.py
-
-  native-compile:
-    # The game files are not available in public CI; the tracked translation
-    # lets every platform build the hosts. Each platform builds every test
-    # binary it has and runs the suites that need no game files; macOS (Metal)
-    # and Linux (lavapipe) also run the GPU suites. No original assets,
-    # bundles, profiles or diagnostics are uploaded.
+  # The kit is a private submodule for now; checkout needs KIT_TOKEN (a
+  # personal access token with read access to veritr1x/recomp-kit) in this
+  # repository's secrets. Until it exists this workflow fails at checkout,
+  # which is the expected state.
+  configure:
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-15
-            preset: macos
-            labels: "nogame|gpu"
           - os: ubuntu-24.04
-            preset: linux
-            labels: "nogame|gpu" # lavapipe supplies the Vulkan device
-          - os: windows-2025
-            preset: windows
-            labels: nogame
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Install clang, lld and SDL3's window and audio headers (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          # SDL3's documented Linux build dependencies (README-linux), so the
-          # X11 and Wayland backends configure without a per-extension hunt.
-          sudo apt-get install -y -qq clang lld build-essential pkg-config libasound2-dev \
-            libpulse-dev libaudio-dev libjack-dev libsndio-dev libx11-dev libxext-dev \
-            libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
-            libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
-            libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev \
-            libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev \
-            mesa-vulkan-drivers glslc
-      - name: Software Vulkan for the GPU suites (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          ls -l /usr/share/vulkan/icd.d/ || true
-          echo "VK_LOADER_DEBUG=error,warn" >> "$GITHUB_ENV"
-          echo "LIBGL_ALWAYS_SOFTWARE=1" >> "$GITHUB_ENV"
-          echo "SDL_VIDEODRIVER=dummy" >> "$GITHUB_ENV"
-      - name: Enter the Visual Studio developer environment (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-      - name: Install CMake and Ninja
-        shell: bash
-        run: |
-          python3 -m venv .ci
-          if [ -d .ci/Scripts ]; then BIN=.ci/Scripts; else BIN=.ci/bin; fi
-          "$BIN/python" -m pip install cmake==4.1.2 ninja==1.13.0
-          if [ "$RUNNER_OS" = Windows ]; then
-            cygpath -w "$PWD/$BIN" >> "$GITHUB_PATH"
-          else
-            echo "$PWD/$BIN" >> "$GITHUB_PATH"
-          fi
-      - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
-      - name: Build every test binary this platform has
-        run: cmake --build --preset ${{ matrix.preset }} --target check_binaries
-      - name: Build the hosts from the tracked translation
-        run: cmake --build --preset ${{ matrix.preset }} --target PopRecomp pop_headless pop_smoke
-      - name: Run the suites that need no game files
-        run: ctest --preset ${{ matrix.preset }} -L "${{ matrix.labels }}" --output-on-failure
-      - name: Package the hosts as a downloadable archive
-        shell: bash
-        run: |
-          cmake --build --preset ${{ matrix.preset }} --target core_mods
-          python3 tools/recomp/package.py --preset ${{ matrix.preset }} --version "$(git describe --tags --always)" --out dist
-      - uses: actions/upload-artifact@v4
         with:
-          name: PopRecomp-${{ matrix.preset }}
-          path: |
-            dist/PopRecomp-*
-            build/recomp/PopRecomp.map
-          retention-days: 7
+          submodules: recursive
+          token: ${{ secrets.KIT_TOKEN }}
+      - name: Contributor tools
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r kit/requirements-dev.txt
+      - name: Portable tests (the kit's suites plus this game's config)
+        run: |
+          .venv/bin/python tools/test.py
+          .venv/bin/python -m pytest -q tests
+      - name: Install clang and lld (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang lld
+      - name: Link-only configure of this game through the kit
+        run: .venv/bin/python tools/build.py --stub
+      - name: iOS stub compile (no signing)
+        if: runner.os == 'macOS'
+        run: .venv/bin/python tools/build.py --stub --target ios

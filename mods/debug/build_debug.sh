@@ -19,7 +19,7 @@ for src in "$DBG"/*/*.c; do
     name=$(basename "$src" .c)
     xcrun clang -std=c11 -O1 -g -dynamiclib -fPIC \
         -Wall -Wextra -Wno-unused-parameter \
-        -I"$ROOT/src/recomp/mods" \
+        -I"$ROOT/mods" \
         -Wl,-undefined,dynamic_lookup "$src" -o "$dir/$name.dylib"
     built=$((built + 1))
 done

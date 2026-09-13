@@ -60,7 +60,7 @@ Compile the authored terrain material detail after building the pack:
 
 ```sh
 build/texture-tools/bin/python tools/recomp/terrain_detail.py \
-  --source assets/terrain/materials-v1.png --output build/texture-pack
+  --source games/populous/assets/terrain/materials-v1.png --output build/texture-pack
 ```
 
 The initial pack only enlarged ground tiles from 16×16 to 64×64, which could
@@ -68,7 +68,7 @@ smooth pixels but could not add material structure. The new layer uses four
 material channels stored at 1024×1024 (grass, sand, stone and soil) in one
 shared texture. It costs about 5.3 MiB including all mip levels, counted within
 the replacement budget, and one extra texture sample on applicable draws.
-The source artwork and generation prompt are in `assets/terrain/README.md`.
+The source artwork and generation prompt are in `games/populous/assets/terrain/README.md`.
 
 The shader preserves the original terrain's color and coastline masks while
 adding zero-mean material structure before lighting and fog. Blue water fades

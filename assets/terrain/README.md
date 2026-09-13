@@ -12,7 +12,7 @@ Compile it with:
 
 ```sh
 .venv/bin/python tools/recomp/terrain_detail.py \
-  --source assets/terrain/materials-v1.png --output build/texture-pack
+  --source games/populous/assets/terrain/materials-v1.png --output build/texture-pack
 ```
 
 The compiler removes broad shading, joins tile edges and packs four independent

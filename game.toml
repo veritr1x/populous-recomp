@@ -1,0 +1,63 @@
+# games/populous/game.toml - everything the kit needs to know about this game
+# that is not derivable from the binary. Addresses are guest addresses in the
+# pinned executable. Hooks are added as literals leave the kit's code.
+
+[game]
+id = "populous"
+name = "Populous: The Beginning"
+app_name = "PopRecomp"
+bundle_id = "dev.recompkit.populous"
+executable = "D3DPopTB.exe"
+sha256 = "815ba8a550f571c38b602cf3386f65aab942667a4a2d9c7096b3660deac2eacd"
+image_base = 0x00400000
+entry_point = 0x0055d6c0
+guest_root = 'C:\Populous'
+# Where a developer checkout finds the game, relative to the repository root.
+developer_exe = "original/gog/D3DPopTB.exe"
+
+[translate]
+# Ghidra listing directory holding functions.tsv and functions/*.asm,
+# relative to the repository root.
+listings = "analysis/decompiled/D3DPopTB.exe"
+# Curated symbols, relative to this directory.
+globals = "globals.toml"
+# The guest global whose reads select a visual phase (sprite_animation_counter).
+animation_counter = 0x00897981
+# Reads of animation_counter that only pick a visual phase or blink. Do NOT
+# include interpolation, simulation stamps, FPS measurement or input timing.
+volatile_reads = [
+  0x468f27, 0x4690ad, 0x46922b, 0x469327,  # spell/particle textures
+  0x4758b0, 0x4758c4, 0x4758d4,            # selection pulse
+  0x525c05, 0x525c15,                      # rectangle pulse
+  0x49d2eb, 0x49d386, 0x49d890, 0x4a2581,  # UI blinking
+  0x47a76d, 0x47a8f5,                      # palette animation
+  0x50f45c,                                # effect sprite phase
+]
+
+[hooks]
+# runtime/kernel32.cpp native_frame_clock: the two draw-loop waits in the
+# pinned executable, identified by the return address of their GetTickCount.
+frame_clock_begin = 0x004a45a3          # before the 1000 / DrawFrameRateLimit read
+frame_clock_wait = 0x004a47c1           # the wait that only retires the deadline
+frame_clock_wait_clamp = 0x004a47a4     # the wait whose successor clamps the rate into EDI
+frame_clock_clamp_deadline = 0x0098e7cc # deadline value returned after the clamping wait
+frame_clock_wait_deadline = 0x0098e7e0  # deadline value returned after the plain wait
+# dx/ddraw.cpp: globals holding the two 32x32 mouse-pointer surface interfaces
+cursor_surface_ptrs = [0x005d5718, 0x005d571c]
+# host/input_gate.cpp: the game's mouse device object and its vtable
+mouse_vtable = 0x00591b6c
+mouse_device_ptr = 0x00d0595c
+mouse_device_right = 0x00d0599c
+# host/smoke_main.cpp: the camera record the smoke script inspects
+camera = 0x0074a350
+
+[setup]
+# tools/setup.py: what a supported installation must contain, and the
+# annotation metadata imported into Ghidra before the listings are exported.
+required_dirs = ["data", "levels", "objects", "sound"]
+annotations_url = "https://github.com/hrttf111/pop3-rev.git"
+annotations_revision = "60408e4e99b76ab2e5461897c8e1b33756360eaa"
+
+[bundle]
+# Left out of the iOS bundle: installers, GOG Galaxy, intro movies, Windows DLLs.
+exclude = ["__redist", "commonappdata", "app", "Fmv", "*.dll", "*.cmd", "dxcfg.*"]

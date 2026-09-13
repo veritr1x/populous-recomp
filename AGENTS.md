@@ -1,22 +1,21 @@
 # Working on Populous Recomp
 
-Read README.md, CONTRIBUTING.md and docs/code-guide.md before a broad change.
-This repository contains the native runtime and translator. Game files and
-translations are private local inputs under ignored original/, analysis/ and build/.
+Read README.md and CONTRIBUTING.md before a broad change. This repository
+holds only what is Populous's: config, curated symbols, game headers, mods,
+artwork, smoke scripts and docs. The runtime, translator, hosts and tools are
+the kit in `kit/` (a git submodule of recomp-kit); edit those in the kit's own
+repository and bump the submodule here. Game files and translations are
+private local inputs under ignored `original/`, `analysis/` and `build/`.
 
 - Keep changes focused; preserve unrelated local work and player profiles.
-- Comment major functions and unusual guest layout, timing or ownership rules.
-- Never replace 32-bit guest addresses with host pointers. Respect the cooperative
-  scheduler baton and the immutable frame boundary described in docs/architecture.md.
-- Edit translation rules, not build/recomp/gen/. Regenerate after changing the translator.
-- Format first-party native source with `.venv/bin/python tools/format.py --write`.
-  Preserve vendored code and its notices.
-- Run relevant suites from docs/testing.md; native code builds only through
-  tools/build.py and tools/test.py, never by invoking compilers directly.
-  Platform calls go through src/recomp/platform/os.h; no `#ifdef` on the platform
-  outside os_posix.cpp and os_win32.cpp. Report exactly which checks ran;
-  compilation and offscreen counters do not establish playable performance.
-- Do not commit game assets, generated code, binaries, credentials, personal saves
-  or run logs. Run `.venv/bin/python tools/check_repo.py` on staged source changes.
-- Keep setup/build instructions reproducible from a clean checkout. Update the
-  changelog for user-visible behavior and preserve the single Graphics resolution control.
+- Never replace 32-bit guest addresses with host pointers. Addresses belong
+  in `game.toml` `[hooks]` and `globals.toml`, never in kit code.
+- Edit translation rules in the kit, not `build/recomp/gen/`. Regenerate with
+  `tools/build.py --regenerate` after changing the translator.
+- Native code builds only through `tools/build.py` and `tools/test.py`, never
+  by invoking compilers directly. Format kit sources with
+  `.venv/bin/python kit/tools/format.py --write`.
+- Run relevant suites from docs/testing.md and report exactly which checks
+  ran; compilation and offscreen counters do not establish playable performance.
+- Do not commit game assets, generated code, binaries, credentials, personal
+  saves or run logs.

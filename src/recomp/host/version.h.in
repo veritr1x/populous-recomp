@@ -1,2 +1,0 @@
-#pragma once
-#define POP_RECOMP_VERSION "@POP_RECOMP_VERSION@"

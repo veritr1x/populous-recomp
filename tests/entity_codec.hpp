@@ -1,5 +1,5 @@
 #pragma once
-#include "core/entities.hpp"
+#include "../core/entities.hpp"
 #include <cstring>
 namespace entity_test {
 constexpr std::uint32_t base = 0x8e0428, reservations = 0x3100000;

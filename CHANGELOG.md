@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Thin repository: the runtime, translator, hosts and tools moved to
+  [recomp-kit](https://github.com/veritr1x/recomp-kit), the git submodule at `kit/`.
+  This repository keeps Populous's config (`game.toml`, `globals.toml`), game
+  headers, mods, artwork, smoke scripts, release notes and docs, and drives the
+  kit through `tools/*.py` wrappers. The previous single-repository tree is tag
+  `legacy-macos-source`. `translation/` is no longer tracked; regenerate with
+  `tools/build.py --regenerate`.
+- iPad: Populous runs natively on an iPad by touch (kit milestone M1): fullscreen
+  Metal, an on-screen key strip, taps that place the game's cursor, long-press
+  right click, wheel-button drag, edge scrolling, lifecycle-driven suspend and
+  persistent settings. `tools/build.py --target ios` builds, signs and installs.
+
 - Build with CMake presets for macOS, Linux and Windows through the unchanged
   `tools/build.py` and `tools/test.py`; the xcrun shell scripts are gone.
 - Add a platform layer (`src/recomp/platform/os.h`) so the runtime, adapters

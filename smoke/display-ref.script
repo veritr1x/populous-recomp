@@ -1,0 +1,262 @@
+# display-ref.script - semantic shaman walk after level/camera readiness.
+# Round 13 asserts fresh BODY evidence and confirms each dump before the next.
+# Reference dumps remain anchored to turns 820 and 860.
+#
+# RUN IT PINNED. POP_RECOMP_PIN_CLOCK=1.
+#
+# An unpinned run reaches a different point of the game every time, so a
+# reference taken from one is a reference to that afternoon. impl-t6 measured
+# that under the pin the menu frame is byte-identical between runs, which is
+# what makes an exact reference possible at all.
+#
+# WHY THE DUMPS ARE ANCHORED TO TURNS AND NOT TO TIME
+#
+# A dump at a script-scheduled millisecond lands wherever the game happened to
+# be. `await turn>=N` waits for the simulation itself, so the dump instant is
+# the same simulation instant in every run.
+#
+# The anchors must still be future when armed. Level1's old pinned flyby
+# dump was at turn 609; selection now asserts BODY readiness, as turns alone
+# do not establish visibility. The camera/input timing follows Gate C.
+# Like gate-c, the walk then waits for turn 780 before reference capture.
+# The logs record actual reached turns so late selection cannot masquerade as
+# an exact 820/860 reference. The display gate checks that provenance.
+#
+# ---------------------------------------------------------------------------
+# Menu entry follows level1. Gameplay selection waits for readiness; the
+# two reference dump anchors remain unchanged.
+# ---------------------------------------------------------------------------
+
+# level1.script - boot, start mission 01, and play it.
+#
+# Run with `make recomp-smoke`. Every action goes in through the same host
+# state the real keyboard and mouse feed, so this exercises the paths the game
+# actually uses rather than a back door built for testing.
+#
+# HOW THE INPUT HAS TO ARRIVE, WHICH TOOK TWO FIXES TO GET RIGHT
+#
+# The front end reads DirectInput buffered data when it is told the state
+# changed; it does not poll. Buffered events are differences, so:
+#
+#   * A move must carry a relative delta. A move reporting only a destination
+#     produces no DIMOFS_X or DIMOFS_Y event and the game's own cursor never
+#     moves.
+#   * The game integrates those deltas into a pointer of its own that started
+#     wherever it chose, so an absolute coordinate here is only a guess about
+#     where that pointer already was. `moveby` sends raw relative motion, and a
+#     delta larger than the screen pins the game's pointer to the top-left
+#     corner. That corner is the one position a script can be sure of, and
+#     every coordinate below is measured from it.
+#   * A click must stay down long enough for the guest to look. Pressing and
+#     releasing in one host turn leaves the button at the level it started
+#     from, the shim's comparison finds no change, and both events are lost.
+#     The runner holds it for 120 ms.
+#
+# WHERE THE COORDINATES COME FROM
+#
+#   * New Game at (320, 140) and the tutorial prompt's No at (320, 219): the
+#     recovered menu layout in docs/MENU.md (005d9660 / 004c3290 put the first
+#     action row at y 140, rows 30 apart) and docs/MENU_NEW_GAME.md (prompt top
+#     159, Yes at the paragraph bottom, No 30 lower), both centred on x 320.
+#   * The start control at (605, 448) and the level-01 world at (322, 235):
+#     measured off a dump of the level-select screen, which is a solar system
+#     with a wooden panel across the bottom. The panel's right-hand button is
+#     what starts the mission; clicking the world itself does nothing.
+#   * The dialogue's OK at (236, 148) and the people at (390, 212): measured off
+#     a dump of the running level.
+
+# WAIT FOR THE GAME, NOT FOR THE CLOCK
+#
+# This used to be `wait 16000`, and that is what made the run fail about one
+# time in two. The front end is roughly eight seconds of loading, then the
+# copyright screen for five, then a cross-fade into the menu, which a live
+# trace put at 13.9 s - so a fixed 16 s left two seconds of margin, and every
+# second added to startup since (the mod loader, Lua, the MIDI SoundFont) spent
+# some of it. A click that lands before the menu is live dismisses whatever is
+# on screen instead of choosing New Game, the run never leaves the front end,
+# and the eight assertions about the level all fail at once with no texture and
+# no 3D scene to show for it.
+#
+# WHY THE CLAIM HAS TO HOLD
+#
+# `picture` is the share of the last presented frame that is not black. The
+# copyright screen settles at 0.960 - its black border and the white Bullfrog
+# box - and the menu at 0.998, so 0.98 tells the two apart. But both screens
+# FADE in, and a fade passes through every value on its way up: the copyright
+# screen's own fade-in crosses 0.98 for a frame or two before settling below
+# it. A bare `await picture>0.98` is answered there, five seconds early, and
+# the run fails exactly as the fixed wait did - that is not a guess, it is what
+# the first two versions of this fix did. `for 2000` requires the claim to
+# stay true, which no fade does.
+await picture>0.98 for 2000 within 60000
+dump menu
+
+# New Game, then answer No to the tutorial prompt.
+moveby -2000 -2000
+wait 400
+moveby 320 140
+wait 700
+click left 320 140
+wait 3000
+moveby -2000 -2000
+wait 400
+moveby 320 219
+wait 700
+click left 320 219
+wait 12000
+dump levelselect
+
+# Start mission 01 from the panel's button.
+moveby -2000 -2000
+wait 300
+moveby 605 448
+wait 900
+click left 605 448
+wait 8000
+dump level_start
+
+# Dismiss the opening dialogue.
+moveby -2000 -2000
+wait 300
+moveby 236 148
+wait 700
+click left 236 148
+wait 4000
+dump level_playing
+# A simulation turn confirms that the level has started.
+await turn>=1 within 120000
+
+# M1's first actions: select blue shaman 1815, then order it to walk,
+# and check both against the game's own record rather than against pixels.
+#
+# WHY NOT PIXELS
+#
+# The level opens in a camera flyby, and while it runs every frame differs from
+# the last whatever the player does - so "the picture changed" cannot tell a
+# selected brave from an ignored click. The entity table can. It is 2000
+# records of 179 bytes at 0x8e0428, laid out as games/populous/tests/entity_codec.hpp encodes
+# it: flags at +12, kind at +42, state at +44, owner at +47, position at +61 as
+# x, z and altitude words. A blue brave is owner 0, kind 1.
+#
+# THE FLYBY
+#
+# This waits a fixed 20 seconds for it, and says so rather than pretending to
+# detect it: there is no camera-settle signal exposed to the host, and a
+# frame-difference test cannot find one because the units keep animating after
+# the camera stops.
+wait 34000
+dump flyby_over
+
+# What the game thinks is on the map. The peek is the whole entity table's
+# first record, printed and decoded, so a run that finds nothing to watch shows
+# what it was looking at instead of only saying that it failed.
+# Reuse Gate C's starting camera and settling interval. This coordinate alone
+# does not prove visibility: assert fresh BODY attribution before each gesture.
+# Do not insert the old turn-620 wait, which changed Gate C's selection timing.
+camera 5386 55651
+wait 800
+peek 0x8e0428 179
+watch 0 1
+
+# Select shaman 1815, then order it to walk.
+#
+# BOTH GESTURES ARE LEFT CLICKS, WHICH A RUN HAD TO ESTABLISH
+#
+# A click on a brave selects it and a click on the ground sends it there. A
+# right-click on the ground does nothing at all: the same script with the
+# second click on the right button left every entity in the table exactly where
+# it started, and with the left button the selected one walked two cells east.
+#
+# Which entity was clicked is not guessed from the pixels. A click on a brave
+# writes byte +122 of that brave's record and of no other's - the person flag
+# at 0x7a that docs/COMMANDS.md records the selection code setting - so the
+# host follows whichever entity the game itself marked, and the click after
+# that one is the order.
+#
+# NO CORNER PIN FROM HERE ON, WHICH COST A RUN TO FIND OUT
+#
+# In the level, holding the pointer against the edge of the screen scrolls the
+# map - that is what the edge is for. So the corner pin that makes a menu
+# coordinate certain moves the camera underneath every coordinate measured
+# after it, and two dumps taken either side of one showed a different landscape.
+# Inside the level the pointer is moved absolutely instead: `move` sends the
+# difference from where the script last put it, the game integrates the same
+# difference, and the two stay together as long as neither clamps - which is
+# why every coordinate below is well inside the frame.
+# Resolve the shaman's attributed body and level1's destination using the
+# current projection, as in gate-c.script. Assertions use the click's exact
+# fresh BODY evidence (a visible shadow is insufficient), and stop the script
+# on timeout. Reassert after settling because the body may leave the frame.
+move 331 208
+wait 800
+click left 331 208
+wait 1500
+dump selected
+move 350 245
+wait 800
+click left 350 245
+# gate-c anchors the completed walk here; fixed waits would spend reference
+# headroom again after any time spent waiting for entity attribution.
+await turn>=780 within 120000
+dump ordered
+
+# Reference frames for every arm, captured at the first completed gameplay
+# present at turns 820 and 860, with unchanged frame names and provenance.
+# Only one dumpat can be pending. Await each turn on the same metric, then
+# confirm its firing before arming the next: a late turn await can pass in the
+# same script tick without a present. dumpat_fired closes that gap and stops
+# on timeout. Image-write completion is checked separately at smoke shutdown.
+# Actual reached turns remain in logs; late anchors still fail the gate.
+dumpat turn>=820 ref_t820
+await turn>=820 within 120000
+await dumpat_fired>=1 within 120000
+dumpat turn>=860 ref_t860
+await turn>=860 within 120000
+await dumpat_fired>=2 within 120000
+
+wait 6000
+dump walking
+
+# What has to be true by now.
+expect textures>0
+expect draws>0
+expect writebacks>0
+# The level fills the screen, unlike the solar system that precedes it, which
+# is mostly black by design. The running level measures 1.00; half of that is
+# the line below which something is badly wrong rather than a target.
+expect scene_nonblack>0.50
+expect present_nonblack>0.50
+expect audio_peak>0.05
+# A game that is running keeps changing what it shows. The present count alone
+# cannot tell a running game from a frozen one presenting the same frame.
+expect present_changes>200
+expect presents>50
+
+# And what the game's own record has to say. These are the assertions that
+# distinguish a level being played from a level being looked at.
+#
+#   entities              blue braves the scan found on the map
+#   watch_found           one of them is being followed
+#   watch_selected        and it is the one the game marked as selected, not
+#                         merely the first one in the table
+#   watch_moved           how far it got, in world units, from where it was
+#                         when the order was given. A cell is 512 units, so
+#                         half a cell is well past any jitter; the run measures
+#                         about 1145, which is two cells and a bit.
+#   watch_toward_target   the share of samples after the order that did not
+#                         take it further from where it ended up. A unit
+#                         walking somewhere keeps getting closer to it; one
+#                         milling about does not. The target is where it
+#                         finished. The order now projects a fixed world
+#                         destination, but this metric still measures progress
+#                         toward the endpoint, not distance to that destination.
+#   watch_state_changes   its state byte left the one it had when idle
+expect entities>0
+expect watch_found>0
+expect watch_selected>0
+expect watch_samples>100
+expect watch_moved>256
+expect watch_toward_target>0.95
+expect watch_state_changes>0
+
+quit
