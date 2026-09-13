@@ -2,7 +2,7 @@
 # Round 13 asserts fresh BODY evidence and confirms each dump before the next.
 # Reference dumps remain anchored to turns 820 and 860.
 #
-# RUN IT PINNED. POP_RECOMP_PIN_CLOCK=1.
+# RUN IT PINNED. RECOMP_PIN_CLOCK=1.
 #
 # An unpinned run reaches a different point of the game every time, so a
 # reference taken from one is a reference to that afternoon. impl-t6 measured

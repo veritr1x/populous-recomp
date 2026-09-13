@@ -1,7 +1,7 @@
 # demo.script - boot to the main menu, start the rolling demo, and let it run
 # for a fixed span so both builds can be compared over the same content.
 #
-# Run with `make recomp-demo-sound`, which sets POPM_AUDIO_TRACE and writes the
+# Run with `make recomp-demo-sound`, which sets RECOMP_AUDIO_TRACE and writes the
 # trace where compare_sounds.py expects it.
 #
 # WHY THE ROLLING DEMO AND NOT A HAND-PLAYED SESSION

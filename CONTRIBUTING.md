@@ -63,7 +63,7 @@ minimal boot host, `--target fixture` the parity fixture and `--target plugins`
 every mod plugin under `mods/`. `--target ios` builds, signs and installs the
 iPad app (`RECOMP_IOS_TEAM` or `--team`). The CMake tree lives in
 `build/cmake/<preset>`; every artifact keeps its documented path under `build/`.
-`POPM_PROFILE_DIR` selects a separate profile for an interactive run.
+`RECOMP_PROFILE_DIR` selects a separate profile for an interactive run.
 
 ## Check your change
 

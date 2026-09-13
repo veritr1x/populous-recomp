@@ -1,7 +1,7 @@
 # Native Options navigation, live rendering/FPS changes and a 640/800/4K cycle
 # through the single resolution selector in the original Graphics tab.
 # Use an isolated profile, the shipped core.display and texture pack, and
-# POPM_DDRAW_MODES=640x480x8,640x480x16,800x600x16,3840x2160x16.
+# RECOMP_DDRAW_MODES=640x480x8,640x480x16,800x600x16,3840x2160x16.
 # The final unit-selection/movement assertions prove the game resumed.
 await picture>0.98 for 2000 within 60000
 key F10 down

@@ -91,7 +91,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
  * than remembered from init, which is the point: if the API were dead this
  * file would say -1. */
 PopModStatus pop_mod_exit(void) {
-    const char *dir = getenv("POPM_PROFILE_DIR");
+    const char *dir = getenv("RECOMP_PROFILE_DIR");
     char path[512];
     FILE *f;
     int64_t ui_now = -1, hud_now = -1;

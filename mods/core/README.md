@@ -13,9 +13,9 @@ match their C source basename; scripts and assets are copied recursively.
 
 The app installs to `build/PopRecomp.app/Contents/Resources/mods/core` and
 resolves it relative to its executable. Headless, smoke and parity install to
-`build/recomp/mods/core`. `POPM_CORE_MODS_DIR` overrides discovery, while
-`POPM_MODS_DIR` continues to select the user root (default `mods`).
-`POPM_NO_MODS` disables both, including direct loader calls.
+`build/recomp/mods/core`. `RECOMP_CORE_MODS_DIR` overrides discovery, while
+`RECOMP_MODS_DIR` continues to select the user root (default `mods`).
+`RECOMP_NO_MODS` disables both, including direct loader calls.
 
 Discovery visits core before user, so the first core manifest wins duplicate
 ids. Core mods load in dependency order before any user mod. Core cannot

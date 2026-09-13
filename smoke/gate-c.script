@@ -3,7 +3,7 @@
 # scene and inside the expanded scene. Selection/movement follows shaman 1815.
 # Run with a pinned clock and record new evidence for the current build;
 # the expected landmark does not establish correctness without the assertions.
-# POP_RECOMP_PIN_CLOCK=1 POP_SMOKE_DRAWABLE=3840x2160 POP_SMOKE_SIM_REGIONS=1
+# RECOMP_PIN_CLOCK=1 RECOMP_SMOKE_DRAWABLE=3840x2160 RECOMP_SMOKE_SIM_REGIONS=1
 # LANDMARK=visible with a widened Enhanced scene; otherwise LANDMARK=hidden.
 await picture>0.98 for 2000 within 60000
 dump menu
@@ -97,7 +97,7 @@ camera 4600 59000
 # Deterministic scheduler anchors for this scripted scenario:
 # t1 on/off=838/839, t2=878/879. Both arms use 840/880, beyond those values.
 # Capture the first completed present >= each anchor; compare ACTUAL counters.
-# POP_SMOKE_SIM_REGIONS=1 makes dumpat write entities.json and region binaries.
+# RECOMP_SMOKE_SIM_REGIONS=1 makes dumpat write entities.json and region binaries.
 dumpat gate_c_t1 command_frame>=840
 await command_frame>=841 within 120000
 dumpat gate_c_t2 command_frame>=880

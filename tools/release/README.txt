@@ -18,7 +18,7 @@ Options
   PopRecomp --exe <path to D3DPopTB.exe>   skip the dialog and the saved path
   PopRecomp --version                      print the version and GPU backend
   PopRecomp --probe-layout                 print where resources and the profile live
-  POP_GPU_BACKEND=vulkan|metal             pick the GPU backend (macOS defaults to Metal)
+  RECOMP_GPU_BACKEND=vulkan|metal             pick the GPU backend (macOS defaults to Metal)
 
 Your settings and saves live in
   macOS:   ~/Library/Application Support/PopRecomp

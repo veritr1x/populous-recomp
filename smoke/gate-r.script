@@ -28,7 +28,7 @@
 #
 # THE PINNED TURN TRACE, FOR WHOEVER SETS THE THRESHOLDS
 #
-# Under POP_RECOMP_PIN_CLOCK=1, which is what Gate R runs this script with, the
+# Under RECOMP_PIN_CLOCK=1, which is what Gate R runs this script with, the
 # turn the simulation has reached at each of the four dump points below is,
 # measured from a run that loaded the level:
 #

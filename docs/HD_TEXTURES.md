@@ -44,7 +44,7 @@ build/texture-tools/bin/pip install -r tools/recomp/texture-pack-requirements.tx
 ```
 
 For an explicit development capture, launch the native app or smoke host
-with `POPM_TEXTURE_DUMP_DIR` pointing at a writable directory. The renderer
+with `RECOMP_TEXTURE_DUMP_DIR` pointing at a writable directory. The renderer
 writes each distinct source texture as RGBA PAM plus `textures.tsv`. This
 capture performs disk I/O and is intentionally disabled during normal play.
 Repeat captures for further levels into the same directory to extend coverage.
@@ -117,8 +117,8 @@ an existing pack updates its manifest and preload list.
 ## Runtime loading and memory
 
 The default development directory is `build/texture-pack`; bundled apps use
-their own resource directory. `POPM_TEXTURE_PACK_DIR` overrides either (an
-empty value disables the pack). `POPM_TEXTURE_BUDGET_MB` accepts 32–1024 MiB;
+their own resource directory. `RECOMP_TEXTURE_PACK_DIR` overrides either (an
+empty value disables the pack). `RECOMP_TEXTURE_BUDGET_MB` accepts 32–1024 MiB;
 the default replacement budget is 512 MiB, measured using Metal allocated sizes
 including mipmaps and texture padding. It excludes
 original textures and render targets.

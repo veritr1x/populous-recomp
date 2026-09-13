@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Switches: the kit's environment switches are `RECOMP_<NAME>` now, and this
+  repository's smoke scripts, mods, mod tests and docs use those names
+  (`RECOMP_PIN_CLOCK`, `RECOMP_PROFILE_DIR`, `RECOMP_MODS_DIR`, ...). The
+  `POPM_*` and `POP_*` spellings are no longer read once the `kit/` pin moves to
+  a kit that carries the rename; until then the pinned kit still reads the old
+  names.
 - Thin repository: the runtime, translator, hosts and tools moved to
   [recomp-kit](https://github.com/veritr1x/recomp-kit), the git submodule at `kit/`.
   This repository keeps Populous's config (`game.toml`, `globals.toml`), game

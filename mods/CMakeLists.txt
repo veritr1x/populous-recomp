@@ -26,7 +26,7 @@ add_custom_target(plugins DEPENDS core_mods example_mods smoke_probe mod_fixture
 add_test(NAME test_build_core
   COMMAND ${Python3_EXECUTABLE} -m unittest ${POP_ROOT}/tools/recomp/tests/test_build_core.py
   WORKING_DIRECTORY ${POP_ROOT})
-set_tests_properties(test_build_core PROPERTIES LABELS nogame ENVIRONMENT "POP_CC=${CMAKE_C_COMPILER}")
+set_tests_properties(test_build_core PROPERTIES LABELS nogame ENVIRONMENT "RECOMP_CC=${CMAKE_C_COMPILER}")
 
 # The roots resolver, run from a relocated app-shaped directory by roots_tests.py.
 # The test asserts the player layout under build/; a stub build under

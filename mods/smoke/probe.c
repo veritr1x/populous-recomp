@@ -2,7 +2,7 @@
  *
  * It hooks two real entry symbols, counts how often each is reached, and
  * writes the totals to <profile>/probe.txt from pop_mod_exit. The profile
- * directory comes from POPM_PROFILE_DIR with the same default the runtime
+ * directory comes from RECOMP_PROFILE_DIR with the same default the runtime
  * uses, because the file has to land where the harness is looking.
  *
  * WHY load_objs AND NOT ONLY THE TURN SCHEDULER. main_loop_inner (004ec6f0)
@@ -81,7 +81,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
 PopModStatus pop_mod_exit(void) {
     /* The same default mods_overlay_profile_dir uses, so a run that sets
      * nothing still writes somewhere predictable. */
-    const char *dir = getenv("POPM_PROFILE_DIR");
+    const char *dir = getenv("RECOMP_PROFILE_DIR");
     char path[1024];
     if (!dir || !*dir)
         dir = "build/recomp/profile";

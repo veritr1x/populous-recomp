@@ -29,6 +29,6 @@ diagnostics under `build/gameplay`.
 ## On the iPad
 
 `tools/build.py --target ios --console` installs and streams the console;
-`POPM_TRACE_POINTER=1` in the launch environment (see the kit's
+`RECOMP_TRACE_POINTER=1` in the launch environment (see the kit's
 `tools/build.py --help`) traces pointer placement. `tools/ios_logs.py` pulls
 the app's Documents.

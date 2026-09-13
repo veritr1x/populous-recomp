@@ -77,7 +77,7 @@ end up in the same store, under the same `<mod id>/<key>` name.
 ### Discovery
 
 The loader reads every immediate subdirectory of the mods directory
-(`POPM_MODS_DIR`, default `mods/`) that contains a `mod.toml`. Discovery order
+(`RECOMP_MODS_DIR`, default `mods/`) that contains a `mod.toml`. Discovery order
 is the directory order, which only matters for breaking duplicate-id ties.
 
 ### Built-in capabilities
@@ -529,7 +529,7 @@ PopModStatus pop_mod_init(const PopModApi* api)
 
 PopModStatus pop_mod_exit(void)
 {
-    const char* dir = getenv("POPM_PROFILE_DIR");
+    const char* dir = getenv("RECOMP_PROFILE_DIR");
     char path[512];
     FILE* f;
     snprintf(path, sizeof path, "%s/example-constant.txt",
@@ -638,7 +638,7 @@ run regardless of what a manifest says.
 
 ### What the record contains
 
-Every run writes `build/recomp/mods/run.json`, or the path in `POPM_RUN_RECORD` when that is set, whether or not any mod loaded
+Every run writes `build/recomp/mods/run.json`, or the path in `RECOMP_RUN_RECORD` when that is set, whether or not any mod loaded
 and whether or not mods were enabled: a run with none records an **explicit
 empty set**, so "no mods ran" and "nothing wrote a record" are different things
 in the output. It holds:
@@ -668,7 +668,7 @@ happen to a binary already built, but it is a limitation of this version rather
 than a guarantee, and the field is there so a reader comparing two runs knows
 what was compared.
 
-**`POPM_RUN_RECORD` gives a run a record of its own.** Every host writes the
+**`RECOMP_RUN_RECORD` gives a run a record of its own.** Every host writes the
 same fixed path by default, so two runs at once write the same file and the
 same temporary beside it, and a reader gets whichever finished last. Setting
 this variable per run removes the collision at its source: a run given its own
@@ -686,13 +686,13 @@ each host.
 It is read when the record is written rather than at process start, because a
 host installs its time source from `main`, after the record's own capture has
 already run. An earlier version recorded a `clock_ms` field taken from
-`POP_RECOMP_CLOCK_MS`, which no host, runtime file or tool read: setting it
+`RECOMP_CLOCK_MS`, which no host, runtime file or tool read: setting it
 changed nothing, and two runs matching on it said nothing about their clocks
 agreeing.
 
 **`mods_enabled` reports the environment, not the host's own choice.** Setting
-`POPM_NO_MODS` disables mods, whatever the value: `POPM_NO_MODS=` disables them
-exactly as `POPM_NO_MODS=1` does, because every host asks whether the variable
+`RECOMP_NO_MODS` disables mods, whatever the value: `RECOMP_NO_MODS=` disables them
+exactly as `RECOMP_NO_MODS=1` does, because every host asks whether the variable
 is *present*. A host may also disable mods through its own options, which the
 record cannot see - it is written from a capture taken before any host exists.
 When the distinction matters, read the `mods` array: it is empty for a run in

@@ -5,7 +5,7 @@
 # that exactly five example mods load and that the run record names five, and
 # Gate B compares those five across runs. A sixth mod dropped into that
 # directory fails both, and a diagnostic that breaks the gates is worse than no
-# diagnostic. This directory is loaded only when POPM_MODS_DIR points at it.
+# diagnostic. This directory is loaded only when RECOMP_MODS_DIR points at it.
 set -e
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

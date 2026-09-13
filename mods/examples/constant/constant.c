@@ -44,7 +44,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
 }
 
 PopModStatus pop_mod_exit(void) {
-    const char *dir = getenv("POPM_PROFILE_DIR");
+    const char *dir = getenv("RECOMP_PROFILE_DIR");
     char path[512];
     FILE *f;
     snprintf(path, sizeof path, "%s/example-constant.txt",

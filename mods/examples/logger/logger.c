@@ -20,7 +20,7 @@ static void on_turn(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *in
 }
 
 static void profile_path(char *out, size_t n, const char *leaf) {
-    const char *dir = getenv("POPM_PROFILE_DIR");
+    const char *dir = getenv("RECOMP_PROFILE_DIR");
     snprintf(out, n, "%s/%s", dir && *dir ? dir : "build/recomp/profile", leaf);
 }
 
