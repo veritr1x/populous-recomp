@@ -29,7 +29,7 @@ The settings pages provide these rows:
 | Performance overlay | off, counters, graph | Immediately |
 | Keypad left, Keypad right | shown, hidden | Immediately; the on-screen keypad appears on touch devices |
 | Keypad size | small, medium, large | Immediately |
-| Textures | HD pack, original | Next draws, including terrain detail |
+| Textures | HD pack, original | Next draws, including terrain detail. A pack built without local HD inputs holds only the terrain detail, and the row then reads Terrain detail: on, off |
 | World filtering | original, trilinear, 4x, 8x, 16x anisotropic | Next draws |
 
 The game's **Options → Graphics → Screen Resolution** row is the single

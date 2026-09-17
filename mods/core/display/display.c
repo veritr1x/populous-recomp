@@ -7,11 +7,15 @@
 
 POP_MOD_DECLARE_ABI();
 static const PopModApi *owner;
-static uint32_t width_addr, half_addr, height_addr, origin_addr, hooks[4];
+static uint32_t width_addr, half_addr, height_addr, origin_addr, hooks[5];
+/* The canvas width the last projection reset widened to; 0 while the guest
+ * projection keeps its own width (4:3, Classic, Wide view off). */
+static uint16_t widened_canvas;
 
 static void widen(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv, void *user) {
     uint16_t height, native_width;
     float aspect = api->host_aspect(api);
+    widened_canvas = 0;
     (void)cpu;
     (void)inv;
     (void)user;
@@ -45,6 +49,33 @@ static void widen(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv,
     api->guest_write_u16(api, width_addr, (uint16_t)(value * 2));
     api->guest_write_u16(api, half_addr, value);
     api->set_scene_domain(api, domain, height);
+    widened_canvas = domain;
+}
+
+/* 00523200 draws the bottom-right status line ("Flyby mode", messages)
+ * right-aligned against screen_width (0089c6cf, WORD), the original canvas:
+ * 005234c1 and 0052334c read it. Its glyphs are scene quads, so on a widened
+ * canvas the line stopped at the old 640 edge. For the duration of the call
+ * only, give it the widened width, and give the polygon queue ([005ce0bc])
+ * the matching right clip: 0047dc50 drops a quad whose x is not below
+ * [queue + 0x248052]. Everything else keeps the original values. */
+static void status_line(const PopModApi *api, pop_cpu_v1 *cpu, PopHookInvocation *inv,
+                        void *user) {
+    uint16_t canvas;
+    uint32_t queue, clip;
+    (void)user;
+    if (!widened_canvas || api->guest_read_u16(api, 0x0089c6cf, &canvas) != POP_OK ||
+        widened_canvas <= canvas || api->guest_read_u32(api, 0x005ce0bc, &queue) != POP_OK ||
+        !queue || api->guest_read_u32(api, queue + 0x248052, &clip) != POP_OK ||
+        (int32_t)clip > (int32_t)widened_canvas) {
+        api->call_next(api, inv, cpu);
+        return;
+    }
+    api->guest_write_u16(api, 0x0089c6cf, widened_canvas);
+    api->guest_write_u32(api, queue + 0x248052, widened_canvas);
+    api->call_next(api, inv, cpu);
+    api->guest_write_u32(api, queue + 0x248052, clip);
+    api->guest_write_u16(api, 0x0089c6cf, canvas);
 }
 
 /* Widen AFTER each guest projection reset, before any points are projected.
@@ -239,8 +270,11 @@ PopModStatus pop_mod_init(const PopModApi *api) {
     if (status == POP_OK)
         status = api->hook_install_ex(api, 0x0047d8a0, 0x00517613, sky_polygon, POP_HOOK_WRAP,
                                       POP_HOOK_NO_GAME_VIEW, (void *)(uintptr_t)3, &hooks[3]);
+    if (status == POP_OK)
+        status = api->hook_install_ex(api, 0x00523200, 0, status_line, POP_HOOK_WRAP,
+                                      POP_HOOK_NO_GAME_VIEW, 0, &hooks[4]);
     if (status != POP_OK) {
-        for (unsigned i = 0; i < 4; ++i)
+        for (unsigned i = 0; i < 5; ++i)
             if (hooks[i]) {
                 api->hook_remove(api, hooks[i]);
                 hooks[i] = 0;
@@ -251,7 +285,7 @@ PopModStatus pop_mod_init(const PopModApi *api) {
 
 PopModStatus pop_mod_exit(void) {
     PopModStatus result = POP_OK;
-    for (unsigned i = 0; i != 4; ++i) {
+    for (unsigned i = 0; i != 5; ++i) {
         if (!hooks[i])
             continue;
         PopModStatus status = owner->hook_remove(owner, hooks[i]);
