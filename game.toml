@@ -58,6 +58,14 @@ camera = 0x0074a350
 rows = ["rendering", "wide_view", "window", "resolution", "frame_limit",
         "performance_overlay", "textures", "filtering", "keypad"]
 
+[launcher]
+# The launcher (kit host/launcher/): what it calls the game, the folder names
+# and GOG id it looks for, and the headroom an import leaves free.
+title = "Populous: The Beginning"
+install_names = ["Populous - The Beginning", "Populous The Beginning", "Populous"]
+gog_ids = ["1207659027"]
+min_free_mb = 800
+
 [setup]
 # tools/setup.py: what a supported installation must contain, and the
 # annotation metadata imported into Ghidra before the listings are exported.
