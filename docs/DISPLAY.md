@@ -22,18 +22,22 @@ The settings pages provide these rows:
 | Row | Choices | When applied |
 | --- | --- | --- |
 | Rendering | Enhanced (default), Classic | Next frame boundary; no level reload |
-| UI scale | auto (default), 1, 2, 3, 4 | Immediately; auto is `clamp(floor(drawable_h / guest_h), 1, 4)` |
-| Wide view | on (default), off | Next frame boundary; retains resolution and sky corrections |
+| Wide view | on (default), off | Next frame boundary; retains resolution and sky corrections. Off shows the 4:3 scene boxed on a wider window |
 | Display | windowed, borderless, fullscreen | Host window request |
 | Screen Resolution (Graphics tab) | 640×480, 800×600, 1024×768, 1280×720, 1920×1080, 2560×1440, 3840×2160 (16-bit) | Immediately rebuilds the active game's surfaces; the front end stores the next game's resolution |
 | Frame limit | original, 40, 60, 120 FPS | Immediately |
 | Performance overlay | off, counters, graph | Immediately |
+| Keypad left, Keypad right | shown, hidden | Immediately; the on-screen keypad appears on touch devices |
+| Keypad size | small, medium, large | Immediately |
 | Textures | HD pack, original | Next draws, including terrain detail |
 | World filtering | original, trilinear, 4x, 8x, 16x anisotropic | Next draws |
 
 The game's **Options → Graphics → Screen Resolution** row is the single
 resolution control and offers these seven resolutions in both rendering modes.
-The Display tab contains window mode, frame limit and the performance overlay.
+The Display tab contains window mode, frame limit, the performance overlay and
+the on-screen keypad's rows. game.toml `[settings] rows` names the rows shown;
+UI scale is left out because Populous scales its sidebar with the world, so
+the interface is always sized automatically.
 The frontend stays at 640×480;
 the selection takes effect when the game creates the level's surfaces and is
 saved for the next launch. Quick Defaults retains the original game's presets,

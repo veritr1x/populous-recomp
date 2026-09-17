@@ -51,6 +51,13 @@ mouse_device_right = 0x00d0599c
 # host/smoke_main.cpp: the camera record the smoke script inspects
 camera = 0x0074a350
 
+[settings]
+# The F10 page and the native Options tabs show these rows. UI scale is left
+# out: Populous scales its sidebar with the world, so the row only resized the
+# pointer.
+rows = ["rendering", "wide_view", "window", "resolution", "frame_limit",
+        "performance_overlay", "textures", "filtering", "keypad"]
+
 [setup]
 # tools/setup.py: what a supported installation must contain, and the
 # annotation metadata imported into Ghidra before the listings are exported.
