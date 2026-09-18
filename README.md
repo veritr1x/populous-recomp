@@ -55,10 +55,30 @@ Touch: tap = left click, long press then lift = right click (unselect), long
 press then drag = wheel-button drag (scroll; rotate when it starts near the
 bottom), a hold on a screen edge scrolls, drag = left drag, two-finger drag
 pans, two-finger tap = right click, three-finger tap = F10 (Options), four-finger
-tap toggles the system keyboard. An on-screen split keyboard sits in the
-bottom corners: HIDE/KEYS tabs per half, Shift/Ctrl/Alt hold to chord, tap
-to latch, double tap to lock; size and visibility are on the F10 page. `tools/ios_logs.py --device <id>` pulls the app's Documents (saves)
-back to the Mac.
+tap toggles the system keyboard. `tools/ios_logs.py --device <id>` pulls the
+app's Documents (saves) back to the Mac.
+
+An on-screen gamepad is what a fresh profile shows, laid out to keep the
+game's own interface strip down the left edge clear (`layouts/pad.tablet.json`;
+the KEYS tab swaps in the split keyboard, and the F10 page's Controls rows
+pick the layout, its size, opacity and haptics, or open the editor). A
+physical controller feeds the same pad. The bindings come from the game's
+Keycard:
+
+| Control | Does |
+| --- | --- |
+| Left stick | Moves the pointer |
+| Right stick | Scrolls forwards/backwards, rotates left/right (the cursor keys) |
+| ✕ / ○ | Left click (command, cast) / right click (query, spell toggle) |
+| □ / △ | Space: rotate a building Plan / H: zoom to the Shaman |
+| L1 / R1 | Hold Shift / hold Ctrl for the Keycard's modified clicks |
+| L2 / R2 | Zoom out / zoom in |
+| SELECT / START | Return: World View / Esc: the in-game menu |
+| PS | The native Options page |
+| Key strip | Command groups 1-6, camera points Z X C V, P pause, F1 encyclopaedia |
+
+`[controls]` in `game.toml` holds the whole mapping and says why each
+binding is there.
 
 ## Check a change
 

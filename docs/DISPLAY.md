@@ -27,15 +27,18 @@ The settings pages provide these rows:
 | Screen Resolution (Graphics tab) | 640×480, 800×600, 1024×768, 1280×720, 1920×1080, 2560×1440, 3840×2160 (16-bit) | Immediately rebuilds the active game's surfaces; the front end stores the next game's resolution |
 | Frame limit | original, 40, 60, 120 FPS | Immediately |
 | Performance overlay | off, counters, graph | Immediately |
-| Keypad left, Keypad right | shown, hidden | Immediately; the on-screen keypad appears on touch devices |
-| Keypad size | small, medium, large | Immediately |
+| Controls | pad (default), keys, pad+keys, hidden | Immediately; the on-screen controls appear on touch devices |
+| Controls size | small, medium, large | Immediately |
+| Controls opacity | 20-100% | Immediately |
+| Button haptics | on, off | Immediately |
+| Edit controls | opens the on-device layout editor | Immediately |
 | Textures | HD pack, original | Next draws, including terrain detail. A pack built without local HD inputs holds only the terrain detail, and the row then reads Terrain detail: on, off |
 | World filtering | original, trilinear, 4x, 8x, 16x anisotropic | Next draws |
 
 The game's **Options → Graphics → Screen Resolution** row is the single
 resolution control and offers these seven resolutions in both rendering modes.
 The Display tab contains window mode, frame limit, the performance overlay and
-the on-screen keypad's rows. game.toml `[settings] rows` names the rows shown;
+the on-screen controls' rows. game.toml `[settings] rows` names the rows shown;
 UI scale is left out because Populous scales its sidebar with the world, so
 the interface is always sized automatically.
 The frontend stays at 640×480;

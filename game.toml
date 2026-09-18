@@ -54,9 +54,85 @@ camera = 0x0074a350
 [settings]
 # The F10 page and the native Options tabs show these rows. UI scale is left
 # out: Populous scales its sidebar with the world, so the row only resized the
-# pointer.
+# pointer. "controls" is the one entry covering the on-screen control rows
+# (it was spelled "keypad" before the kit's touch controls landed).
 rows = ["rendering", "wide_view", "window", "resolution", "frame_limit",
-        "performance_overlay", "textures", "filtering", "keypad"]
+        "performance_overlay", "textures", "filtering", "controls"]
+
+[controls]
+# Populous is played with the mouse: the pointer commands followers, casts
+# papal magic and clicks the sidebar, so the pad is "mapped" onto keys and
+# mouse. The game reads no joystick - nothing in the listings touches
+# DirectInput's joystick interfaces - so "native" would feed a device it
+# never polls.
+#
+# default_layout is the pad ALONE, not "pad+keys", which is the kit's usual
+# choice. The game's entire interface is one full-height strip down the LEFT
+# edge of the image, about 16% of its width: the round minimap at the top,
+# the Buildings/Spells/Followers panel tabs under it, then the spell and
+# follower grid, and the current-spell slot at the bottom (see the composite
+# dumps under build/gameplay). The kit's tablet "pad+keys" puts a 268pt
+# keyboard half in each bottom corner (eight 30pt columns and their gaps),
+# so its left half buries that strip from the panel tabs down - exactly the
+# controls a Populous player clicks every few seconds. The shipped
+# layouts/pad.tablet.json keeps the pad itself clear of the strip, and the
+# layout's own KEYS tab is one tap away when a key is wanted, so nothing is
+# lost.
+default_layout = "pad"
+pad = "mapped"
+
+[controls.mapped]
+# Every binding here is a key off the game's own Keycard (the "Quick
+# Reference Card.pdf" that ships with the GOG release), preferred over a
+# generic one.
+#
+# The pointer goes on the LEFT stick, the reverse of the kit default,
+# because the face diamond is in the bottom-right corner: aiming and
+# clicking at the same time needs the two thumbs on opposite sides.
+left_stick = "cursor"
+# The Keycard's camera keys: UP/DOWN scroll forwards and backwards,
+# LEFT/RIGHT rotate. "arrows" holds them while the stick is deflected,
+# which is what a held cursor key does in the game.
+right_stick = "arrows"
+# The same four keys for a physical controller's dpad. The on-screen pad in
+# layouts/pad.tablet.json has no dpad - it would only duplicate the right
+# stick and there is no room for it beside the sidebar - but a real pad has
+# one in hardware, so the binding is worth keeping.
+dpad = "arrows"
+cursor_speed = 900
+# Left click: select a follower, order it, cast the selected spell. The one
+# gesture the game cannot be played without.
+cross = "mouse_left"
+# Right click on an object is the Keycard's Query, and on a spell icon it
+# toggles that spell.
+circle = "mouse_right"
+# SPACE BAR: rotate a building Plan before placing it, and zoom to a Guard
+# Tower that is sounding an alarm.
+square = "key:Space"
+# H: zoom to the Shaman. The most-used navigation key in the game - she is
+# the unit everything is built around and the one the camera loses.
+triangle = "key:H"
+# The two click modifiers. Touch alone cannot hold a modifier while
+# clicking, so without these a tablet player loses "select all Followers",
+# multi-placed Plans, camera points, spell toggles (SHIFT) and multiple or
+# forced commands and autocast (CTRL).
+l1 = "key:LShift"
+r1 = "key:LCtrl"
+# MINUS/EQUALS: zoom out and in. The only camera control not on a stick.
+l2 = "key:Minus"
+r2 = "key:Equals"
+# RETURN: World View, the whole-planet overview the level is navigated from.
+select = "key:Return"
+# ESC: the in-game menu.
+start = "key:Escape"
+# The native Options page. A physical controller has no F10 key and cannot
+# reach the layout's own F10 button, so this is its way in.
+ps = "action:settings"
+# Not on the on-screen pad (the kit draws no L3/R3); these are for a
+# physical controller. P pauses; ALT is the Keycard's third click modifier
+# (autoselect for one command, zoom to a command group).
+l3 = "key:P"
+r3 = "key:LAlt"
 
 [launcher]
 # The launcher (kit host/launcher/): what it calls the game, the folder names

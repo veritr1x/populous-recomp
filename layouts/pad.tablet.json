@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "name": "pad",
+  "opacity": 0.7,
+  "groups": [
+    {
+      "id": "sticks",
+      "controls": [
+        {"kind": "stick", "stick": "left", "mode": "floating", "anchor": "bottom-left",
+         "x": 216, "y": 20, "radius": 88},
+        {"kind": "stick", "stick": "right", "mode": "floating", "anchor": "bottom-right",
+         "x": 248, "y": 20, "radius": 88}
+      ]
+    },
+    {
+      "id": "buttons",
+      "controls": [
+        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 92, "y": 164, "size": 64},
+        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 24, "y": 96, "size": 64},
+        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 92, "y": 28, "size": 64},
+        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 160, "y": 96, "size": 64},
+        {"kind": "button", "button": "l1", "anchor": "top-left", "x": 216, "y": 20, "w": 110, "h": 44},
+        {"kind": "button", "button": "l2", "anchor": "top-left", "x": 216, "y": 72, "w": 110, "h": 44},
+        {"kind": "button", "button": "r1", "anchor": "top-right", "x": 24, "y": 20, "w": 110, "h": 44},
+        {"kind": "button", "button": "r2", "anchor": "top-right", "x": 24, "y": 72, "w": 110, "h": 44},
+        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -70, "y": 16, "w": 70, "h": 30},
+        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 12, "size": 40},
+        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 70, "y": 16, "w": 70, "h": 30}
+      ]
+    },
+    {
+      "id": "hotkeys",
+      "grid": {"cols": 6, "rows": 2, "key": 34, "gap": 4},
+      "anchor": "top-right",
+      "x": 24,
+      "y": 150,
+      "controls": [
+        {"kind": "key", "scancode": "1", "col": 0, "row": 0},
+        {"kind": "key", "scancode": "2", "col": 1, "row": 0},
+        {"kind": "key", "scancode": "3", "col": 2, "row": 0},
+        {"kind": "key", "scancode": "4", "col": 3, "row": 0},
+        {"kind": "key", "scancode": "5", "col": 4, "row": 0},
+        {"kind": "key", "scancode": "6", "col": 5, "row": 0},
+        {"kind": "key", "scancode": "Z", "col": 0, "row": 1},
+        {"kind": "key", "scancode": "X", "col": 1, "row": 1},
+        {"kind": "key", "scancode": "C", "col": 2, "row": 1},
+        {"kind": "key", "scancode": "V", "col": 3, "row": 1},
+        {"kind": "key", "scancode": "P", "col": 4, "row": 1},
+        {"kind": "key", "scancode": "F1", "col": 5, "row": 1}
+      ]
+    },
+    {
+      "id": "tabs",
+      "controls": [
+        {"kind": "toggle", "target": "next", "label": "KEYS", "anchor": "top-center",
+         "y": 8, "w": 72, "h": 28},
+        {"kind": "action", "action": "settings", "label": "F10", "anchor": "top-center",
+         "x": 72, "y": 8, "w": 56, "h": 28},
+        {"kind": "toggle", "target": "hotkeys", "label": "HIDE", "label_off": "HOT",
+         "stack_on": "hotkeys", "anchor": "top-right", "x": 24, "y": 150, "w": 64, "h": 24}
+      ]
+    }
+  ]
+}

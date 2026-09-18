@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Controls: a fresh profile shows the kit's on-screen gamepad, mapped onto
+  Populous's own keys off the game's Keycard - the pointer on the left stick,
+  the cursor keys (scroll and rotate) on the right, left/right click on ✕/○,
+  Space and H on □/△, Shift and Ctrl on the shoulders, zoom on the triggers,
+  World View and the menu on SELECT/START. A physical controller feeds the
+  same pad. `layouts/pad.tablet.json` keeps every control clear of the game's
+  interface strip down the left edge and adds a key strip for the command
+  groups, the camera points, pause and the encyclopaedia. The F10 and native
+  Options Display rows are now Controls, Controls size, Controls opacity,
+  Button haptics and Edit controls, replacing the three keypad rows.
+
 - Switches: the kit's environment switches are `RECOMP_<NAME>` now, and this
   repository's smoke scripts, mods, mod tests and docs use those names
   (`RECOMP_PIN_CLOCK`, `RECOMP_PROFILE_DIR`, `RECOMP_MODS_DIR`, ...). The
