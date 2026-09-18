@@ -33,6 +33,16 @@ volatile_reads = [
   0x47a76d, 0x47a8f5,                      # palette animation
   0x50f45c,                                # effect sprite phase
 ]
+# Two entries the translator no longer finds on its own since kit e23246a
+# ("bound speculative bodies at candidate entries"), named here so the image
+# boots:
+# - 0x0052cd40 is only ever stored into an object field (at 0x0052cc7f), and
+#   the data-pointer scan now rejects it. Without it a later call goes through
+#   a null vtable slot in clear_surfaces_and_clipper.
+# - 0x00565874 is the C runtime's __except_handler3, pushed as a handler in 12
+#   frames but not 16-byte aligned, so no scan picks it up. Untranslated, the
+#   call to it returns 0, which the runtime reads as "resume at the fault".
+entry_points = [0x0052cd40, 0x00565874]
 
 [hooks]
 # runtime/kernel32.cpp native_frame_clock: the two draw-loop waits in the
