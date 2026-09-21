@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Refresh the fullscreen DirectDraw window after movie mode changes through
+  the updated shared runtime.
+
 - Update the shared runtime with iPad touch-coordinate, stick-motion and frame-color
   fixes, plus regression coverage for simultaneous keys and mapped pad controls.
 

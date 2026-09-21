@@ -51,3 +51,14 @@ Ignored evidence: `build/ipad-update-config-tests.log`,
 `build/ipad-update-gameplay.log`, `build/ipad-update-gameplay-fixed.log`,
 `build/gameplay/options-4mjvx6xh/`, `build/ipad-update-ios-final-build.log`,
 `build/ipad-update-install.json`, and `build/ipad-update-device.png`.
+
+
+The final pin is `bbdc3b0`, which refreshes exclusive DirectDraw windows on movie
+mode switches. All five configuration tests passed. Native smoke and signed iOS
+builds succeeded, and the iPad app was updated in place again. A fresh isolated
+profile running the integration script at 640x480 reached the level, rendered
+terrain and units, opened settings and exited successfully. The composite level
+image was visually inspected. This does not resolve the separate full gameplay
+suite's terrain-detail and resolution assertions above.
+Evidence: `build/display-mode-smoke/host.log`, `build/display-mode-smoke/level.png`,
+`build/display-mode-ios-build.log` and `build/display-mode-install.json`.
