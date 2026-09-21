@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Update the shared runtime with iPad touch-coordinate, stick-motion and frame-color
+  fixes, plus regression coverage for simultaneous keys and mapped pad controls.
+
+- Keep the tablet keyboard and KEYS tabs above the system gesture area;
+  preserve the gamepad when switching from a collapsed keyboard.
+
+- Hide the on-screen keyboard HIDE/KEYS tabs when a hardware keyboard or
+  controller auto-hides the controls; retain the layout switch and saved visibility.
+
 - Controls: a fresh profile shows the kit's on-screen gamepad, mapped onto
   Populous's own keys off the game's Keycard - the pointer on the left stick,
   the cursor keys (scroll and rotate) on the right, left/right click on ✕/○,

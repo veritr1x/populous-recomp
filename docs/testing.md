@@ -32,3 +32,22 @@ diagnostics under `build/gameplay`.
 `RECOMP_TRACE_POINTER=1` in the launch environment (see the kit's
 `tools/build.py --help`) traces pointer placement. `tools/ios_logs.py` pulls
 the app's Documents.
+
+
+## iPad runtime update, 2026-09-21
+
+Kit `9e97515` includes the merged Metal Fatigue runtime and iPad input/display
+fixes. Five game configuration tests passed. The translated smoke host and
+signed iOS app built, and the updated app was installed in place on the iPad;
+a screenshot confirmed its main menu and on-screen controls.
+
+The full options/gameplay script did not pass: unit selection, movement and
+state changes were observed, but the terrain-detail counter stayed at zero and
+the resolution sequence stayed at 640x480. Initializing the smoke host's native
+settings handler restored scripted F10 access, without fixing those remaining
+checks. Do not treat this run as a full gameplay/options pass.
+
+Ignored evidence: `build/ipad-update-config-tests.log`,
+`build/ipad-update-gameplay.log`, `build/ipad-update-gameplay-fixed.log`,
+`build/gameplay/options-4mjvx6xh/`, `build/ipad-update-ios-final-build.log`,
+`build/ipad-update-install.json`, and `build/ipad-update-device.png`.
