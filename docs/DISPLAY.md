@@ -59,7 +59,7 @@ Camera updates do not compound the scale or rewrite saved zoom preferences.
 Terrain projection and picking use the same camera value. Enhanced preserves a
 selected widescreen projection when the host window has a narrower aspect ratio.
 
-The committed [probe results](../tools/recomp/baseline/classic-modes.json) cover
+The committed [probe results](../kit/tools/recomp/baseline/classic-modes.json) cover
 the seven shipping modes on the recorded machine, with native compatibility
 hooks enabled and isolated settings. `sh tools/recomp/mode_probe.sh` probes the full
 24-candidate matrix; `tools/recomp/mode_probe.sh --mode 3840x2160x16` probes a
