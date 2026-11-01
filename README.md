@@ -27,7 +27,7 @@ not included. See [NOTICE](NOTICE) for ownership and dependency credits.
 git clone --recurse-submodules https://github.com/veritr1x/populous-recomp.git
 cd populous-recomp
 python3 -m venv .venv
-.venv/bin/python -m pip install -r kit/requirements-dev.txt
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r kit/requirements.lock
 .venv/bin/python tools/setup.py --install "/path/to/your/Populous" --ghidra-home /path/to/ghidra_12.1.3_PUBLIC
 .venv/bin/python tools/build.py --regenerate
 open build/PopRecomp.app

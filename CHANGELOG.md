@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pin the shared kit to `a18ccaf`, including the reviewed runtime, renderer
+  and translator fixes and bounded GetDIBits conversion. Use the hashed
+  contributor dependency lock in setup and CI.
+
 - Refresh the fullscreen DirectDraw window after movie mode changes through
   the updated shared runtime.
 

@@ -62,3 +62,17 @@ image was visually inspected. This does not resolve the separate full gameplay
 suite's terrain-detail and resolution assertions above.
 Evidence: `build/display-mode-smoke/host.log`, `build/display-mode-smoke/level.png`,
 `build/display-mode-ios-build.log` and `build/display-mode-install.json`.
+
+
+## Shared kit validation, 2026-11-01
+
+Pin `a18ccafa1e8c98002b2d3f7347b64fa655ebb018` is the merged recomp-kit PR #46 source.
+Its tree matches the reviewed `b1bdfd6` head: all 14 platform CI checks and
+44 game-independent Windows native suites pass. The shared portable suite
+passes 651 tests with four platform skips.
+
+Windows x64/Vulkan: all 15 mission assertions pass, including selection, 1,144.87 world units of movement and state changes (2,376 frames).
+
+These are bounded checks using hash-matched inputs and isolated profiles.
+Movies were disabled; full campaigns, performance and new physical-device
+validation are not established. Original inputs and player saves are preserved.
