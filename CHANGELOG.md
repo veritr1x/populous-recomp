@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Publish `.recomp.json` project metadata for discovery tools, with a
+  contributor reminder to keep its status aligned with the README.
+
 - Pin the shared kit to `a18ccaf`, including the reviewed runtime, renderer
   and translator fixes and bounded GetDIBits conversion. Use the hashed
   contributor dependency lock in setup and CI.

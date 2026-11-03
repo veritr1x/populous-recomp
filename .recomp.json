@@ -1,0 +1,9 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Populous: The Beginning",
+  "system": "PC (Windows)",
+  "type": "recomp",
+  "toolchain": "recomp-kit",
+  "status": "released",
+  "notes": "Public prerelease builds are available; original game files are required."
+}
