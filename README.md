@@ -1,5 +1,7 @@
 # Populous Recomp
 
+[Browser setup and streaming](docs/web.md)
+
 [Build & contribute](CONTRIBUTING.md) · [Display settings](docs/DISPLAY.md) ·
 [HD textures](docs/HD_TEXTURES.md) · [Modding](docs/MODDING.md) ·
 [Testing](docs/testing.md) · [Changelog](CHANGELOG.md)

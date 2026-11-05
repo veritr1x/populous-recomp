@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Update recomp-kit to `1cbd81c` for optional browser asset streaming, the
+  corrected bounded fetch backend and fixed-function WebGPU shader fixes.
+  Preserve folder import and OPFS profiles; document browser validation.
+
 - Publish `.recomp.json` project metadata for discovery tools, with a
   contributor reminder to keep its status aligned with the README.
 
