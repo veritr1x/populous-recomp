@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pin kit `9dff77f` for browser GPU readback and preserved transfer
+  regions; resolve the previous browser rendering/startup blocker and record
+  first-level checks and remaining performance limits in `docs/web.md`.
+
 - Update recomp-kit to `1cbd81c` for optional browser asset streaming, the
   corrected bounded fetch backend and fixed-function WebGPU shader fixes.
   Preserve folder import and OPFS profiles; document browser validation.
