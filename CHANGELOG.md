@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Update recomp-kit to `92c01c7`: faster x87 translation, accurate browser
+  sleeps for steadier frame pacing, typed capitals with Shift, Winsock
+  reported as network-down, crash reports in the web player and HTTPS
+  serving for LAN play. The translation is regenerated.
+
 - Pin kit `9dff77f` for browser GPU readback and preserved transfer
   regions; resolve the previous browser rendering/startup blocker and record
   first-level checks and remaining performance limits in `docs/web.md`.

@@ -72,3 +72,14 @@ Portable project tests pass (5 tests). Private screenshots and diagnostics
 remain under ignored build directories. Historical native/device results
 were not all rerun for this browser update. The 64 MiB streaming bound applies
 to the download cache, not total browser memory.
+
+## Kit refresh to 92c01c7
+
+Updated to recomp-kit `92c01c7814c79b9206c45200c888299eca43b7a6`. The
+translation was regenerated and the real Emscripten 6.0.11 build passes.
+The project tests pass; the kit's portable suite shows only the same four
+Windows environment failures as the previous pin (symlink privilege, no
+native compiler, Linux packaging). On Windows/Chromium 145 with hardware
+WebGPU, a fresh streamed profile reached the main menu, and its Multiplayer screen reports no services, matching a build of the
+previous kit pin run the same way. Deeper play was not rechecked here:
+synthetic CDP mouse moves do not move the game cursor in either build.
