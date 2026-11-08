@@ -73,9 +73,11 @@ remain under ignored build directories. Historical native/device results
 were not all rerun for this browser update. The 64 MiB streaming bound applies
 to the download cache, not total browser memory.
 
-## Kit refresh to 92c01c7
+## Kit refresh to d7b33b1
 
-Updated to recomp-kit `92c01c7814c79b9206c45200c888299eca43b7a6`. The
+Updated to recomp-kit `d7b33b12b2ab1ea30c831758f3af424566206959`; the checks below
+ran on `92c01c7`, and `d7b33b1` adds only fixes for other games' larger guest
+arenas and SEH-and-x87 functions, which leave this build unchanged. The
 translation was regenerated and the real Emscripten 6.0.11 build passes.
 The project tests pass; the kit's portable suite shows only the same four
 Windows environment failures as the previous pin (symlink privilege, no

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Update recomp-kit to `92c01c7`: faster x87 translation, accurate browser
+- Update recomp-kit to `d7b33b1`: faster x87 translation, accurate browser
   sleeps for steadier frame pacing, typed capitals with Shift, Winsock
   reported as network-down, crash reports in the web player and HTTPS
   serving for LAN play. The translation is regenerated.
